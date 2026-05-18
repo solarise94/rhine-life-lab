@@ -14,6 +14,10 @@ interface ChatMessage {
   proposal?: Proposal;
 }
 
+interface ProposalMutationResponse {
+  proposal?: Proposal;
+}
+
 export function ManagerChatPanel({
   projectId,
   proposals,
@@ -27,7 +31,7 @@ export function ManagerChatPanel({
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: "manager",
-      content: "你通过自然语言描述意图，我会先给 proposal，再由后端校验和应用 patch。",
+      content: "可以先正常聊天和查看上下文；当你明确要求调整蓝图时，我会通过后端工具生成 proposal，再校验和应用 patch。",
     },
   ]);
   const [busy, setBusy] = useState(false);
@@ -35,7 +39,7 @@ export function ManagerChatPanel({
   const [editingProposalId, setEditingProposalId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const sendChatMutation = useMutation({
-    mutationFn: (message: string) => api.sendChat(projectId, message),
+    mutationFn: (message: string) => sendChatViaJob(message),
   });
   const acceptProposalMutation = useMutation({
     mutationFn: (proposalId: string) => api.acceptProposal(projectId, proposalId),
@@ -72,11 +76,35 @@ export function ManagerChatPanel({
     }
   }
 
+  async function sendChatViaJob(message: string) {
+    const job = await api.createChatJob(projectId, message);
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (Date.now() < deadline) {
+      const status = await api.getChatJob(projectId, job.job_id);
+      if (status.status === "succeeded" && status.response) {
+        return status.response;
+      }
+      if (status.status === "failed") {
+        throw new Error(status.error || "Chat job failed.");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+    throw new Error("Chat job timed out after 10 minutes.");
+  }
+
   async function accept(proposalId: string) {
     setBusy(true);
     setError(null);
     try {
-      await acceptProposalMutation.mutateAsync(proposalId);
+      const response = (await acceptProposalMutation.mutateAsync(proposalId)) as ProposalMutationResponse;
+      const acceptedProposal = response.proposal;
+      if (acceptedProposal) {
+        setMessages((prev) =>
+          prev.map((message) =>
+            message.proposal?.proposal_id === proposalId ? { ...message, proposal: acceptedProposal } : message,
+          ),
+        );
+      }
       await onRefresh();
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Accept failed.");
@@ -89,7 +117,15 @@ export function ManagerChatPanel({
     setBusy(true);
     setError(null);
     try {
-      await rejectProposalMutation.mutateAsync(proposalId);
+      const response = (await rejectProposalMutation.mutateAsync(proposalId)) as ProposalMutationResponse;
+      const rejectedProposal = response.proposal;
+      if (rejectedProposal) {
+        setMessages((prev) =>
+          prev.map((message) =>
+            message.proposal?.proposal_id === proposalId ? { ...message, proposal: rejectedProposal } : message,
+          ),
+        );
+      }
       await onRefresh();
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Reject failed.");
@@ -124,6 +160,9 @@ export function ManagerChatPanel({
 
   function renderProposalControls(proposal: Proposal) {
     const editing = editingProposalId === proposal.proposal_id;
+    if (proposal.status !== "proposed") {
+      return <div className="muted">Proposal 已{proposal.status === "accepted" ? "接受" : proposal.status === "rejected" ? "拒绝" : `更新为 ${proposal.status}`}。</div>;
+    }
     return (
       <div className="stack">
         <div className="proposal-actions">
@@ -180,7 +219,7 @@ export function ManagerChatPanel({
     <section className="panel">
       <div className="panel-header">
         <h3>Manager AI Chat</h3>
-        <span>{busy ? "Syncing" : "Intent-first"}</span>
+        <span>{busy ? "Syncing" : "Chat + tools"}</span>
       </div>
       <div className="panel-body stack">
         {error ? <div className="chat-message">{error}</div> : null}
@@ -213,11 +252,11 @@ export function ManagerChatPanel({
           <textarea
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
-            placeholder="例如：帮我重跑差异分析并收紧 padj 阈值到 0.01"
+            placeholder="例如：现在有哪些模块？或：请新增一个 GO 富集分析模块并生成 card"
           />
           <button className="btn primary" onClick={submit} disabled={busy}>
             <Send size={16} />
-            发送意图
+            发送
           </button>
         </div>
       </div>

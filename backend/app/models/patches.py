@@ -9,6 +9,7 @@ PatchType = Literal[
     "add_module",
     "add_module_group",
     "update_card",
+    "delete_module",
     "review_run",
     "semantic_rollback",
 ]

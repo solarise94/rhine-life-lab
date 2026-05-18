@@ -1,6 +1,7 @@
 from functools import lru_cache
 
 from app.services.manager_service import ManagerService
+from app.services.chat_job_service import ChatJobService
 from app.services.manifest_service import ManifestService
 from app.services.patch_apply import PatchApplyService
 from app.services.patch_validator import PatchValidator
@@ -31,6 +32,11 @@ def get_patch_apply_service() -> PatchApplyService:
 @lru_cache
 def get_manager_service() -> ManagerService:
     return ManagerService(get_project_service())
+
+
+@lru_cache
+def get_chat_job_service() -> ChatJobService:
+    return ChatJobService()
 
 
 @lru_cache

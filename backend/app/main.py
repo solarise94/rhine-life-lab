@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import advanced, chat, projects, report, results, runs
+from app.api import advanced, chat, manager_tools, projects, report, results, runs
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -17,6 +17,7 @@ app.add_middleware(
 
 app.include_router(projects.router, prefix=settings.api_prefix)
 app.include_router(chat.router, prefix=settings.api_prefix)
+app.include_router(manager_tools.router, prefix=settings.api_prefix)
 app.include_router(results.router, prefix=settings.api_prefix)
 app.include_router(report.router, prefix=settings.api_prefix)
 app.include_router(runs.router, prefix=settings.api_prefix)
@@ -26,4 +27,3 @@ app.include_router(advanced.router, prefix=settings.api_prefix)
 @app.get("/healthz")
 def healthz() -> dict:
     return {"status": "ok"}
-

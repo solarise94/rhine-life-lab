@@ -68,6 +68,11 @@ class PatchApplyService:
                     elif op.op == "update_module_summary":
                         module = next(item for item in graph.modules if item.module_id == payload["module_id"])
                         module.summary = payload["summary"]
+                    elif op.op == "update_module":
+                        module = next(item for item in graph.modules if item.module_id == payload["module_id"])
+                        for key in ("title", "status", "summary", "depends_on_assets", "expected_outputs", "linked_cards"):
+                            if key in payload:
+                                setattr(module, key, payload[key])
                     elif op.op == "add_submodule":
                         module = next(item for item in graph.modules if item.module_id == payload["parent_module_id"])
                         module.submodules.append(
@@ -77,6 +82,9 @@ class PatchApplyService:
                                 status=payload.get("status", "planned"),
                             )
                         )
+                    elif op.op == "remove_submodule":
+                        module = next(item for item in graph.modules if item.module_id == payload["parent_module_id"])
+                        module.submodules = [item for item in module.submodules if item.module_id != payload["module_id"]]
                     elif op.op == "create_card":
                         cards.append(Card.model_validate(payload))
                     elif op.op == "update_card":

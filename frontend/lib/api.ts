@@ -49,6 +49,20 @@ export const api = {
       },
     );
   },
+  createChatJob(projectId: string, message: string) {
+    return request<{ job_id: string; status: string }>(`/projects/${projectId}/chat-jobs`, {
+      method: "POST",
+      body: JSON.stringify({ message, context: {} }),
+    });
+  },
+  getChatJob(projectId: string, jobId: string) {
+    return request<{
+      job_id: string;
+      status: "queued" | "running" | "succeeded" | "failed";
+      response: { message: string; proposal?: unknown; actions: Array<{ label: string; action: string }> } | null;
+      error: string | null;
+    }>(`/projects/${projectId}/chat-jobs/${jobId}`);
+  },
   acceptProposal(projectId: string, proposalId: string) {
     return request(`/projects/${projectId}/proposals/${proposalId}/accept`, { method: "POST" });
   },

@@ -12,10 +12,12 @@ from app.services.project_service import ProjectService
 
 ALLOWLIST = {
     "create_module",
+    "update_module",
     "update_module_summary",
     "set_module_status",
     "create_module_group",
     "add_submodule",
+    "remove_submodule",
     "create_card",
     "update_card",
     "set_card_status",
@@ -34,7 +36,7 @@ ALLOWLIST = {
     "semantic_rollback",
 }
 
-CARD_READONLY_FIELDS = {"card_id", "linked_runs", "technical_refs"}
+CARD_READONLY_FIELDS = {"linked_runs", "technical_refs"}
 ASSET_READONLY_FIELDS = {"asset_id", "artifact_id"}
 
 
@@ -91,6 +93,10 @@ class PatchValidator:
                 readonly = CARD_READONLY_FIELDS.intersection(payload)
                 if readonly:
                     errors.append(f"update_card modifies readonly fields: {', '.join(sorted(readonly))}")
+            elif op.op == "update_module":
+                module_id = payload.get("module_id")
+                if module_id not in module_ids:
+                    errors.append(f"Module missing: {module_id}")
             elif op.op == "add_submodule":
                 self._validate_required_fields(op.op, payload, ["parent_module_id", "module_id", "title"], errors)
                 parent_id = payload.get("parent_module_id")
@@ -103,6 +109,14 @@ class PatchValidator:
                 if self._has_cycle(module_child_edges):
                     errors.append(f"Module dependency cycle detected via {parent_id} -> {child_id}")
                     module_child_edges[parent_id].remove(child_id)
+            elif op.op == "remove_submodule":
+                self._validate_required_fields(op.op, payload, ["parent_module_id", "module_id"], errors)
+                parent_id = payload.get("parent_module_id")
+                child_id = payload.get("module_id")
+                if parent_id not in module_ids:
+                    errors.append(f"Parent module missing: {parent_id}")
+                elif child_id not in module_child_edges.get(parent_id, set()):
+                    errors.append(f"Submodule edge missing: {parent_id} -> {child_id}")
             elif op.op == "create_asset":
                 try:
                     Asset.model_validate(payload)

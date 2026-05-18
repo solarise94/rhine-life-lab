@@ -1,0 +1,17 @@
+{
+  "name": "blueprint-re-manager-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.75.3",
+    "@earendil-works/pi-ai": "^0.75.3",
+    "typebox": "^1.1.24"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

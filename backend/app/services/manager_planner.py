@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import Literal
+from http import client
+from typing import Any, Literal
 from urllib import error, request
 
 from pydantic import BaseModel, Field, ValidationError
@@ -15,8 +16,10 @@ SUPPORTED_OPS = [
     "create_module",
     "create_module_group",
     "add_submodule",
+    "remove_submodule",
     "create_card",
     "update_card",
+    "update_module",
     "set_card_status",
     "set_module_status",
     "create_asset",
@@ -30,6 +33,11 @@ SUPPORTED_OPS = [
     "semantic_rollback",
 ]
 
+LEGACY_TOOL_MODEL_ALIASES = {
+    "deepseek-chat": "deepseek-v4-flash",
+    "deepseek-reasoner": "deepseek-v4-pro",
+}
+
 SYSTEM_PROMPT = """You are the Manager AI for Blueprint RE, a bioinformatics workflow manager.
 
 Your job is to read the user's intent plus the current project graph, then return exactly one structured manager decision through the provided tool.
@@ -38,11 +46,65 @@ Rules:
 - Use only the tool `submit_manager_plan`.
 - `response_type="proposal"` when the user asks to add, change, rerun, review, rollback, or otherwise mutate project state.
 - `response_type="message"` only when no graph mutation should happen yet.
-- When proposing graph mutations, use only supported ops from the provided context.
+- Never output free text outside the tool call.
+- Keep summaries concrete and user-facing.
+
+You must follow the patch contract strictly:
+- Use only `supported_patch_types` and `supported_ops` from the provided context.
 - Reuse existing ids from context when referring to existing cards/modules/assets/runs.
 - For new ids, use stable snake_case prefixes like `module_`, `module_group_`, `card_`, `asset_`, `claim_`, `run_`.
-- Keep summaries concrete and user-facing.
-- Never output free text outside the tool call.
+- Do not invent fields that are not listed in the op contract.
+- Do not use `update_card` to modify a module. Cards and modules are different objects.
+- Do not use module ids where a card id is required, or card ids where a module id is required.
+
+Before you return the tool call, do an internal self-check:
+1. Verify every op uses the correct target object type.
+2. Verify every op includes all required fields.
+3. Verify referenced existing ids actually appear in the provided context.
+4. If an op would fail validation, rewrite it before returning.
+5. If the user intent cannot yet be expressed as a valid patch, return `response_type="message"` and explain what is missing.
+
+Use these op contracts:
+- `create_module`: requires `module_id`, `title`. Optional: `status`, `summary`, `depends_on_assets`, `expected_outputs`, `linked_cards`.
+- `create_module_group`: requires `module_id`, `title`. Optional: `status`, `summary`, `depends_on_assets`, `expected_outputs`, `linked_cards`.
+- `add_submodule`: requires `parent_module_id`, `module_id`, `title`. `parent_module_id` must be an existing module group. `module_id` should usually refer to a module created in the same proposal or an existing module.
+- `create_card`: must create a valid card object. Required fields include `card_id`, `card_type`, `title`, `status`, `summary`. Prefer also setting `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_runs`, `linked_assets`.
+- `update_card`: requires `card_id` of an existing card. Only use card fields such as `title`, `status`, `summary`, `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_assets`, `progress_note`. Never use it for modules.
+- `update_module`: requires `module_id` of an existing module. Only use module fields such as `title`, `status`, `summary`, `depends_on_assets`, `expected_outputs`, `linked_cards`.
+- `set_card_status`: requires `card_id`, `status`.
+- `set_module_status`: requires `module_id`, `status`.
+- `create_run`: requires a full run record including `run_id`, `card_id`, `status`, `title`, `summary`, `started_at`. Only use when you really intend to create a run record directly.
+- `mark_downstream_stale`: use `asset_ids` as the list of changed upstream assets.
+
+Preferred patterns:
+- To add a new analysis card: usually create a module first, then create a card linked to that module.
+- To add a submodule under a module group: create the module, then add it via `add_submodule`, then create its card.
+- To modify the wording of an existing module proposal: use `update_card` for the card and `update_module` for the module.
+"""
+
+CHAT_SYSTEM_PROMPT = """You are the Manager AI for Blueprint RE, a bioinformatics workflow manager.
+
+You are in normal chat mode. Answer the user's question conversationally using the provided project context.
+
+Rules:
+- Do not create, modify, or imply that you applied blueprint changes.
+- If the user asks to mutate project state, tell them you can prepare an auditable proposal and they should state the desired change clearly.
+- Keep answers concise and concrete.
+"""
+
+HARNESS_SYSTEM_PROMPT = """You are the Manager AI for Blueprint RE, a bioinformatics workflow manager with tools.
+
+You can either answer directly or call tools. You do not directly modify files or apply patches.
+
+Tool rules:
+- Use `get_project_context` when you need current graph/cards/assets/proposals.
+- For ordinary greetings, explanations, reviews, suggestions, and "what else can we do" questions, answer directly after inspecting context.
+- Use proposal tools only when the user clearly asks to add, create, modify, rerun, rollback, or otherwise change the blueprint.
+- Proposal tools create auditable proposals only. They never apply changes.
+- Never claim a blueprint change has been applied. The user must accept a proposal in the UI.
+- If a tool returns an error, explain the error clearly instead of pretending success.
+
+Keep final answers concise and concrete.
 """
 
 
@@ -83,13 +145,58 @@ class DeepSeekManagerPlanner:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
+    def answer(self, snapshot: dict, chat_request: ChatRequest, extra_context: dict | None = None) -> str:
+        api_key = self.settings.deepseek_api_key.get_secret_value() if self.settings.deepseek_api_key else ""
+        if not api_key:
+            raise ManagerPlanningError("BLUEPRINT_DEEPSEEK_API_KEY is not configured.")
+        resolved_model = self.resolve_tool_model(self.settings.manager_model)
+        context = self._build_context(snapshot, chat_request, extra_context)
+        payload = {
+            "model": resolved_model,
+            "max_tokens": self.settings.manager_max_tokens,
+            "temperature": self.settings.manager_temperature,
+            "system": CHAT_SYSTEM_PROMPT,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(context, ensure_ascii=False, indent=2),
+                        }
+                    ],
+                }
+            ],
+        }
+        response_payload = self._post_messages(payload, resolved_model, api_key)
+        text = self._extract_text(response_payload).strip()
+        if not text:
+            raise ManagerPlanningError("DeepSeek returned an empty chat response.")
+        return text
+
+    def agent_turn(self, messages: list[dict], tools: list[dict]) -> dict:
+        api_key = self.settings.deepseek_api_key.get_secret_value() if self.settings.deepseek_api_key else ""
+        if not api_key:
+            raise ManagerPlanningError("BLUEPRINT_DEEPSEEK_API_KEY is not configured.")
+        resolved_model = self.resolve_tool_model(self.settings.manager_model)
+        payload = {
+            "model": resolved_model,
+            "max_tokens": self.settings.manager_max_tokens,
+            "temperature": self.settings.manager_temperature,
+            "system": HARNESS_SYSTEM_PROMPT,
+            "messages": messages,
+            "tools": tools,
+        }
+        return self._post_messages(payload, resolved_model, api_key)
+
     def plan(self, snapshot: dict, chat_request: ChatRequest, extra_context: dict | None = None) -> ManagerPlanDraft:
         api_key = self.settings.deepseek_api_key.get_secret_value() if self.settings.deepseek_api_key else ""
         if not api_key:
             raise ManagerPlanningError("BLUEPRINT_DEEPSEEK_API_KEY is not configured.")
+        resolved_model = self.resolve_tool_model(self.settings.manager_model)
 
         payload = {
-            "model": self.settings.manager_model,
+            "model": resolved_model,
             "max_tokens": self.settings.manager_max_tokens,
             "temperature": self.settings.manager_temperature,
             "system": SYSTEM_PROMPT,
@@ -111,8 +218,18 @@ class DeepSeekManagerPlanner:
                     "input_schema": ManagerPlanDraft.model_json_schema(),
                 }
             ],
-            "tool_choice": {"type": "tool", "name": "submit_manager_plan"},
+            "tool_choice": {"type": "any"},
         }
+        response_payload = self._post_messages(payload, resolved_model, api_key)
+        tool_input = self._extract_tool_input(response_payload)
+        try:
+            draft = ManagerPlanDraft.model_validate(tool_input)
+        except ValidationError as exc:
+            raise ManagerPlanningError(f"DeepSeek returned an invalid manager plan: {exc}") from exc
+        draft.ensure_valid()
+        return draft
+
+    def _post_messages(self, payload: dict, resolved_model: str, api_key: str) -> dict:
         endpoint = f"{self.settings.deepseek_api_base_url.rstrip('/')}/v1/messages"
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         http_request = request.Request(
@@ -125,38 +242,76 @@ class DeepSeekManagerPlanner:
                 "anthropic-version": "2023-06-01",
             },
         )
-
         try:
             with request.urlopen(http_request, timeout=self.settings.manager_timeout_seconds) as response:
                 raw = response.read().decode("utf-8")
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise ManagerPlanningError(f"DeepSeek request failed with HTTP {exc.code}: {detail}") from exc
+            raise ManagerPlanningError(
+                self._build_http_error_message(
+                    status_code=exc.code,
+                    detail=detail,
+                    configured_model=self.settings.manager_model,
+                    resolved_model=resolved_model,
+                )
+            ) from exc
         except error.URLError as exc:
             raise ManagerPlanningError(f"DeepSeek request failed: {exc.reason}") from exc
+        except (TimeoutError, OSError, client.HTTPException) as exc:
+            raise ManagerPlanningError(f"DeepSeek request failed: {exc}") from exc
 
         try:
             response_payload = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ManagerPlanningError("DeepSeek returned invalid JSON at the HTTP layer.") from exc
+        return response_payload
 
-        tool_input = self._extract_tool_input(response_payload)
+    @staticmethod
+    def resolve_tool_model(configured_model: str) -> str:
+        model = configured_model.strip()
+        return LEGACY_TOOL_MODEL_ALIASES.get(model, model)
+
+    @staticmethod
+    def _build_http_error_message(status_code: int, detail: str, configured_model: str, resolved_model: str) -> str:
+        guidance = ""
         try:
-            draft = ManagerPlanDraft.model_validate(tool_input)
-        except ValidationError as exc:
-            raise ManagerPlanningError(f"DeepSeek returned an invalid manager plan: {exc}") from exc
-        draft.ensure_valid()
-        return draft
+            payload = json.loads(detail)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            error_payload = payload.get("error")
+            message = error_payload.get("message", "") if isinstance(error_payload, dict) else ""
+            if "does not support this tool_choice" in message:
+                guidance = (
+                    " Manager tool-use requests require a DeepSeek v4 model such as "
+                    "`deepseek-v4-pro` or `deepseek-v4-flash`."
+                )
+        if configured_model != resolved_model:
+            guidance += f" Configured model `{configured_model}` was normalized to `{resolved_model}`."
+        return f"DeepSeek request failed with HTTP {status_code}: {detail}{guidance}"
 
     @staticmethod
     def _extract_tool_input(response_payload: dict) -> dict:
+        return DeepSeekManagerPlanner._extract_named_tool_input(response_payload, "submit_manager_plan")
+
+    @staticmethod
+    def _extract_named_tool_input(response_payload: dict, tool_name: str) -> dict:
         content = response_payload.get("content", [])
         for block in content:
-            if block.get("type") == "tool_use" and block.get("name") == "submit_manager_plan":
+            if block.get("type") == "tool_use" and block.get("name") == tool_name:
                 tool_input = block.get("input")
                 if isinstance(tool_input, dict):
                     return tool_input
-        raise ManagerPlanningError("DeepSeek did not return the required submit_manager_plan tool call.")
+        raise ManagerPlanningError(f"DeepSeek did not return the required {tool_name} tool call.")
+
+    @staticmethod
+    def _extract_text(response_payload: dict) -> str:
+        parts: list[str] = []
+        content = response_payload.get("content", [])
+        for block in content:
+            if block.get("type") == "text" and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        return "\n".join(parts)
 
     def _build_context(self, snapshot: dict, chat_request: ChatRequest, extra_context: dict | None = None) -> dict:
         project = snapshot["project"]
@@ -174,6 +329,82 @@ class DeepSeekManagerPlanner:
             },
             "supported_patch_types": ["add_module", "add_module_group", "update_card", "review_run", "semantic_rollback"],
             "supported_ops": SUPPORTED_OPS,
+            "op_contracts": {
+                "create_module": {
+                    "target": "new_module",
+                    "required_fields": ["module_id", "title"],
+                    "optional_fields": ["status", "summary", "depends_on_assets", "expected_outputs", "linked_cards"],
+                },
+                "create_module_group": {
+                    "target": "new_module_group",
+                    "required_fields": ["module_id", "title"],
+                    "optional_fields": ["status", "summary", "depends_on_assets", "expected_outputs", "linked_cards"],
+                },
+                "add_submodule": {
+                    "target": "existing_module_group",
+                    "required_fields": ["parent_module_id", "module_id", "title"],
+                    "optional_fields": ["status"],
+                },
+                "create_card": {
+                    "target": "new_card",
+                    "required_fields": ["card_id", "card_type", "title", "status", "summary"],
+                    "optional_fields": [
+                        "why",
+                        "inputs",
+                        "outputs",
+                        "key_findings",
+                        "manager_review",
+                        "next_actions",
+                        "linked_modules",
+                        "linked_runs",
+                        "linked_assets",
+                        "progress_note",
+                    ],
+                },
+                "update_card": {
+                    "target": "existing_card",
+                    "required_fields": ["card_id"],
+                    "optional_fields": [
+                        "title",
+                        "status",
+                        "summary",
+                        "why",
+                        "inputs",
+                        "outputs",
+                        "key_findings",
+                        "manager_review",
+                        "next_actions",
+                        "linked_modules",
+                        "linked_assets",
+                        "progress_note",
+                    ],
+                },
+                "update_module": {
+                    "target": "existing_module",
+                    "required_fields": ["module_id"],
+                    "optional_fields": ["title", "status", "summary", "depends_on_assets", "expected_outputs", "linked_cards"],
+                },
+                "set_card_status": {
+                    "target": "existing_card",
+                    "required_fields": ["card_id", "status"],
+                    "optional_fields": [],
+                },
+                "set_module_status": {
+                    "target": "existing_module",
+                    "required_fields": ["module_id", "status"],
+                    "optional_fields": [],
+                },
+                "create_run": {
+                    "target": "new_run",
+                    "required_fields": ["run_id", "card_id", "status", "title", "summary", "started_at"],
+                    "optional_fields": ["module_id", "finished_at", "worker_type"],
+                },
+                "mark_downstream_stale": {
+                    "target": "existing_assets",
+                    "required_fields": ["asset_ids"],
+                    "optional_fields": [],
+                },
+            },
             "cards": [
                 {
                     "card_id": card.card_id,
@@ -200,6 +431,15 @@ class DeepSeekManagerPlanner:
                     "submodules": [item.model_dump() for item in module.submodules],
                 }
                 for module in graph.modules
+            ],
+            "module_groups": [
+                {
+                    "module_id": module.module_id,
+                    "title": module.title,
+                    "submodules": [item.model_dump() for item in module.submodules],
+                }
+                for module in graph.modules
+                if module.type == "module_group"
             ],
             "assets": [
                 {

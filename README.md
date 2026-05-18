@@ -52,12 +52,18 @@ cp .env.example .env
 .venv/backend/bin/uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
 ```
 
-后端启动前需要在仓库根目录准备 `.env`。Manager AI 当前通过 DeepSeek 的 Anthropic 兼容接口调用：
+后端启动前需要在仓库根目录准备 `.env`。Manager AI 默认通过 Pi agent sidecar 调用 DeepSeek，并只暴露受控蓝图工具：
 
 ```env
 BLUEPRINT_DEEPSEEK_API_BASE_URL=https://api.deepseek.com/anthropic
 BLUEPRINT_DEEPSEEK_API_KEY=sk-...
+# Manager tool-use requests should use deepseek-v4-pro or deepseek-v4-flash.
 BLUEPRINT_MANAGER_MODEL=deepseek-v4-pro
+BLUEPRINT_MANAGER_BACKEND=pi
+BLUEPRINT_PI_MANAGER_URL=http://127.0.0.1:18002
+BLUEPRINT_BACKEND_API_BASE_URL=http://127.0.0.1:18001/api
+BLUEPRINT_INTERNAL_TOOL_TOKEN=change-me
+BLUEPRINT_MANAGER_TIMEOUT_SECONDS=600
 BLUEPRINT_DEFAULT_WORKER_TYPE=shell
 # Optional real executor commands:
 # BLUEPRINT_OPENCODE_COMMAND=opencode run --task {task_packet_path}
@@ -89,21 +95,25 @@ bash scripts/deploy_user_systemd.sh
 1. 创建后端虚拟环境并安装依赖
 2. 安装前端依赖并构建 Next.js
 3. 写入 `~/.config/blueprint-re/*.env`
-4. 安装两个 `systemd --user` 服务
+4. 安装三个 `systemd --user` 服务
 5. `enable --now` 启动前后端
 
 生成的服务：
 
 - `blueprint-re-backend.service`
+- `blueprint-re-manager-agent.service`
 - `blueprint-re-frontend.service`
 
 常用命令：
 
 ```bash
+systemctl --user status blueprint-re-manager-agent.service
 systemctl --user status blueprint-re-backend.service
 systemctl --user status blueprint-re-frontend.service
+systemctl --user restart blueprint-re-manager-agent.service
 systemctl --user restart blueprint-re-backend.service
 systemctl --user restart blueprint-re-frontend.service
+journalctl --user -u blueprint-re-manager-agent.service -n 100 --no-pager
 journalctl --user -u blueprint-re-backend.service -n 100 --no-pager
 journalctl --user -u blueprint-re-frontend.service -n 100 --no-pager
 ```
@@ -126,4 +136,4 @@ journalctl --user -u blueprint-re-frontend.service -n 100 --no-pager
 
 ## 说明
 
-Manager AI 现在只通过 DeepSeek 生成 proposal；如果模型不可用、返回结构不合法或密钥缺失，`/chat` 会直接失败并返回错误，不再走关键词 fallback。Worker 已切成异步子进程执行模型，默认本地 `shell` scaffold 可直接跑通，`opencode/pi/claude_code/codex` 适配器通过环境变量命令模板接入。
+Manager AI 现在通过 Pi agent sidecar 进行正常聊天和工具循环；sidecar 不加载 shell/write/edit 工具，只能调用后端受控工具读取蓝图、生成/修改/删除 proposal。如果模型不可用、工具校验失败且无法自修复、或密钥缺失，`/chat` 会直接失败并返回错误，不再走关键词 fallback。Worker 已切成异步子进程执行模型，默认本地 `shell` scaffold 可直接跑通，`opencode/pi/claude_code/codex` 适配器通过环境变量命令模板接入。

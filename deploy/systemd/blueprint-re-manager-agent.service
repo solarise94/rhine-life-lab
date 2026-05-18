@@ -1,0 +1,14 @@
+[Unit]
+Description=Blueprint RE Manager Pi Agent
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/blueprint-re/manager-agent.env
+WorkingDirectory=__ROOT__/manager-agent
+ExecStart=/usr/bin/env node src/server.js
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
