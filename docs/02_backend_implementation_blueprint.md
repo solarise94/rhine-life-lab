@@ -225,7 +225,8 @@ apply_patch(project_id, patch, actor="manager_ai") -> ApplyResult
 
 - patch apply 必须持有项目级写锁，避免两个请求同时修改 graph/cards。
 - 写入前保留当前文件快照或临时备份。
-- 如果 schema validate 或 git commit 失败，必须恢复到写入前状态，或把项目标记为 dirty/recovery_required 并阻止继续 apply。
+- 如果 schema validate 失败，不得写入任何项目文件。
+- 如果 git commit 失败，优先自动恢复到写入前状态；只有自动恢复失败时，才把项目标记为 dirty/recovery_required 并阻止继续 apply。
 - commit 成功后才能把 apply 结果返回给前端作为 accepted change。
 
 ---

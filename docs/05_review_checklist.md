@@ -362,6 +362,17 @@ Review Prompt：
 
 ## 9. 数据一致性 Review
 
+### 9.0 时间戳是否统一？
+
+持久化 JSON 必须使用 UTC ISO 8601 `Z` 时间戳。
+
+Review Prompt：
+
+```text
+请检查 Graph IR、Manifest、ArtifactPointer 和 run metadata 是否统一写入 UTC 时间戳。
+前端本地时区只用于展示，不应写回持久化 JSON。
+```
+
 ### 9.1 Cards 是否和 Graph IR 同步？
 
 Card 是 UI projection，但不能和 Graph 冲突。

@@ -29,6 +29,12 @@ Manifest status: success, failed, partial
 
 ModuleGroup 的汇总显示状态必须放在派生字段 `aggregate_status`，不要写入 Card/Module 的 `status`。推荐枚举：`all_accepted`、`has_running`、`has_failed`、`partially_planned`、`mixed`、`stale`。
 
+### 1.2 时间戳规则
+
+所有持久化 JSON 中的时间戳统一使用 UTC ISO 8601，格式为 `YYYY-MM-DDTHH:MM:SSZ`。
+
+前端可以按用户或项目时区显示本地时间，但不得把本地时区时间写回 Graph IR / Manifest / ArtifactPointer 作为持久化值。
+
 ---
 
 ## 2. ProjectState

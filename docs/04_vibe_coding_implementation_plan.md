@@ -233,7 +233,8 @@ return updated cards
 apply 前获取项目写锁
 写入前创建内存副本和临时文件
 schema validate 失败 → 不写入
-git commit 失败 → 恢复写入前快照或标记 recovery_required
+git commit 失败 → 优先恢复写入前快照
+自动恢复失败 → 标记 dirty/recovery_required 并阻止继续 apply
 commit 成功 → 返回 accepted snapshot
 ```
 
