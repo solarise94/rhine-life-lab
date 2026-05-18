@@ -396,9 +396,11 @@ artifact_store/**
 
 验收：
 
+- 超过 50MB 的结果文件不会被 Git 管理
 - h5ad / 大矩阵不会被 git add
 - pointer JSON 进入 Git
 - asset 关联 artifact_id
+- `remote_uri` 保留为空，MVP 不做远端 artifact sync
 
 Review：
 
@@ -413,8 +415,10 @@ Review：
 
 目标：
 
-- 支持 OpenCode / Claude Code / Kimi / shell
+- 第一个真实执行器支持 OpenCode
+- 后续支持 Pi / Claude Code / Codex
 - 保持统一 WorkerAdapter 接口
+- fake worker / shell worker 只作为本地测试脚手架，不作为正式执行器路线
 
 接口：
 
@@ -427,20 +431,22 @@ class WorkerAdapter:
 实现顺序：
 
 ```text
-1. ShellWorker
-2. PTYWorker
-3. OpenCodeWorker
+1. FakeWorker / ShellWorker test scaffold
+2. OpenCodeWorker
+3. PiWorker
 4. ClaudeCodeWorker
-5. KimiWorker
+5. CodexWorker
 ```
 
 注意：
 
-- 先接 CLI，不要一开始做 ACP。
+- 先接 OpenCode 的真实 CLI / agent 接口；ACP / hook 能力后续作为增强层接入。
+- WorkerAdapter 应保持薄适配：只做协议转换、权限请求归一化、RunEvent 映射、产物路径约束和 transcript/manifest 收集。
+- 不要为了某个执行器做深度魔改，也不要把系统核心语义绑定到 OpenCode / Pi / Claude Code / Codex 的私有格式。
 - 所有 Worker 输出都要落 transcript.md。
 - Worker 必须生成 manifest。
 - 无 manifest 则 run failed。
-- WorkerAdapter 负责把 TaskPacket 的统一策略翻译成 OpenCode / Claude Code / Codex / shell 等执行器自己的 sandbox、permission、approval、cwd、writable roots 和环境变量配置。
+- WorkerAdapter 负责把 TaskPacket 的统一策略翻译成 OpenCode / Pi / Claude Code / Codex 等执行器自己的 sandbox、permission、approval、cwd、writable roots 和环境变量配置。
 - WorkerAdapter 负责把 ACP hook、CLI 输出、tool use 和执行器消息归一化为 RunEvent。
 - 前端 MVP 只把 `progress_note` / 筛选后的 `assistant_message` 显示成 Card 旁当前短气泡；tool use 和 command 只进状态行或折叠详情，thinking 默认不展示。
 - ACP / executor 流式输出要按 `preview_id` + `utterance_id` 组装，同一个 preview 只更新同一个气泡；不要把 token/chunk 渲染成多条气泡。
@@ -605,7 +611,8 @@ P2：
 
 P3：
 
-- Real worker adapter
+- OpenCode real worker adapter
+- Pi / Claude Code / Codex adapters
 - ACP / CLI / PTY
 - DVC / OpenLineage optional
 - remote artifact sync

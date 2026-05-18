@@ -104,10 +104,11 @@ backend/
 │   ├── workers/
 │   │   ├── base.py
 │   │   ├── fake_worker.py
-│   │   ├── shell_worker.py
 │   │   ├── opencode_worker.py
+│   │   ├── pi_worker.py
 │   │   ├── claude_code_worker.py
-│   │   └── kimi_worker.py
+│   │   ├── codex_worker.py
+│   │   └── shell_worker.py      # test scaffold only
 │   └── schemas/
 │       ├── graph.schema.json
 │       ├── card.schema.json
@@ -399,6 +400,8 @@ artifact_store/
 - `artifact_store/` 保存大文件实体，不进入 Git。
 - `artifacts/pointers/` 保存 pointer JSON，进入 Git。
 - `assets.json` 只引用 `artifact_id` 和 pointer 路径，不直接引用大文件真实路径作为版本身份。
+- MVP 使用本地 `artifact_store/`；`remote_uri` 字段保留但不实现远端同步。
+- 默认大文件阈值为 50MB。超过阈值的结果文件，或 h5ad / bam / cram / fastq / fq 等生信大文件后缀，必须走 ArtifactPointer，不进入 Git。
 
 接口：
 

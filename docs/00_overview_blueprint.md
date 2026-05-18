@@ -149,7 +149,7 @@ Frontend UI
 Manager AI
   ↓ task_packet.json
 Worker Agent Adapter
-  ↓ OpenCode / Claude Code / Kimi / CLI
+  ↓ OpenCode first; Pi / Claude Code / Codex later
 Worker Agent
   ↓ manifest.json + artifacts
 Manager AI Review
@@ -290,7 +290,7 @@ MVP 暂不做：
 ```text
 1. Card 点击“开始执行”
 2. 生成 runs/run_xxx/task_packet.json
-3. 调用 fake worker 或 shell worker
+3. 调用 fake worker 或测试用 shell worker
 4. worker 生成 manifest.json
 5. Manager review mock 接受
 6. 生成 assets / key findings / graph_patch
@@ -298,4 +298,6 @@ MVP 暂不做：
 8. Card 状态更新为 accepted
 ```
 
-先 mock LLM 和 worker，跑通架构，再接真实 OpenCode / Claude Code / Kimi。
+先 mock LLM 和 worker，跑通架构；第一个真实执行器接 OpenCode。Pi / Claude Code / Codex 后续按同一 WorkerAdapter 协议接入。
+
+shell worker 只作为本地测试脚手架，不作为正式执行器路线，避免系统设计被 shell 兼容细节牵引。

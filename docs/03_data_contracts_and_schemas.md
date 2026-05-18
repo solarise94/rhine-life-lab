@@ -315,7 +315,7 @@ strict   高风险任务使用隔离 workspace、容器或更强 sandbox。
 {
   "request_id": "perm_req_001",
   "run_id": "run_008",
-  "executor": "codex",
+  "executor": "opencode",
   "request_type": "write_path",
   "target": "results/enrichment/run_008/cache/",
   "reason": "Worker needs a cache directory for intermediate enrichment tables.",

@@ -209,6 +209,10 @@ Worker 只能写 allowed_paths。
 
 实现层面优先使用执行器原生 sandbox / permission / approval 机制；兼容层把 TaskPacket policy 翻译成各执行器的 cwd、writable roots、approval mode、环境变量和提示词。
 
+执行器路线：OpenCode 是第一个真实执行器；Pi / Claude Code / Codex 后续接入。fake / shell 只用于测试脚手架，不应把正式设计做成 shell 兼容层。
+
+WorkerAdapter 应保持薄适配，只做协议转换、权限请求归一化、RunEvent 映射、产物路径约束和 transcript/manifest 收集；不要深度魔改某个执行器。
+
 建议权限模式：
 
 ```text
