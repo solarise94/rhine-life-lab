@@ -1,0 +1,19 @@
+git_native_bioinfo_vibe_docs.zip
+
+# Bioinformatics data and large generated artifacts
+data/**
+artifact_store/**
+results/**/*.h5ad
+results/**/*.bam
+results/**/*.cram
+results/**/*.fastq
+results/**/*.fq
+
+# Local/runtime noise
+.DS_Store
+__pycache__/
+*.py[cod]
+node_modules/
+.next/
+dist/
+build/
