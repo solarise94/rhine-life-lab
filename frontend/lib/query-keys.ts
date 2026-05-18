@@ -1,0 +1,11 @@
+export const queryKeys = {
+  project: (projectId: string) => ["project", projectId] as const,
+  results: (projectId: string) => ["results", projectId] as const,
+  resultAsset: (projectId: string, assetId: string) => ["result-asset", projectId, assetId] as const,
+  report: (projectId: string) => ["report", projectId] as const,
+  advancedGraph: (projectId: string) => ["advanced-graph", projectId] as const,
+  advancedGit: (projectId: string) => ["advanced-git", projectId] as const,
+  advancedProposals: (projectId: string) => ["advanced-proposals", projectId] as const,
+  runEvents: (projectId: string, runId: string) => ["run-events", projectId, runId] as const,
+  runtimeApprovals: (projectId: string, runId: string) => ["runtime-approvals", projectId, runId] as const,
+};

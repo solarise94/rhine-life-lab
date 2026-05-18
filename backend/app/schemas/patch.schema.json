@@ -1,0 +1,68 @@
+{
+  "$defs": {
+    "PatchOp": {
+      "properties": {
+        "op": {
+          "title": "Op",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "title": "Payload",
+          "type": "object"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "title": "PatchOp",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "patch_id": {
+      "title": "Patch Id",
+      "type": "string"
+    },
+    "patch_type": {
+      "enum": [
+        "add_module",
+        "add_module_group",
+        "update_card",
+        "review_run",
+        "semantic_rollback"
+      ],
+      "title": "Patch Type",
+      "type": "string"
+    },
+    "source": {
+      "title": "Source",
+      "type": "string"
+    },
+    "reason": {
+      "title": "Reason",
+      "type": "string"
+    },
+    "requires_user_confirmation": {
+      "default": true,
+      "title": "Requires User Confirmation",
+      "type": "boolean"
+    },
+    "ops": {
+      "items": {
+        "$ref": "#/$defs/PatchOp"
+      },
+      "title": "Ops",
+      "type": "array"
+    }
+  },
+  "required": [
+    "patch_id",
+    "patch_type",
+    "source",
+    "reason",
+    "ops"
+  ],
+  "title": "GraphPatch",
+  "type": "object"
+}

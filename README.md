@@ -1,20 +1,129 @@
-# Git-native Bioinformatics Agentic Repo 文档包
+# Blueprint RE v3
 
-建议阅读顺序：
+一个按 `docs/` 蓝图落地的 Git-native 生信分析项目管理 Web 应用。
 
-1. `docs/00_overview_blueprint.md`：总体设计和产品原则
-2. `docs/01_frontend_ui_blueprint.md`：前端 UI 信息架构、页面草图、组件拆分
-3. `docs/02_backend_implementation_blueprint.md`：后端模块、服务、API、运行闭环
-4. `docs/03_data_contracts_and_schemas.md`：核心 JSON 数据契约与示例
-5. `docs/04_vibe_coding_implementation_plan.md`：适合 AI 编程助手逐步实现的任务计划
-6. `docs/05_review_checklist.md`：容易出错节点的 Review 清单
+核心边界：
 
-核心产品原则：
+- 用户只通过 Manager AI 表达意图，不直接编辑 Graph IR
+- Manager AI 先生成 proposal / patch，再由后端校验并应用
+- Graph、Cards、Runs、Report 都持久化到项目目录
+- 每次 accepted proposal / run review 都会写入 Git commit
+- 默认界面是对话 + 卡片 + 详情，不把 Graph IR 暴露成主编辑界面
+- 部署方式按用户级 `systemd --user` 设计
 
-- 用户只编辑意图，不直接编辑蓝图
-- Manager AI 负责 proposal / patch
-- 后端负责校验和应用 patch
-- Worker Agent 尽量自由
-- Graph Update 必须严格
-- Git 保存每次 accepted 变化
-- Card 默认隐藏 Graph IR 和版本管理复杂度
+## 目录
+
+```text
+backend/   FastAPI 后端
+frontend/  Next.js 前端
+deploy/    systemd 用户服务模板
+scripts/   本地开发、schema 生成、部署脚本
+docs/      产品蓝图、数据契约、实现规范
+workspace/ 运行时项目目录，默认自动生成 demo project
+```
+
+## 已实现模块
+
+- Project / Tasks / Results / Report / Advanced 五个主视图
+- Project scaffold 初始化
+- Graph / Cards / Assets / Claims / Runs / Report JSON 持久化
+- proposal store 与 patch store
+- patch allowlist 校验 + cycle / schema / readonly 校验
+- patch apply + Git commit + commit 失败自动恢复
+- async worker adapters + task packet + manifest + run event stream
+- DeepSeek Manager AI proposal 生成（Anthropic 兼容接口）
+- proposal modify / semantic rollback
+- manager review accept/reject
+- report projection + reorder + HTML export
+- artifact pointer 基础服务
+- runtime approval 风险分级与用户确认接口
+- Pydantic JSON schema 生成脚本
+- 用户级 `systemd` 部署脚本
+
+## 本地开发
+
+后端：
+
+```bash
+python3 -m venv .venv/backend
+.venv/backend/bin/pip install -e backend
+cp .env.example .env
+.venv/backend/bin/python scripts/generate_backend_schemas.py
+.venv/backend/bin/uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
+```
+
+后端启动前需要在仓库根目录准备 `.env`。Manager AI 当前通过 DeepSeek 的 Anthropic 兼容接口调用：
+
+```env
+BLUEPRINT_DEEPSEEK_API_BASE_URL=https://api.deepseek.com/anthropic
+BLUEPRINT_DEEPSEEK_API_KEY=sk-...
+BLUEPRINT_MANAGER_MODEL=deepseek-v4-pro
+BLUEPRINT_DEFAULT_WORKER_TYPE=shell
+# Optional real executor commands:
+# BLUEPRINT_OPENCODE_COMMAND=opencode run --task {task_packet_path}
+```
+
+前端：
+
+```bash
+cd frontend
+npm install
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000/api npm run dev
+```
+
+默认地址：
+
+- 前端：`http://127.0.0.1:3000`
+- 后端：`http://127.0.0.1:8000`
+
+## 用户级 systemd 部署
+
+执行：
+
+```bash
+bash scripts/deploy_user_systemd.sh
+```
+
+脚本会完成：
+
+1. 创建后端虚拟环境并安装依赖
+2. 安装前端依赖并构建 Next.js
+3. 写入 `~/.config/blueprint-re/*.env`
+4. 安装两个 `systemd --user` 服务
+5. `enable --now` 启动前后端
+
+生成的服务：
+
+- `blueprint-re-backend.service`
+- `blueprint-re-frontend.service`
+
+常用命令：
+
+```bash
+systemctl --user status blueprint-re-backend.service
+systemctl --user status blueprint-re-frontend.service
+systemctl --user restart blueprint-re-backend.service
+systemctl --user restart blueprint-re-frontend.service
+journalctl --user -u blueprint-re-backend.service -n 100 --no-pager
+journalctl --user -u blueprint-re-frontend.service -n 100 --no-pager
+```
+
+如果希望退出登录后仍保持运行，需要单独执行系统层的 linger 配置，这一步通常需要管理员权限，不在部署脚本内处理。
+
+## Demo 流程
+
+启动后默认会创建 `workspace/demo-rnaseq`。
+
+可直接验证：
+
+1. 打开 `Tasks`
+2. 输入“客户想增加免疫浸润分析模块”
+3. 接受 proposal
+4. 对 planned card 点击“开始执行”
+5. 对 `needs_review` 的 card 点击“接受结果”
+6. 在 `Results` 和 `Report` 查看新结果
+7. 在 `Advanced` 查看 graph / proposals / git history
+
+## 说明
+
+Manager AI 现在只通过 DeepSeek 生成 proposal；如果模型不可用、返回结构不合法或密钥缺失，`/chat` 会直接失败并返回错误，不再走关键词 fallback。Worker 已切成异步子进程执行模型，默认本地 `shell` scaffold 可直接跑通，`opencode/pi/claude_code/codex` 适配器通过环境变量命令模板接入。

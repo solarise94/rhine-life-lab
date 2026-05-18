@@ -1,0 +1,204 @@
+{
+  "$defs": {
+    "CardAssetRef": {
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "title": "CardAssetRef",
+      "type": "object"
+    },
+    "TechnicalRefs": {
+      "properties": {
+        "graph_nodes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Graph Nodes",
+          "type": "array"
+        },
+        "patches": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Patches",
+          "type": "array"
+        }
+      },
+      "title": "TechnicalRefs",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "card_id": {
+      "title": "Card Id",
+      "type": "string"
+    },
+    "card_type": {
+      "enum": [
+        "module",
+        "module_group",
+        "run",
+        "result"
+      ],
+      "title": "Card Type",
+      "type": "string"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "proposed",
+        "planned",
+        "running",
+        "needs_review",
+        "accepted",
+        "rejected",
+        "stale",
+        "superseded",
+        "cancelled",
+        "failed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "aggregate_status": {
+      "anyOf": [
+        {
+          "enum": [
+            "all_accepted",
+            "has_running",
+            "has_failed",
+            "partially_planned",
+            "mixed",
+            "stale"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Aggregate Status"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    },
+    "why": {
+      "default": "",
+      "title": "Why",
+      "type": "string"
+    },
+    "inputs": {
+      "items": {
+        "$ref": "#/$defs/CardAssetRef"
+      },
+      "title": "Inputs",
+      "type": "array"
+    },
+    "outputs": {
+      "items": {
+        "$ref": "#/$defs/CardAssetRef"
+      },
+      "title": "Outputs",
+      "type": "array"
+    },
+    "key_findings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Key Findings",
+      "type": "array"
+    },
+    "manager_review": {
+      "default": "",
+      "title": "Manager Review",
+      "type": "string"
+    },
+    "next_actions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Next Actions",
+      "type": "array"
+    },
+    "linked_modules": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Linked Modules",
+      "type": "array"
+    },
+    "linked_runs": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Linked Runs",
+      "type": "array"
+    },
+    "linked_assets": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Linked Assets",
+      "type": "array"
+    },
+    "technical_refs": {
+      "$ref": "#/$defs/TechnicalRefs"
+    },
+    "progress_note": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Progress Note"
+    }
+  },
+  "required": [
+    "card_id",
+    "card_type",
+    "title",
+    "status",
+    "summary"
+  ],
+  "title": "Card",
+  "type": "object"
+}

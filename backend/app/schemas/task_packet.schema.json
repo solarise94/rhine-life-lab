@@ -1,0 +1,152 @@
+{
+  "$defs": {
+    "ExecutionPolicy": {
+      "properties": {
+        "mode": {
+          "default": "audit",
+          "enum": [
+            "audit",
+            "guarded",
+            "strict"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "network": {
+          "default": "prompt",
+          "title": "Network",
+          "type": "string"
+        },
+        "write_policy": {
+          "default": "allowed_paths_with_post_run_audit",
+          "title": "Write Policy",
+          "type": "string"
+        },
+        "on_policy_violation": {
+          "default": "fail_or_quarantine",
+          "title": "On Policy Violation",
+          "type": "string"
+        }
+      },
+      "title": "ExecutionPolicy",
+      "type": "object"
+    },
+    "ExpectedOutput": {
+      "properties": {
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "path_hint": {
+          "title": "Path Hint",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "path_hint"
+      ],
+      "title": "ExpectedOutput",
+      "type": "object"
+    },
+    "TaskPacketAsset": {
+      "properties": {
+        "asset_id": {
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset_id",
+        "path",
+        "type"
+      ],
+      "title": "TaskPacketAsset",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "project_id": {
+      "title": "Project Id",
+      "type": "string"
+    },
+    "card_id": {
+      "title": "Card Id",
+      "type": "string"
+    },
+    "goal": {
+      "title": "Goal",
+      "type": "string"
+    },
+    "input_assets": {
+      "items": {
+        "$ref": "#/$defs/TaskPacketAsset"
+      },
+      "title": "Input Assets",
+      "type": "array"
+    },
+    "expected_outputs": {
+      "items": {
+        "$ref": "#/$defs/ExpectedOutput"
+      },
+      "title": "Expected Outputs",
+      "type": "array"
+    },
+    "allowed_paths": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Allowed Paths",
+      "type": "array"
+    },
+    "readonly_paths": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Readonly Paths",
+      "type": "array"
+    },
+    "forbidden_paths": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Forbidden Paths",
+      "type": "array"
+    },
+    "execution_policy": {
+      "$ref": "#/$defs/ExecutionPolicy"
+    },
+    "constraints": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Constraints",
+      "type": "array"
+    },
+    "worker_instructions": {
+      "title": "Worker Instructions",
+      "type": "string"
+    }
+  },
+  "required": [
+    "task_id",
+    "project_id",
+    "card_id",
+    "goal",
+    "worker_instructions"
+  ],
+  "title": "TaskPacket",
+  "type": "object"
+}

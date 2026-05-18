@@ -1,0 +1,437 @@
+{
+  "$defs": {
+    "Asset": {
+      "properties": {
+        "asset_id": {
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "asset_type": {
+          "title": "Asset Type",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "candidate",
+            "valid",
+            "stale",
+            "superseded",
+            "rejected",
+            "archived",
+            "missing"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "created_by_run": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created By Run"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Id"
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "report_selected": {
+          "default": false,
+          "title": "Report Selected",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "asset_id",
+        "asset_type",
+        "title",
+        "status",
+        "path",
+        "summary"
+      ],
+      "title": "Asset",
+      "type": "object"
+    },
+    "Claim": {
+      "properties": {
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "candidate",
+            "valid",
+            "stale",
+            "superseded",
+            "rejected",
+            "archived",
+            "missing"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "depends_on_assets": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On Assets",
+          "type": "array"
+        },
+        "created_by_run": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created By Run"
+        },
+        "report_selected": {
+          "default": false,
+          "title": "Report Selected",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "claim_id",
+        "text",
+        "status"
+      ],
+      "title": "Claim",
+      "type": "object"
+    },
+    "Module": {
+      "properties": {
+        "module_id": {
+          "title": "Module Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "analysis_module",
+            "module_group"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "proposed",
+            "planned",
+            "running",
+            "needs_review",
+            "accepted",
+            "rejected",
+            "stale",
+            "superseded",
+            "cancelled",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "depends_on_assets": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On Assets",
+          "type": "array"
+        },
+        "expected_outputs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Expected Outputs",
+          "type": "array"
+        },
+        "linked_cards": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Linked Cards",
+          "type": "array"
+        },
+        "linked_runs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Linked Runs",
+          "type": "array"
+        },
+        "submodules": {
+          "items": {
+            "$ref": "#/$defs/ModuleRef"
+          },
+          "title": "Submodules",
+          "type": "array"
+        },
+        "created_by": {
+          "title": "Created By",
+          "type": "string"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "module_id",
+        "title",
+        "type",
+        "status",
+        "summary",
+        "created_by",
+        "created_at"
+      ],
+      "title": "Module",
+      "type": "object"
+    },
+    "ModuleRef": {
+      "properties": {
+        "module_id": {
+          "title": "Module Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "proposed",
+            "planned",
+            "running",
+            "needs_review",
+            "accepted",
+            "rejected",
+            "stale",
+            "superseded",
+            "cancelled",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "module_id",
+        "title",
+        "status"
+      ],
+      "title": "ModuleRef",
+      "type": "object"
+    },
+    "ReportItem": {
+      "properties": {
+        "item_id": {
+          "title": "Item Id",
+          "type": "string"
+        },
+        "section": {
+          "title": "Section",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "linked_asset_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Linked Asset Ids",
+          "type": "array"
+        },
+        "linked_claim_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Linked Claim Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "item_id",
+        "section",
+        "title",
+        "summary"
+      ],
+      "title": "ReportItem",
+      "type": "object"
+    },
+    "RunRecord": {
+      "properties": {
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "card_id": {
+          "title": "Card Id",
+          "type": "string"
+        },
+        "module_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Module Id"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "success",
+            "failed",
+            "cancelled"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "started_at": {
+          "title": "Started At",
+          "type": "string"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finished At"
+        },
+        "worker_type": {
+          "default": "fake_worker",
+          "title": "Worker Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "card_id",
+        "status",
+        "title",
+        "summary",
+        "started_at"
+      ],
+      "title": "RunRecord",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "modules": {
+      "items": {
+        "$ref": "#/$defs/Module"
+      },
+      "title": "Modules",
+      "type": "array"
+    },
+    "assets": {
+      "items": {
+        "$ref": "#/$defs/Asset"
+      },
+      "title": "Assets",
+      "type": "array"
+    },
+    "claims": {
+      "items": {
+        "$ref": "#/$defs/Claim"
+      },
+      "title": "Claims",
+      "type": "array"
+    },
+    "runs": {
+      "items": {
+        "$ref": "#/$defs/RunRecord"
+      },
+      "title": "Runs",
+      "type": "array"
+    },
+    "report_items": {
+      "items": {
+        "$ref": "#/$defs/ReportItem"
+      },
+      "title": "Report Items",
+      "type": "array"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "title": "Metadata",
+      "type": "object"
+    }
+  },
+  "title": "GraphState",
+  "type": "object"
+}

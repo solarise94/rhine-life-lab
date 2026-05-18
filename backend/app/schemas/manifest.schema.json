@@ -1,0 +1,136 @@
+{
+  "$defs": {
+    "CreatedAsset": {
+      "properties": {
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "role",
+        "type",
+        "path"
+      ],
+      "title": "CreatedAsset",
+      "type": "object"
+    },
+    "TaskPacketAsset": {
+      "properties": {
+        "asset_id": {
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset_id",
+        "path",
+        "type"
+      ],
+      "title": "TaskPacketAsset",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "success",
+        "failed",
+        "partial"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    },
+    "inputs_used": {
+      "items": {
+        "$ref": "#/$defs/TaskPacketAsset"
+      },
+      "title": "Inputs Used",
+      "type": "array"
+    },
+    "created_assets": {
+      "items": {
+        "$ref": "#/$defs/CreatedAsset"
+      },
+      "title": "Created Assets",
+      "type": "array"
+    },
+    "commands_executed": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Commands Executed",
+      "type": "array"
+    },
+    "metrics": {
+      "additionalProperties": true,
+      "title": "Metrics",
+      "type": "object"
+    },
+    "key_findings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Key Findings",
+      "type": "array"
+    },
+    "recommended_graph_updates": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Recommended Graph Updates",
+      "type": "array"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "run_id",
+    "status",
+    "summary"
+  ],
+  "title": "Manifest",
+  "type": "object"
+}

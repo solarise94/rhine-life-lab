@@ -11,8 +11,20 @@ results/**/*.fq
 
 # Local/runtime noise
 .DS_Store
+.venv/
+frontend/node_modules/
+frontend/.next/
+workspace/
+.env
+.env.*
+!.env.example
+*.pyc
 __pycache__/
 *.py[cod]
+*.egg-info/
+*.tsbuildinfo
+.pip-cache/
+.pydeps/
 node_modules/
 .next/
 dist/
