@@ -474,6 +474,8 @@ POST /api/projects/{project_id}/proposals/{proposal_id}/modify
 - `graph/proposals.json` 保存 proposal 元数据、状态和 `patch_id`。
 - `graph/patches/{patch_id}.json` 保存结构化 patch。
 - accept proposal 时只能按 `patch_id` 读取并校验 patch，不得从聊天自然语言重新推断操作。
+- Manager AI 修改 proposal 时，应同步更新对应 patch，或生成新的 `patch_id` 并让 proposal 指向新 patch。
+- 后端只做弱一致性验证：确认 `patch_id` 存在、patch schema valid、关键对象标题/类型大体匹配。弱验证失败时默认生成 warning，交给 Manager AI 解释或修正；只有 patch 缺失、schema 无效或包含危险 op 时才阻断 apply。
 
 ### Cards
 

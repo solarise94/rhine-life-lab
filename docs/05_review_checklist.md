@@ -335,11 +335,15 @@ Review Prompt：
 
 自然语言不能直接执行。
 
+Manager 修改 proposal 时，应同步更新 patch 或生成新的 `patch_id`。后端应做弱一致性验证，把 proposal/patch 摘要差异记录为 warning；只有 patch 缺失、schema 无效或危险 op 才阻断执行。
+
 Review Prompt：
 
 ```text
 请检查 Manager 输出是否包含结构化 patch。
 后端不得从自然语言中直接猜测执行动作。
+请检查 proposal.patch_id 指向的 patch 是否存在且 schema valid。
+请检查 proposal/patch 不一致时是否以 warning 方式反馈，而不是因轻微文案差异中断流程。
 ```
 
 ### 8.3 Manager 是否误接受结果？

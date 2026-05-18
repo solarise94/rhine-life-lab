@@ -464,6 +464,19 @@ Manager AI 审核 manifest 后输出。
 }
 ```
 
+Proposal 与 Patch 的绑定规则：
+
+```json
+{
+  "proposal_id": "proposal_001",
+  "patch_id": "patch_add_enrichment_001",
+  "status": "pending",
+  "consistency_warnings": []
+}
+```
+
+Manager AI 修改 proposal 时，应同步修改 patch，或生成新 patch 并更新 `patch_id`。后端只做弱验证：检查 patch 是否存在、schema 是否有效、主要标题/模块类型是否大体匹配。弱验证不一致时记录 `consistency_warnings`，不因轻微摘要差异中断流程；只有 patch 缺失、schema 无效或危险 op 才阻断执行。
+
 ---
 
 ## 14. Schema Review 要点

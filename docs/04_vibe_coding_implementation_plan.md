@@ -159,6 +159,16 @@ graph/patches/{patch_id}.json
 
 前端 accept proposal 时只传 `proposal_id`；后端从 store 解析到 `patch_id`，重新 schema validate 后再 apply。
 
+Proposal/Patch 同步策略：
+
+```text
+Manager 修改 proposal → 同步修改原 patch，或生成新 patch_id
+accept proposal → 后端读取当前 patch_id
+弱验证 proposal 摘要与 patch ops 是否大体一致
+弱验证 warning → 返回给 Manager/前端展示或解释
+patch 缺失 / schema invalid / 危险 op → 阻断 apply
+```
+
 规则示例：
 
 ```text
@@ -186,6 +196,8 @@ Review：
 ```text
 请检查 Proposal 不应该直接修改项目。
 只有 accept_proposal 后才能 apply patch。
+请检查 Manager 修改 proposal 时是否同步更新 patch 或切换到新 patch_id。
+Proposal 与 Patch 不一致时优先产生 warning，不应因为轻微摘要差异中断流程。
 ```
 
 ---
