@@ -440,13 +440,22 @@ class WorkerAdapter:
 - 所有 Worker 输出都要落 transcript.md。
 - Worker 必须生成 manifest。
 - 无 manifest 则 run failed。
+- WorkerAdapter 负责把 TaskPacket 的统一策略翻译成 OpenCode / Claude Code / Codex / shell 等执行器自己的 sandbox、permission、approval、cwd、writable roots 和环境变量配置。
+- 环境变量只作为策略提示，不作为唯一安全边界。
+- 默认采用渐进权限模式：
+
+```text
+audit   MVP 默认：宽松执行 + 执行后文件变更扫描。
+guarded 真实 Worker 默认：使用执行器原生权限机制 + 执行后审计。
+strict  高风险任务：隔离 workspace / 容器 / 更强 sandbox。
+```
 
 Review：
 
 ```text
-请检查真实 worker 不允许写出 allowed_paths。
-请考虑用 workspace sandbox 或路径校验。
-不要只依赖 prompt 约束；至少要做执行后文件变更扫描。
+请检查 WorkerAdapter 是否把 TaskPacket policy 翻译为执行器原生权限配置。
+请检查没有把环境变量当成唯一安全边界。
+请检查 guarded/strict 模式是否仍保留执行后文件变更扫描。
 ```
 
 ---

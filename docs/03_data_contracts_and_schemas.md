@@ -272,6 +272,16 @@ Manager AI 给 Worker Agent 的任务包。
   "readonly_paths": [
     "results/de/run_004/deg_table.tsv"
   ],
+  "forbidden_paths": [
+    ".git/",
+    "graph/"
+  ],
+  "execution_policy": {
+    "mode": "audit",
+    "network": "prompt",
+    "write_policy": "allowed_paths_with_post_run_audit",
+    "on_policy_violation": "fail_or_quarantine"
+  },
   "constraints": [
     "Do not overwrite existing valid assets.",
     "Write all outputs under results/enrichment/run_008/.",
@@ -281,6 +291,16 @@ Manager AI 给 Worker Agent 的任务包。
   "worker_instructions": "You are a bioinformatics worker agent. You may write scripts and run commands. Produce a complete manifest."
 }
 ```
+
+`execution_policy.mode` 推荐枚举：
+
+```text
+audit    宽松执行，通过 task_packet/env/prompt 告知边界，执行后扫描变更。
+guarded  WorkerAdapter 尽量翻译为执行器原生 sandbox / permission / approval 配置，仍保留执行后审计。
+strict   高风险任务使用隔离 workspace、容器或更强 sandbox。
+```
+
+环境变量可以作为兼容层提示，例如 `BIOINFO_ALLOWED_PATHS`、`BIOINFO_READONLY_PATHS`、`BIOINFO_RUN_ID`，但不能作为唯一安全边界。
 
 ---
 

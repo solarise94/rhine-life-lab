@@ -190,13 +190,24 @@ Review Prompt：
 
 Worker 只能写 allowed_paths。
 
-实现层面必须通过 sandbox、quarantine workspace 或执行后文件变更扫描来强制约束，不能只依赖自然语言提示。
+实现层面优先使用执行器原生 sandbox / permission / approval 机制；兼容层把 TaskPacket policy 翻译成各执行器的 cwd、writable roots、approval mode、环境变量和提示词。
+
+建议权限模式：
+
+```text
+audit   宽松执行，执行后扫描越界写入。
+guarded 使用执行器原生权限机制，仍保留执行后审计。
+strict  隔离 workspace / 容器 / 更强 sandbox，用于高风险任务。
+```
+
+环境变量只能作为策略提示，不能作为唯一安全边界。
 
 Review Prompt：
 
 ```text
 请检查 Worker 输出路径是否被校验。
-任何写出 allowed_paths 的结果都应失败或进入 quarantine。
+请检查 WorkerAdapter 是否使用执行器原生权限机制，而不是只靠 prompt/env。
+任何写出 allowed_paths 的结果都应 warning、失败或进入 quarantine。
 ```
 
 ### 5.2 Worker 是否直接改 Graph？
