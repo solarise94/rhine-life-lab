@@ -99,6 +99,9 @@ Review Prompt：
 
 ```text
 请检查 progress_note / assistant_message 是否可以显示为短气泡。
+请检查同一 Card 是否只显示一个当前气泡。
+请检查 ACP / executor 流式 chunk 是否按 preview_id + utterance_id 合并更新，而不是每个 chunk 新建气泡。
+请检查 hook 是否接在流式事件 / preview 更新层，而不是只接最终消息发送层。
 请检查 tool use / command 是否进入状态行或折叠详情，而不是刷屏。
 请检查 thinking / internal_reasoning 默认不展示给用户。
 请检查权限请求进入 RuntimeApproval UI，而不是普通进度气泡。

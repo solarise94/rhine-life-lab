@@ -367,10 +367,25 @@ WorkerAdapter 应把 ACP hook、CLI 输出、tool use、权限请求等归一化
   "source": "executor",
   "event_type": "progress_note",
   "visibility": "bubble",
+  "preview_id": "bubble_card_enrichment_group",
+  "utterance_id": "utt_run_008_001",
+  "stream_state": "delta",
   "message": "现在开始分析 DEG 了",
   "created_at": "2026-05-18T04:31:00Z"
 }
 ```
+
+流式输出规则：
+
+```text
+delta     同一个 utterance 的增量片段，前端更新当前气泡内容。
+complete  当前 utterance 完成，前端保留这一条气泡直到下一条替换或超时消失。
+snapshot  已组装好的完整消息，可直接替换当前气泡内容。
+```
+
+同一 Card 同一时间只显示一个 bubble visibility 的当前气泡。完整流式内容和历史事件保存在 run event stream / transcript 中。
+
+参考 OpenClaw 的 preview streaming 模式，`preview_id` 表示同一个可更新预览面：后续事件更新同一个气泡，而不是追加新气泡。block/chunk 输出可以进入 transcript 或详情面板；Card bubble 只承载当前进度预览。
 
 推荐事件类型：
 
