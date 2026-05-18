@@ -441,6 +441,8 @@ class WorkerAdapter:
 - Worker 必须生成 manifest。
 - 无 manifest 则 run failed。
 - WorkerAdapter 负责把 TaskPacket 的统一策略翻译成 OpenCode / Claude Code / Codex / shell 等执行器自己的 sandbox、permission、approval、cwd、writable roots 和环境变量配置。
+- WorkerAdapter 负责把 ACP hook、CLI 输出、tool use 和执行器消息归一化为 RunEvent。
+- 前端 MVP 只把 `progress_note` / 筛选后的 `assistant_message` 显示成 Card 旁短气泡；tool use 和 command 只进状态行或折叠详情，thinking 默认不展示。
 - WorkerAdapter 需要把执行器原生权限请求归一化为 PermissionRequest，交给 RuntimeApprovalService。
 - RuntimeApprovalService 由 Manager AI 做风险分级：低风险可 auto approve，中风险默认请求用户确认，高风险必须用户确认或拒绝，dangerous 默认拒绝。
 - 环境变量只作为策略提示，不作为唯一安全边界。
@@ -456,6 +458,8 @@ Review：
 
 ```text
 请检查 WorkerAdapter 是否把 TaskPacket policy 翻译为执行器原生权限配置。
+请检查 executor hook / ACP 消息是否被归一化为 RunEvent。
+请检查前端是否只展示短进度气泡，避免把 tool use / thinking 当成默认气泡刷屏。
 请检查执行器权限请求是否进入 RuntimeApprovalService，而不是由 WorkerAdapter 私自放行。
 请检查 low/medium/high/dangerous 分级是否正确区分 auto review 和用户确认。
 请检查没有把环境变量当成唯一安全边界。

@@ -305,6 +305,7 @@ Explanation
 - 等待 manifest
 - 返回 run status
 - 将 task_packet 中的 allowed_paths / readonly_paths / forbidden_paths / execution_policy 交给 WorkerAdapter，由 Adapter 翻译为执行器原生权限配置。
+- 将执行器 hook / ACP / CLI 输出归一化为 WorkerEvent，并写入 run event stream。
 - Worker 完成后执行文件变更审计，作为 sandbox / permission 之外的兜底。
 
 接口：

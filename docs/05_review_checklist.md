@@ -88,6 +88,20 @@ Review Prompt：
 ```text
 请检查前端状态 badge 是否只使用统一枚举。
 不要出现未定义状态或前后端状态不一致。
+请检查 aggregate_status 是否只作为 cards.json projection cache，由后端重算，不作为 Graph IR 语义真相。
+```
+
+### 2.4 执行器进度气泡是否克制？
+
+ACP hook / executor 消息可以用于 Card 旁进度气泡，但默认只展示用户可读的短进度。
+
+Review Prompt：
+
+```text
+请检查 progress_note / assistant_message 是否可以显示为短气泡。
+请检查 tool use / command 是否进入状态行或折叠详情，而不是刷屏。
+请检查 thinking / internal_reasoning 默认不展示给用户。
+请检查权限请求进入 RuntimeApproval UI，而不是普通进度气泡。
 ```
 
 ---

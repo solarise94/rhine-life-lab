@@ -322,6 +322,7 @@ Group Card 的 `status` 仍必须使用统一 Card 状态枚举。
 子任务汇总结果放在单独字段 `aggregate_status`，不要混入 `status`。
 
 `aggregate_status` 是派生的 UI projection 字段，可以由子模块状态实时计算；Graph IR 不应把它作为语义真相。
+它可以写入 `cards.json` 作为 projection cache，由 CardProjection / PatchApplyService 重算；普通 patch 不应直接把它当语义字段修改。
 
 ```text
 all accepted       → status: accepted, aggregate_status: all_accepted
@@ -333,6 +334,34 @@ upstream stale     → status: stale, aggregate_status: stale
 ```
 
 显示层可以把 `aggregate_status: all_accepted` 渲染为“completed”，但后端不要把 `completed` 写入 Card 的 `status`。
+
+---
+
+### 5.5 Run Event 气泡
+
+执行器 hook / ACP 消息可以改善用户对后台进度的感知，但默认 UI 不应展示完整日志。
+
+MVP 建议只把用户可读的自然语言进度事件渲染为 Card 旁边的短气泡，例如：
+
+```text
+现在开始分析 DEG 了
+正在整理富集分析结果
+开始整理报告段落
+```
+
+不要把这些内容直接作为项目语义状态。它们只是运行期 UX 事件，完整记录仍进入 run event stream / transcript。
+
+事件展示建议：
+
+```text
+assistant_message / progress_note → Card 旁短气泡
+tool_use / command                → 紧凑状态行或折叠详情
+thinking / internal_reasoning      → 默认不展示
+permission_request                → 权限确认 UI
+error / warning                    → Card 状态区和详情面板
+```
+
+气泡应短暂显示或保留最近 1-3 条，避免刷屏。
 
 ---
 
