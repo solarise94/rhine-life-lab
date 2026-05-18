@@ -319,14 +319,17 @@ ModuleGroup: 功能富集分析
 
 Group Card 的 `status` 仍必须使用统一 Card 状态枚举。
 
-子任务汇总结果放在单独字段 `aggregate_status`，不要混入 `status`：
+子任务汇总结果放在单独字段 `aggregate_status`，不要混入 `status`。
+
+`aggregate_status` 是派生的 UI projection 字段，可以由子模块状态实时计算；Graph IR 不应把它作为语义真相。
 
 ```text
-all accepted      → aggregate_status: all_accepted
-some running      → aggregate_status: has_running
-some failed       → aggregate_status: needs_attention
-some planned      → aggregate_status: partially_planned
-upstream stale    → status: stale
+all accepted       → status: accepted, aggregate_status: all_accepted
+some running       → status: running, aggregate_status: has_running
+some failed        → status: failed, aggregate_status: has_failed
+some planned       → status: planned, aggregate_status: partially_planned
+mixed child states → status: planned/running/failed by priority, aggregate_status: mixed
+upstream stale     → status: stale, aggregate_status: stale
 ```
 
 显示层可以把 `aggregate_status: all_accepted` 渲染为“completed”，但后端不要把 `completed` 写入 Card 的 `status`。

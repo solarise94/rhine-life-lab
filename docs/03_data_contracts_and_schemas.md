@@ -27,7 +27,7 @@ Run status: queued, running, success, failed, cancelled
 Manifest status: success, failed, partial
 ```
 
-ModuleGroup 的汇总显示状态必须放在 `aggregate_status`，不要写入 Card/Module 的 `status`。
+ModuleGroup 的汇总显示状态必须放在派生字段 `aggregate_status`，不要写入 Card/Module 的 `status`。推荐枚举：`all_accepted`、`has_running`、`has_failed`、`partially_planned`、`mixed`、`stale`。
 
 ---
 

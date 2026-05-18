@@ -81,7 +81,7 @@ cancelled
 failed
 ```
 
-如果需要展示 ModuleGroup 的汇总状态，使用 `aggregate_status` 等独立字段；不要把 `completed`、`needs_attention`、`partially_planned` 等展示状态写入 Card 的 `status`。
+如果需要展示 ModuleGroup 的汇总状态，使用派生字段 `aggregate_status`；不要把 `completed`、`has_failed`、`partially_planned` 等展示/汇总状态写入 Card 的 `status`。
 
 Review Prompt：
 
