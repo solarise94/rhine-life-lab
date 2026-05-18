@@ -373,6 +373,27 @@ Review Prompt：
 请检查 Manager review 是否基于 manifest 和文件校验，而不是只看 Worker 自述。
 ```
 
+### 8.4 Manager 是否正确处理执行器权限请求？
+
+执行器权限请求应进入 RuntimeApprovalService，由 Manager AI 做风险分级。
+
+默认策略：
+
+```text
+low       可由 Manager AI 自动审查批准。
+medium    Manager AI 给出建议，默认请求用户确认。
+high      必须用户确认，或默认拒绝。
+dangerous 默认拒绝。
+```
+
+Review Prompt：
+
+```text
+请检查 WorkerAdapter 是否把执行器原生权限请求归一化为 PermissionRequest。
+请检查 Manager AI 是否区分运行期权限请求和 GraphPatch 语义变更。
+请检查 RuntimeApproval 不能绕过 PatchValidator，也不能允许 Worker 直接修改 graph/.git/valid asset。
+```
+
 ---
 
 ## 9. 数据一致性 Review

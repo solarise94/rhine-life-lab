@@ -99,6 +99,7 @@ backend/
 │   │   ├── manager_service.py
 │   │   ├── worker_service.py
 │   │   ├── manifest_service.py
+│   │   ├── runtime_approval_service.py
 │   │   └── report_service.py
 │   ├── workers/
 │   │   ├── base.py
@@ -336,7 +337,42 @@ manifest_to_review_context(manifest) -> ReviewContext
 
 ---
 
-### 4.9 ArtifactStore
+### 4.9 RuntimeApprovalService
+
+职责：
+
+- 接收 WorkerAdapter 归一化后的 PermissionRequest。
+- 让 Manager AI 对运行期权限请求做风险分级和说明。
+- 按策略自动批准低风险请求、要求用户确认中高风险请求、拒绝危险请求。
+- 把权限请求、决策、用户确认和执行器响应写入 run 目录，供审计。
+
+运行期权限请求不等同于 GraphPatch：
+
+```text
+PermissionRequest 控制执行期权限，例如读写路径、联网、安装依赖、扩大 writable roots。
+GraphPatch 控制项目语义变更，例如新增 module、接受 asset、标记 stale。
+PatchValidator 仍然是项目语义变更的最终防线。
+```
+
+默认策略：
+
+```text
+low       Manager AI 可自动审查并批准。
+medium    Manager AI 给出建议，默认请求用户确认。
+high      必须用户确认，或默认拒绝。
+dangerous 默认拒绝。
+```
+
+接口：
+
+```python
+review_permission_request(project_id, run_id, request) -> RuntimeApprovalDecision
+record_runtime_approval(project_id, run_id, decision) -> None
+```
+
+---
+
+### 4.10 ArtifactStore
 
 职责：
 
