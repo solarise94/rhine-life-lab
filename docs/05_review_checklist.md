@@ -81,6 +81,8 @@ cancelled
 failed
 ```
 
+如果需要展示 ModuleGroup 的汇总状态，使用 `aggregate_status` 等独立字段；不要把 `completed`、`needs_attention`、`partially_planned` 等展示状态写入 Card 的 `status`。
+
 Review Prompt：
 
 ```text
@@ -187,6 +189,8 @@ Review Prompt：
 ### 5.1 Worker 是否越权写文件？
 
 Worker 只能写 allowed_paths。
+
+实现层面必须通过 sandbox、quarantine workspace 或执行后文件变更扫描来强制约束，不能只依赖自然语言提示。
 
 Review Prompt：
 

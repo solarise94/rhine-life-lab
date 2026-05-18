@@ -108,10 +108,13 @@ graph/
   modules.json
   assets.json
   claims.json
+  proposals.json
+  patches/
 runs/
 scripts/
 results/
 artifacts/pointers/
+artifact_store/
 ```
 
 验收：
@@ -126,6 +129,7 @@ Review：
 ```text
 请检查文件写入是否 atomic。
 请检查初始化模板是否包含 schema_version。
+请检查 proposals.json 和 graph/patches/ 是否已初始化。
 ```
 
 ---
@@ -145,6 +149,15 @@ ManagerService mock
 Chat API
 Proposal store
 ```
+
+Proposal store 最小落盘：
+
+```text
+graph/proposals.json
+graph/patches/{patch_id}.json
+```
+
+前端 accept proposal 时只传 `proposal_id`；后端从 store 解析到 `patch_id`，重新 schema validate 后再 apply。
 
 规则示例：
 
@@ -214,6 +227,16 @@ git commit
 return updated cards
 ```
 
+失败恢复：
+
+```text
+apply 前获取项目写锁
+写入前创建内存副本和临时文件
+schema validate 失败 → 不写入
+git commit 失败 → 恢复写入前快照或标记 recovery_required
+commit 成功 → 返回 accepted snapshot
+```
+
 验收：
 
 - 接受“免疫浸润分析”后 cards.json 增加 card
@@ -277,6 +300,7 @@ Review：
 ```text
 请检查 fake worker 的输出路径必须在 allowed_paths 中。
 请检查 manifest 中声明的文件实际存在。
+请检查 worker 结束后是否扫描了越界写入，并将越界输出失败或隔离到 quarantine。
 ```
 
 ---
@@ -409,6 +433,7 @@ Review：
 ```text
 请检查真实 worker 不允许写出 allowed_paths。
 请考虑用 workspace sandbox 或路径校验。
+不要只依赖 prompt 约束；至少要做执行后文件变更扫描。
 ```
 
 ---

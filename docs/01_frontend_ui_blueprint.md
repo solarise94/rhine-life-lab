@@ -317,15 +317,19 @@ ModuleGroup: 功能富集分析
 
 主界面默认只显示 Group Card，点击后展开子任务。
 
-Group 状态由子任务汇总：
+Group Card 的 `status` 仍必须使用统一 Card 状态枚举。
+
+子任务汇总结果放在单独字段 `aggregate_status`，不要混入 `status`：
 
 ```text
-all accepted      → completed
-some running      → running
-some failed       → needs_attention
-some planned      → partially_planned
-upstream stale    → stale
+all accepted      → aggregate_status: all_accepted
+some running      → aggregate_status: has_running
+some failed       → aggregate_status: needs_attention
+some planned      → aggregate_status: partially_planned
+upstream stale    → status: stale
 ```
+
+显示层可以把 `aggregate_status: all_accepted` 渲染为“completed”，但后端不要把 `completed` 写入 Card 的 `status`。
 
 ---
 

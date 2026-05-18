@@ -174,7 +174,11 @@ project/
 │   ├── assets.json
 │   ├── methods.json
 │   ├── claims.json
-│   └── cleanup.json
+│   ├── cleanup.json
+│   ├── proposals.json
+│   └── patches/
+│       ├── patch_0001.json
+│       └── patch_0002.json
 ├── runs/
 │   ├── run_001/
 │   │   ├── task_packet.json
@@ -196,6 +200,8 @@ project/
 │   └── pointers/
 │       ├── art_0001.json
 │       └── art_0002.json
+├── artifact_store/
+│   └── sha256/
 ├── results/
 │   ├── qc/
 │   ├── counts/
@@ -204,6 +210,13 @@ project/
 └── data/
     └── README.md
 ```
+
+说明：
+
+- `artifacts/pointers/` 保存进入 Git 的 artifact pointer JSON。
+- `artifact_store/` 保存不进入 Git 的大文件实体，按 content hash 组织。
+- `graph/proposals.json` 保存待确认 proposal 的元数据。
+- `graph/patches/` 保存可校验的结构化 patch，proposal accept 时按 `patch_id` 读取。
 
 ---
 

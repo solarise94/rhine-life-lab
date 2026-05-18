@@ -15,6 +15,20 @@ Schema 用于校验
 Git 用于保存
 ```
 
+### 1.1 状态枚举边界
+
+不同实体的 `status` 不共用一个枚举：
+
+```text
+Project status: active, archived, error
+Card/Module status: proposed, planned, running, needs_review, accepted, rejected, stale, superseded, cancelled, failed
+Asset/Claim status: candidate, valid, stale, superseded, rejected, archived, missing
+Run status: queued, running, success, failed, cancelled
+Manifest status: success, failed, partial
+```
+
+ModuleGroup 的汇总显示状态必须放在 `aggregate_status`，不要写入 Card/Module 的 `status`。
+
 ---
 
 ## 2. ProjectState
@@ -26,8 +40,8 @@ Git 用于保存
   "status": "active",
   "schema_version": "0.1.0",
   "current_goal": "完成 RNA-seq 差异表达与下游解释分析",
-  "created_at": "2026-05-18T10:00:00+09:00",
-  "updated_at": "2026-05-18T10:20:00+09:00"
+  "created_at": "2026-05-18T02:00:00Z",
+  "updated_at": "2026-05-18T02:20:00Z"
 }
 ```
 
@@ -47,7 +61,7 @@ Git 用于保存
   "linked_cards": ["card_de_analysis"],
   "linked_runs": ["run_004"],
   "created_by": "manager_ai",
-  "created_at": "2026-05-18T10:00:00+09:00"
+  "created_at": "2026-05-18T02:00:00Z"
 }
 ```
 
@@ -391,7 +405,7 @@ Manager AI 审核 manifest 后输出。
   "provenance": {
     "created_by_run": "run_012",
     "source_manifest": "runs/run_012/manifest.json",
-    "created_at": "2026-05-18T12:30:00+09:00"
+    "created_at": "2026-05-18T04:30:00Z"
   },
   "biological_metadata": {
     "organism": "human",
@@ -451,7 +465,7 @@ Manager AI 审核 manifest 后输出。
 AI 编程助手实现 schema 时请重点检查：
 
 1. 所有 ID 字段必须稳定，不要每次刷新变化。
-2. 所有 status 必须来自枚举。
+2. 所有 status 必须来自对应实体枚举，不要把 Card / Asset / Run / Manifest 状态混用。
 3. GraphPatch ops 必须 allowlist。
 4. Manifest 的 created_assets.path 必须在 allowed_paths 内。
 5. Asset 的 hash 不能被普通 update_card patch 修改。

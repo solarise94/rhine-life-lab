@@ -221,6 +221,13 @@ apply_patch(project_id, patch, actor="manager_ai") -> ApplyResult
 9. return updated project snapshot
 ```
 
+事务要求：
+
+- patch apply 必须持有项目级写锁，避免两个请求同时修改 graph/cards。
+- 写入前保留当前文件快照或临时备份。
+- 如果 schema validate 或 git commit 失败，必须恢复到写入前状态，或把项目标记为 dirty/recovery_required 并阻止继续 apply。
+- commit 成功后才能把 apply 结果返回给前端作为 accepted change。
+
 ---
 
 ### 4.5 GitService
@@ -346,6 +353,12 @@ artifact_store/
         └── 7f9912....tsv.gz
 ```
 
+目录语义：
+
+- `artifact_store/` 保存大文件实体，不进入 Git。
+- `artifacts/pointers/` 保存 pointer JSON，进入 Git。
+- `assets.json` 只引用 `artifact_id` 和 pointer 路径，不直接引用大文件真实路径作为版本身份。
+
 接口：
 
 ```python
@@ -454,6 +467,12 @@ POST /api/projects/{project_id}/proposals/{proposal_id}/accept
 POST /api/projects/{project_id}/proposals/{proposal_id}/reject
 POST /api/projects/{project_id}/proposals/{proposal_id}/modify
 ```
+
+持久化：
+
+- `graph/proposals.json` 保存 proposal 元数据、状态和 `patch_id`。
+- `graph/patches/{patch_id}.json` 保存结构化 patch。
+- accept proposal 时只能按 `patch_id` 读取并校验 patch，不得从聊天自然语言重新推断操作。
 
 ### Cards
 

@@ -2,12 +2,12 @@
 
 建议阅读顺序：
 
-1. `00_overview_blueprint.md`：总体设计和产品原则
-2. `01_frontend_ui_blueprint.md`：前端 UI 信息架构、页面草图、组件拆分
-3. `02_backend_implementation_blueprint.md`：后端模块、服务、API、运行闭环
-4. `03_data_contracts_and_schemas.md`：核心 JSON 数据契约与示例
-5. `04_vibe_coding_implementation_plan.md`：适合 AI 编程助手逐步实现的任务计划
-6. `05_review_checklist.md`：容易出错节点的 Review 清单
+1. `docs/00_overview_blueprint.md`：总体设计和产品原则
+2. `docs/01_frontend_ui_blueprint.md`：前端 UI 信息架构、页面草图、组件拆分
+3. `docs/02_backend_implementation_blueprint.md`：后端模块、服务、API、运行闭环
+4. `docs/03_data_contracts_and_schemas.md`：核心 JSON 数据契约与示例
+5. `docs/04_vibe_coding_implementation_plan.md`：适合 AI 编程助手逐步实现的任务计划
+6. `docs/05_review_checklist.md`：容易出错节点的 Review 清单
 
 核心产品原则：
 
