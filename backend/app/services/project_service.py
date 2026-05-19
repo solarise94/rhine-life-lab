@@ -6,6 +6,7 @@ from app.core.config import get_settings
 from app.core.paths import (
     ARTIFACT_POINTERS_DIR,
     ARTIFACT_STORE_DIR,
+    CHAT_DIR,
     CONFIGS_DIR,
     DATA_DIR,
     GRAPH_DIR,
@@ -77,6 +78,7 @@ class ProjectService:
         for relative in [
             GRAPH_DIR,
             f"{GRAPH_DIR}/patches",
+            CHAT_DIR,
             RUNS_DIR,
             RESULTS_DIR,
             REPORTS_DIR,
@@ -104,6 +106,7 @@ class ProjectService:
         store.save_cards([])
         store.save_graph(GraphState(metadata={"schema_version": self.settings.schema_version}))
         store.save_proposals([])
+        store.save_chat_sessions([])
         atomic_write_json(root / "graph" / "cleanup.json", [])
         (root / "configs" / "params.yaml").write_text(
             f"project_id: {project_id}\nname: {name}\n",
@@ -122,6 +125,7 @@ class ProjectService:
                     "!artifacts/pointers/*.json",
                     "__pycache__/",
                     ".pytest_cache/",
+                    "chat/**",
                 ]
             )
             + "\n",

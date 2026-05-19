@@ -278,9 +278,18 @@ class ManagerToolLayer:
                 linked_assets = self._merge_unique(linked_assets, ["deg_table_v1"])
             card_payload = {
                 "card_id": target_card.card_id,
+                "title": target_card.title,
+                "status": target_card.status,
                 "summary": summary,
+                "why": target_card.why,
+                "inputs": [item.model_dump() for item in target_card.inputs],
+                "outputs": [item.model_dump() for item in target_card.outputs],
+                "key_findings": list(target_card.key_findings),
                 "manager_review": f"按用户要求更新说明：{note}",
+                "next_actions": list(target_card.next_actions),
+                "linked_modules": list(target_card.linked_modules),
                 "linked_assets": linked_assets,
+                "progress_note": target_card.progress_note,
             }
             if "deg" in note.lower() and "DEG" not in target_card.title:
                 card_payload["title"] = f"{target_card.title}（依赖 DEG 结果）"
@@ -302,7 +311,12 @@ class ManagerToolLayer:
 
     def _resolve_spec(self, message: str) -> AnalysisSpec | None:
         lowered = message.lower()
-        if "go" in lowered or "gene ontology" in lowered or "go 富集" in lowered:
+        if (
+            "gene ontology" in lowered
+            or "go 富集" in lowered
+            or "go enrichment" in lowered
+            or re.search(r"\bgo\b\s*(富集|分析|结果|enrichment|analysis|terms?|result)", lowered)
+        ):
             return self.SPECS[0]
         if "gsea" in lowered:
             return self.SPECS[1]

@@ -1,6 +1,11 @@
 export const queryKeys = {
   project: (projectId: string) => ["project", projectId] as const,
+  chatSessions: (projectId: string) => ["chat-sessions", projectId] as const,
+  chatSession: (projectId: string, sessionId: string) => ["chat-session", projectId, sessionId] as const,
+  assetFlow: (projectId: string) => ["asset-flow", projectId] as const,
+  workOrder: (projectId: string) => ["work-order", projectId] as const,
   results: (projectId: string) => ["results", projectId] as const,
+  files: (projectId: string) => ["files", projectId] as const,
   resultAsset: (projectId: string, assetId: string) => ["result-asset", projectId, assetId] as const,
   report: (projectId: string) => ["report", projectId] as const,
   advancedGraph: (projectId: string) => ["advanced-graph", projectId] as const,

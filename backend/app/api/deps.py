@@ -1,10 +1,13 @@
 from functools import lru_cache
 
+from app.services.chat_session_service import ChatSessionService
 from app.services.manager_service import ManagerService
 from app.services.chat_job_service import ChatJobService
+from app.services.flow_service import FlowService
 from app.services.manifest_service import ManifestService
 from app.services.patch_apply import PatchApplyService
 from app.services.patch_validator import PatchValidator
+from app.services.project_file_service import ProjectFileService
 from app.services.project_service import ProjectService
 from app.services.result_asset_service import ResultAssetService
 from app.services.report_service import ReportService
@@ -40,6 +43,11 @@ def get_chat_job_service() -> ChatJobService:
 
 
 @lru_cache
+def get_chat_session_service() -> ChatSessionService:
+    return ChatSessionService(get_project_service())
+
+
+@lru_cache
 def get_runtime_approval_service() -> RuntimeApprovalService:
     return RuntimeApprovalService(get_project_service())
 
@@ -62,3 +70,13 @@ def get_report_service() -> ReportService:
 @lru_cache
 def get_result_asset_service() -> ResultAssetService:
     return ResultAssetService(get_project_service())
+
+
+@lru_cache
+def get_project_file_service() -> ProjectFileService:
+    return ProjectFileService(get_project_service())
+
+
+@lru_cache
+def get_flow_service() -> FlowService:
+    return FlowService(get_project_service())

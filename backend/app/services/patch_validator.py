@@ -88,14 +88,19 @@ class PatchValidator:
                 new_card_ids.add(card_id)
             elif op.op == "update_card":
                 card_id = payload.get("card_id")
-                if card_id not in card_ids:
+                if card_id not in card_ids and card_id not in new_card_ids:
                     errors.append(f"Card missing: {card_id}")
                 readonly = CARD_READONLY_FIELDS.intersection(payload)
                 if readonly:
                     errors.append(f"update_card modifies readonly fields: {', '.join(sorted(readonly))}")
             elif op.op == "update_module":
                 module_id = payload.get("module_id")
-                if module_id not in module_ids:
+                if module_id not in module_ids and module_id not in new_module_ids:
+                    errors.append(f"Module missing: {module_id}")
+            elif op.op == "update_module_summary":
+                self._validate_required_fields(op.op, payload, ["module_id", "summary"], errors)
+                module_id = payload.get("module_id")
+                if module_id not in module_ids and module_id not in new_module_ids:
                     errors.append(f"Module missing: {module_id}")
             elif op.op == "add_submodule":
                 self._validate_required_fields(op.op, payload, ["parent_module_id", "module_id", "title"], errors)
@@ -162,6 +167,21 @@ class PatchValidator:
                     RunRecord.model_validate(payload)
                 except ValidationError as exc:
                     errors.append(f"Invalid create_run payload: {exc}")
+            elif op.op == "set_card_status":
+                self._validate_required_fields(op.op, payload, ["card_id", "status"], errors)
+                card_id = payload.get("card_id")
+                if card_id not in card_ids and card_id not in new_card_ids:
+                    errors.append(f"Card missing: {card_id}")
+            elif op.op == "set_module_status":
+                self._validate_required_fields(op.op, payload, ["module_id", "status"], errors)
+                module_id = payload.get("module_id")
+                if module_id not in module_ids and module_id not in new_module_ids:
+                    errors.append(f"Module missing: {module_id}")
+            elif op.op == "set_claim_status":
+                self._validate_required_fields(op.op, payload, ["claim_id", "status"], errors)
+                claim_id = payload.get("claim_id")
+                if claim_id not in {claim.claim_id for claim in graph.claims}:
+                    errors.append(f"Claim missing: {claim_id}")
             elif op.op == "attach_run_to_card":
                 if payload.get("card_id") not in card_ids and payload.get("card_id") not in new_card_ids:
                     errors.append(f"Card missing: {payload.get('card_id')}")

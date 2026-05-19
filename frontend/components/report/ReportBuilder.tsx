@@ -1,7 +1,6 @@
 "use client";
 
-import { ArrowDown, ArrowUp, FileText } from "lucide-react";
-
+import { ArrowDown, ArrowUp, FileText, Layers } from "lucide-react";
 import { ReportSection } from "@/lib/types";
 
 export function ReportBuilder({
@@ -20,59 +19,94 @@ export function ReportBuilder({
   return (
     <section className="panel">
       <div className="panel-header">
-        <h3>Report Builder</h3>
+        <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <FileText size={16} style={{ color: "var(--green)" }} />
+          Report Builder
+        </h3>
         <div className="proposal-actions">
-          <span>{sections.length} sections</span>
-          <button className="btn secondary" onClick={onExport}>
-            <FileText size={16} />
+          <span style={{ color: "var(--muted)", fontSize: 12 }}>{sections.length} sections</span>
+          <button className="btn success" onClick={onExport}>
+            <FileText size={14} />
             导出 HTML
           </button>
         </div>
       </div>
-      <div className="panel-body report-grid">
-        {sections.length ? (
-          sections.map((section, index) => (
-            <div
-              className={`report-item report-button ${selectedSectionId === section.item_id ? "active" : ""}`}
-              key={section.item_id}
-              onClick={() => onSelect(section.item_id)}
-            >
-              <div className="status-row">
-                <span className="pill">{section.section}</span>
-                <div className="proposal-actions">
+      <div className="panel-body">
+        <div className="deck-container" style={{ gridTemplateColumns: "1fr", gap: 10 }}>
+          {sections.length ? (
+            sections.map((section, index) => (
+              <div
+                className={`report-item report-button ${selectedSectionId === section.item_id ? "active" : ""}`}
+                key={section.item_id}
+                onClick={() => onSelect(section.item_id)}
+                style={{ minHeight: "auto", cursor: "pointer" }}
+              >
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                  <div
+                    style={{
+                      width: 32,
+                      height: 32,
+                      borderRadius: 10,
+                      background: "var(--green-bg)",
+                      border: "1px solid var(--green-border)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      color: "var(--green)",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <Layers size={14} />
+                  </div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.3, color: "var(--text)" }}>
+                      {section.title}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                      {section.section}
+                    </div>
+                  </div>
+                </div>
+                <div className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>
+                  {section.summary}
+                </div>
+                {section.assets.length ? (
+                  <div style={{ fontSize: 11, color: "var(--cyan)" }}>
+                    📎 {section.assets.map((a) => a.title).join(", ")}
+                  </div>
+                ) : null}
+                <div className="inline-actions" style={{ marginTop: 6 }}>
                   <button
                     className="btn secondary"
+                    style={{ fontSize: 11, padding: "4px 8px", minHeight: 26 }}
                     onClick={(event) => {
                       event.stopPropagation();
                       onMove(section.item_id, "up");
                     }}
                     disabled={index === 0}
                   >
-                    <ArrowUp size={16} />
+                    <ArrowUp size={12} />
                     上移
                   </button>
                   <button
                     className="btn secondary"
+                    style={{ fontSize: 11, padding: "4px 8px", minHeight: 26 }}
                     onClick={(event) => {
                       event.stopPropagation();
                       onMove(section.item_id, "down");
                     }}
                     disabled={index === sections.length - 1}
                   >
-                    <ArrowDown size={16} />
+                    <ArrowDown size={12} />
                     下移
                   </button>
                 </div>
               </div>
-              <h4>{section.title}</h4>
-              <div className="muted">{section.summary}</div>
-              {section.assets.length ? <div className="muted">Assets: {section.assets.map((asset) => asset.title).join(", ")}</div> : null}
-              {section.claims.length ? <div className="muted">Claims: {section.claims.map((claim) => claim.text).join(" | ")}</div> : null}
-            </div>
-          ))
-        ) : (
-          <div className="empty-state">还没有报告章节。</div>
-        )}
+            ))
+          ) : (
+            <div className="empty-state">还没有报告章节。</div>
+          )}
+        </div>
       </div>
     </section>
   );

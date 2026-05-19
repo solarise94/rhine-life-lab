@@ -12,10 +12,41 @@ export function useProjectSnapshot(projectId: string) {
   });
 }
 
+export function useChatSessions(projectId: string) {
+  return useQuery({
+    queryKey: queryKeys.chatSessions(projectId),
+    queryFn: () => api.getChatSessions(projectId),
+  });
+}
+
+export function useChatSession(projectId: string, sessionId: string | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.chatSession(projectId, sessionId ?? "none"),
+    queryFn: () => api.getChatSession(projectId, sessionId!),
+    enabled: enabled && Boolean(sessionId),
+  });
+}
+
+export function useWorkOrder(projectId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.workOrder(projectId),
+    queryFn: () => api.getWorkOrder(projectId),
+    enabled,
+  });
+}
+
 export function useProjectResults(projectId: string, enabled: boolean) {
   return useQuery({
     queryKey: queryKeys.results(projectId),
     queryFn: () => api.getResults(projectId),
+    enabled,
+  });
+}
+
+export function useProjectFiles(projectId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.files(projectId),
+    queryFn: () => api.getFiles(projectId),
     enabled,
   });
 }
@@ -88,13 +119,17 @@ export function useWorkspaceRefresh(projectId: string) {
   const queryClient = useQueryClient();
   return async function refreshWorkspace() {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: queryKeys.project(projectId) }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.results(projectId) }),
-      queryClient.invalidateQueries({ queryKey: ["result-asset", projectId] }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.report(projectId) }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.advancedGraph(projectId) }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.advancedGit(projectId) }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.advancedProposals(projectId) }),
+      queryClient.refetchQueries({ queryKey: queryKeys.project(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.chatSessions(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.workOrder(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.assetFlow(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.results(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.files(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: ["result-asset", projectId], type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.report(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.advancedGraph(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.advancedGit(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.advancedProposals(projectId), type: "active" }),
     ]);
   };
 }

@@ -5,6 +5,7 @@ GRAPH_DIR = "graph"
 RUNS_DIR = "runs"
 RESULTS_DIR = "results"
 REPORTS_DIR = "reports"
+CHAT_DIR = "chat"
 ARTIFACTS_DIR = "artifacts"
 ARTIFACT_POINTERS_DIR = "artifacts/pointers"
 ARTIFACT_STORE_DIR = "artifact_store/sha256"
@@ -15,4 +16,3 @@ DATA_DIR = "data"
 
 def project_root(data_root: Path, project_id: str) -> Path:
     return data_root / project_id
-

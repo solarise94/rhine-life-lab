@@ -1,5 +1,6 @@
 "use client";
 
+import { GitCommit, GitGraph, FileQuestion, ShieldAlert } from "lucide-react";
 import Editor from "@monaco-editor/react";
 
 export function AdvancedPanels({
@@ -18,19 +19,35 @@ export function AdvancedPanels({
   return (
     <section className="panel">
       <div className="panel-header">
-        <h3>Advanced</h3>
-        <span>Read-only diagnostics</span>
+        <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <ShieldAlert size={16} style={{ color: "var(--purple)" }} />
+          Advanced
+        </h3>
+        <span style={{ color: "var(--muted)", fontSize: 12 }}>Diagnostics</span>
       </div>
-      <div className="panel-body advanced-grid">
-        <div className="advanced-item">
-          <div className="proposal-actions" style={{ marginTop: 0 }}>
-            <button className={`btn secondary ${activeDocument === "graph" ? "active-chip" : ""}`} onClick={() => onSelectDocument("graph")}>
-              Graph
-            </button>
-            <button className={`btn secondary ${activeDocument === "proposals" ? "active-chip" : ""}`} onClick={() => onSelectDocument("proposals")}>
-              Proposals
-            </button>
-          </div>
+      <div className="panel-body stack">
+        <div className="proposal-actions" style={{ marginTop: 0 }}>
+          <button
+            className={`btn ${activeDocument === "graph" ? "primary" : "secondary"}`}
+            onClick={() => onSelectDocument("graph")}
+            style={{ fontSize: 12 }}
+          >
+            <GitGraph size={14} />
+            Graph
+          </button>
+          <button
+            className={`btn ${activeDocument === "proposals" ? "primary" : "secondary"}`}
+            onClick={() => onSelectDocument("proposals")}
+            style={{ fontSize: 12 }}
+          >
+            <FileQuestion size={14} />
+            Proposals
+          </button>
+        </div>
+        <div
+          className="meta-block"
+          style={{ padding: 0, overflow: "hidden", border: "1px solid var(--line)" }}
+        >
           <Editor
             height="360px"
             defaultLanguage="json"
@@ -42,29 +59,45 @@ export function AdvancedPanels({
               wordWrap: "on",
               scrollBeyondLastLine: false,
             }}
-            theme="vs-dark"
+            theme="light"
           />
         </div>
-        <div className="advanced-item">
-          <h4>Git History</h4>
+        <div className="meta-block">
+          <h4 style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <GitCommit size={12} />
+            Git History
+          </h4>
           <div className="stack">
-            {gitItems.map((item) => (
-              <div key={item.hash} className="chat-message">
-                <div>{item.subject}</div>
-                <div className="muted">{item.date}</div>
-                <div className="muted">{item.hash.slice(0, 12)}</div>
-              </div>
-            ))}
+            {gitItems.length ? (
+              gitItems.map((item) => (
+                <div
+                  key={item.hash}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "8px 10px",
+                    borderRadius: 8,
+                    background: "var(--panel-2)",
+                    fontSize: 12,
+                    border: "1px solid var(--line)",
+                  }}
+                >
+                  <code style={{ color: "var(--purple)", fontSize: 11, fontFamily: "monospace" }}>
+                    {item.hash.slice(0, 7)}
+                  </code>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontWeight: 500, color: "var(--text)" }}>{item.subject}</div>
+                    <div className="muted" style={{ fontSize: 11 }}>
+                      {item.date}
+                    </div>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="muted" style={{ fontSize: 12 }}>暂无提交记录</div>
+            )}
           </div>
-        </div>
-        <div className="advanced-item">
-          <h4>Inspector Notes</h4>
-          <div className="muted">
-            当前查看：
-            {" "}
-            {activeDocument === "graph" ? "Graph IR" : "Proposal Store"}
-          </div>
-          <div className="muted">Monaco 视图与 Git 历史已拆开，避免把所有调试信息塞进一个大 JSON 面板。</div>
         </div>
       </div>
     </section>

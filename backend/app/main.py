@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import advanced, chat, manager_tools, projects, report, results, runs
+from app.api import advanced, chat, chat_sessions, files, manager_tools, projects, report, results, runs
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -22,6 +22,8 @@ app.include_router(results.router, prefix=settings.api_prefix)
 app.include_router(report.router, prefix=settings.api_prefix)
 app.include_router(runs.router, prefix=settings.api_prefix)
 app.include_router(advanced.router, prefix=settings.api_prefix)
+app.include_router(files.router, prefix=settings.api_prefix)
+app.include_router(chat_sessions.router, prefix=settings.api_prefix)
 
 
 @app.get("/healthz")

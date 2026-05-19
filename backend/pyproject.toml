@@ -10,7 +10,6 @@ dependencies = [
   "pydantic-settings>=2.3.0",
   "orjson>=3.10.0",
   "python-multipart>=0.0.9",
-  "langgraph>=1.0.0",
 ]
 
 [build-system]

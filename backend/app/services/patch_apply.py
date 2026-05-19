@@ -30,7 +30,7 @@ class PatchApplyService:
             backups = self._snapshot_files(store.root)
 
             try:
-                for op in patch.ops:
+                for index, op in enumerate(patch.ops, start=1):
                     payload = op.payload
                     if op.op == "create_module":
                         graph.modules.append(
@@ -66,15 +66,15 @@ class PatchApplyService:
                             )
                         )
                     elif op.op == "update_module_summary":
-                        module = next(item for item in graph.modules if item.module_id == payload["module_id"])
+                        module = self._require_module(graph, payload["module_id"], op.op)
                         module.summary = payload["summary"]
                     elif op.op == "update_module":
-                        module = next(item for item in graph.modules if item.module_id == payload["module_id"])
+                        module = self._require_module(graph, payload["module_id"], op.op)
                         for key in ("title", "status", "summary", "depends_on_assets", "expected_outputs", "linked_cards"):
                             if key in payload:
                                 setattr(module, key, payload[key])
                     elif op.op == "add_submodule":
-                        module = next(item for item in graph.modules if item.module_id == payload["parent_module_id"])
+                        module = self._require_module(graph, payload["parent_module_id"], op.op, field_name="parent_module_id")
                         module.submodules.append(
                             ModuleRef(
                                 module_id=payload["module_id"],
@@ -83,46 +83,46 @@ class PatchApplyService:
                             )
                         )
                     elif op.op == "remove_submodule":
-                        module = next(item for item in graph.modules if item.module_id == payload["parent_module_id"])
+                        module = self._require_module(graph, payload["parent_module_id"], op.op, field_name="parent_module_id")
                         module.submodules = [item for item in module.submodules if item.module_id != payload["module_id"]]
                     elif op.op == "create_card":
                         cards.append(Card.model_validate(payload))
                     elif op.op == "update_card":
-                        card = next(item for item in cards if item.card_id == payload["card_id"])
+                        card = self._require_card(cards, payload["card_id"], op.op)
                         for key, value in payload.items():
                             if key != "card_id":
                                 setattr(card, key, value)
                     elif op.op == "set_card_status":
-                        card = next(item for item in cards if item.card_id == payload["card_id"])
+                        card = self._require_card(cards, payload["card_id"], op.op)
                         card.status = payload["status"]
                     elif op.op == "set_module_status":
-                        module = next(item for item in graph.modules if item.module_id == payload["module_id"])
+                        module = self._require_module(graph, payload["module_id"], op.op)
                         module.status = payload["status"]
                     elif op.op == "create_asset":
                         graph.assets.append(Asset.model_validate(payload))
                     elif op.op == "set_asset_status":
-                        asset = next(item for item in graph.assets if item.asset_id == payload["asset_id"])
+                        asset = self._require_asset(graph, payload["asset_id"], op.op)
                         asset.status = payload["status"]
                     elif op.op == "connect_dependency":
                         asset_id = payload.get("asset_id") or payload.get("from_asset_id")
                         depends_on_asset_id = payload.get("depends_on_asset_id") or payload.get("to_asset_id")
-                        asset = next(item for item in graph.assets if item.asset_id == asset_id)
+                        asset = self._require_asset(graph, asset_id, op.op, field_name="asset_id")
                         if depends_on_asset_id not in asset.depends_on:
                             asset.depends_on.append(depends_on_asset_id)
                     elif op.op == "create_claim":
                         graph.claims.append(Claim.model_validate(payload))
                     elif op.op == "set_claim_status":
-                        claim = next(item for item in graph.claims if item.claim_id == payload["claim_id"])
+                        claim = self._require_claim(graph, payload["claim_id"], op.op)
                         claim.status = payload["status"]
                     elif op.op == "attach_asset_to_card":
-                        card = next(item for item in cards if item.card_id == payload["card_id"])
+                        card = self._require_card(cards, payload["card_id"], op.op)
                         if payload["asset_id"] not in card.linked_assets:
                             card.linked_assets.append(payload["asset_id"])
                         card.outputs.append(CardAssetRef(label=payload["label"], asset_id=payload["asset_id"]))
                     elif op.op == "create_run":
                         graph.runs.append(RunRecord.model_validate(payload))
                     elif op.op == "attach_run_to_card":
-                        card = next(item for item in cards if item.card_id == payload["card_id"])
+                        card = self._require_card(cards, payload["card_id"], op.op)
                         if payload["run_id"] not in card.linked_runs:
                             card.linked_runs.append(payload["run_id"])
                     elif op.op == "add_report_item":
@@ -142,6 +142,8 @@ class PatchApplyService:
                         )
                     elif op.op == "semantic_rollback":
                         self._apply_semantic_rollback(graph, cards, cleanup, payload)
+                    else:
+                        raise ValueError(f"Unsupported op reached apply stage: {op.op}")
 
                 for card in cards:
                     if card.card_type == "module_group":
@@ -154,15 +156,26 @@ class PatchApplyService:
                 store.save_cards(cards)
                 store.save_project_state(project)
                 atomic_write_json(store.root / "graph" / "cleanup.json", cleanup)
-                commit_hash = self.project_service.git_service(project_id).commit(f"Apply patch {patch.patch_id}")
-                return ApplyResult(project_id=project_id, patch_id=patch.patch_id, commit_hash=commit_hash, warnings=validation.warnings)
             except Exception as exc:
                 restore_failed = not self._restore_snapshot(backups)
                 if restore_failed:
                     project.status = "error"
                     project.updated_at = utc_now()
                     store.save_project_state(project)
-                raise RuntimeError("Patch apply failed and project state was restored." if not restore_failed else "Patch apply failed and project recovery is required.") from exc
+                failure = f"Patch apply failed at op {index} ({op.op}): {exc}"
+                raise RuntimeError(
+                    f"{failure}. Project state was restored."
+                    if not restore_failed
+                    else f"{failure}. Project recovery is required."
+                ) from exc
+
+            warnings = list(validation.warnings)
+            commit_hash = None
+            try:
+                commit_hash = self.project_service.git_service(project_id).commit(f"Apply patch {patch.patch_id}")
+            except Exception as exc:
+                warnings.append(f"Patch was applied but git commit failed: {exc}")
+            return ApplyResult(project_id=project_id, patch_id=patch.patch_id, commit_hash=commit_hash, warnings=warnings)
 
     @staticmethod
     def _mark_assets_stale(graph: GraphState, asset_ids: list[str]) -> None:
@@ -283,3 +296,31 @@ class PatchApplyService:
             card.aggregate_status = "partially_planned"
         else:
             card.aggregate_status = "mixed"
+
+    @staticmethod
+    def _require_module(graph: GraphState, module_id: str, op_name: str, field_name: str = "module_id") -> Module:
+        module = next((item for item in graph.modules if item.module_id == module_id), None)
+        if not module:
+            raise ValueError(f"{op_name} references missing {field_name}: {module_id}")
+        return module
+
+    @staticmethod
+    def _require_card(cards: list[Card], card_id: str, op_name: str, field_name: str = "card_id") -> Card:
+        card = next((item for item in cards if item.card_id == card_id), None)
+        if not card:
+            raise ValueError(f"{op_name} references missing {field_name}: {card_id}")
+        return card
+
+    @staticmethod
+    def _require_asset(graph: GraphState, asset_id: str | None, op_name: str, field_name: str = "asset_id") -> Asset:
+        asset = next((item for item in graph.assets if item.asset_id == asset_id), None)
+        if not asset:
+            raise ValueError(f"{op_name} references missing {field_name}: {asset_id}")
+        return asset
+
+    @staticmethod
+    def _require_claim(graph: GraphState, claim_id: str, op_name: str, field_name: str = "claim_id") -> Claim:
+        claim = next((item for item in graph.claims if item.claim_id == claim_id), None)
+        if not claim:
+            raise ValueError(f"{op_name} references missing {field_name}: {claim_id}")
+        return claim

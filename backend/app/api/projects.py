@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.api.deps import get_project_service
+from app.api.deps import get_flow_service, get_project_service
+from app.services.flow_service import FlowService
 from app.services.project_service import ProjectService
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -38,3 +39,12 @@ def get_cards(project_id: str, project_service: ProjectService = Depends(get_pro
     snapshot = project_service.get_project_snapshot(project_id)
     return {"items": snapshot["cards"]}
 
+
+@router.get("/{project_id}/asset-flow")
+def get_asset_flow(project_id: str, flow_service: FlowService = Depends(get_flow_service)) -> dict:
+    return flow_service.get_asset_flow(project_id)
+
+
+@router.get("/{project_id}/work-order")
+def get_work_order(project_id: str, flow_service: FlowService = Depends(get_flow_service)) -> dict:
+    return flow_service.get_work_order(project_id)

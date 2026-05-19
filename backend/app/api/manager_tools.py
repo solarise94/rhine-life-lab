@@ -29,6 +29,34 @@ def get_project_context(
     return manager_service.blueprint_tools.get_project_context(project_id)
 
 
+@router.post("/plan-blueprint")
+def plan_blueprint(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.plan_blueprint(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/review-blueprint-plan")
+def review_blueprint_plan(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.review_blueprint_plan(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/proposals")
 def save_patch_proposal(
     project_id: str,
@@ -59,6 +87,21 @@ def delete_module_proposal(
     return response.model_dump()
 
 
+@router.post("/delete-card")
+def delete_card_proposal(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        response = manager_service.blueprint_tools.delete_card_proposal(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return response.model_dump()
+
+
 @router.post("/restore-module")
 def restore_module_proposal(
     project_id: str,
@@ -69,6 +112,21 @@ def restore_module_proposal(
     _verify_internal_token(authorization)
     try:
         response = manager_service.blueprint_tools.restore_module_proposal(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return response.model_dump()
+
+
+@router.post("/restore-card")
+def restore_card_proposal(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        response = manager_service.blueprint_tools.restore_card_proposal(project_id, payload)
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return response.model_dump()

@@ -69,7 +69,7 @@ Use these op contracts:
 - `create_module_group`: requires `module_id`, `title`. Optional: `status`, `summary`, `depends_on_assets`, `expected_outputs`, `linked_cards`.
 - `add_submodule`: requires `parent_module_id`, `module_id`, `title`. `parent_module_id` must be an existing module group. `module_id` should usually refer to a module created in the same proposal or an existing module.
 - `create_card`: must create a valid card object. Required fields include `card_id`, `card_type`, `title`, `status`, `summary`. Prefer also setting `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_runs`, `linked_assets`.
-- `update_card`: requires `card_id` of an existing card. Only use card fields such as `title`, `status`, `summary`, `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_assets`, `progress_note`. Never use it for modules.
+- `update_card`: requires `card_id` of an existing card. Only use card fields such as `title`, `status`, `summary`, `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_assets`, `progress_note`. Never use it for modules. To delete a card, set `status` to `cancelled` and keep the card metadata intact for auditability.
 - `update_module`: requires `module_id` of an existing module. Only use module fields such as `title`, `status`, `summary`, `depends_on_assets`, `expected_outputs`, `linked_cards`.
 - `set_card_status`: requires `card_id`, `status`.
 - `set_module_status`: requires `module_id`, `status`.
@@ -80,6 +80,7 @@ Preferred patterns:
 - To add a new analysis card: usually create a module first, then create a card linked to that module.
 - To add a submodule under a module group: create the module, then add it via `add_submodule`, then create its card.
 - To modify the wording of an existing module proposal: use `update_card` for the card and `update_module` for the module.
+- For multi-step workflows, think through the full dependency chain first, but return only the next executable layer in a single proposal. Do not include downstream cards that depend on assets planned in the same proposal.
 """
 
 CHAT_SYSTEM_PROMPT = """You are the Manager AI for Blueprint RE, a bioinformatics workflow manager.
@@ -103,6 +104,7 @@ Tool rules:
 - Proposal tools create auditable proposals only. They never apply changes.
 - Never claim a blueprint change has been applied. The user must accept a proposal in the UI.
 - If a tool returns an error, explain the error clearly instead of pretending success.
+- For multi-step workflows, plan the whole sequence mentally, but when you call a proposal tool submit only the current executable layer whose inputs already exist in project context.
 
 Keep final answers concise and concrete.
 """
@@ -412,10 +414,16 @@ class DeepSeekManagerPlanner:
                     "title": card.title,
                     "status": card.status,
                     "summary": card.summary,
+                    "why": card.why,
+                    "inputs": [item.model_dump() for item in card.inputs],
+                    "outputs": [item.model_dump() for item in card.outputs],
+                    "key_findings": list(card.key_findings),
+                    "manager_review": card.manager_review,
+                    "next_actions": list(card.next_actions),
                     "linked_modules": card.linked_modules,
                     "linked_runs": card.linked_runs,
                     "linked_assets": card.linked_assets,
-                    "next_actions": card.next_actions,
+                    "progress_note": card.progress_note,
                 }
                 for card in cards
             ],

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.models.cards import Card
+from app.models.chat import ChatSession
 from app.models.graph import Asset, Claim, GraphState, Module, ReportItem, RunRecord
 from app.models.patches import Proposal
 from app.models.project import ProjectState
@@ -97,3 +98,8 @@ class GraphStore:
     def save_run_events(self, run_id: str, events: list[RunEvent]) -> None:
         atomic_write_json(self._path("runs", run_id, "events.json"), [item.model_dump() for item in events])
 
+    def load_chat_sessions(self) -> list[ChatSession]:
+        return [ChatSession.model_validate(item) for item in read_json(self._path("chat", "sessions.json"), [])]
+
+    def save_chat_sessions(self, sessions: list[ChatSession]) -> None:
+        atomic_write_json(self._path("chat", "sessions.json"), [item.model_dump() for item in sessions])
