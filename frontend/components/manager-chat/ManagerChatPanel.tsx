@@ -6,6 +6,7 @@ import {
   AlertTriangle,
   Check,
   ChevronDown,
+  FileText,
   Loader2,
   Paperclip,
   Pencil,
@@ -14,12 +15,14 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import { api, ChatHistoryMessage, ChatStreamEvent } from "@/lib/api";
 import { useChatSession, useModifyProposalMutation } from "@/lib/hooks";
 import { queryKeys } from "@/lib/query-keys";
 import { Asset, ChatSessionDetail, ChatSessionMessageRecord, ProjectSnapshot, Proposal } from "@/lib/types";
-import { EMPTY_ATTACHMENTS, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
+import { Attachment, EMPTY_ATTACHMENTS, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 
 type ThinkingEffort = "low" | "medium" | "high";
 type ToolState = "running" | "done" | "error";
@@ -37,6 +40,7 @@ interface ChatMessage {
   content: string;
   proposal?: Proposal;
   thinking?: string;
+  attachments?: Attachment[];
   thinkingState?: "idle" | "running" | "done" | "error";
   tools?: ToolUseState[];
   state?: "idle" | "thinking" | "streaming" | "done" | "error";
@@ -121,6 +125,7 @@ function normalizeSessionMessages(messages: ChatSessionMessageRecord[]): ChatMes
       content: message.content,
       proposal: message.proposal ?? undefined,
       thinking: message.thinking ?? undefined,
+      attachments: message.attachments ?? [],
       state: message.state ?? "done",
       thinkingState: message.thinking ? "done" : "idle",
     }));
@@ -133,6 +138,7 @@ function serializeSessionMessages(messages: ChatMessage[]): ChatSessionMessageRe
     content: message.content,
     proposal: message.proposal ?? null,
     thinking: message.thinking ?? null,
+    attachments: message.attachments ?? [],
     state: message.state ?? "done",
   }));
 }
@@ -146,6 +152,7 @@ function sessionMessagesSignature(messages: ChatMessage[]): string {
       proposal_id: message.proposal?.proposal_id ?? null,
       proposal_status: message.proposal?.status ?? null,
       thinking: message.thinking ?? null,
+      attachments: message.attachments ?? [],
       state: message.state ?? null,
     })),
   );
@@ -605,6 +612,7 @@ export function ManagerChatPanel({
   async function submit() {
     if (!draft.trim() || busy || !sessionId) return;
     const text = draft.trim();
+    const messageAttachments = attachments.map((attachment) => ({ ...attachment }));
     const context = attachments.length
       ? `上下文附件: ${attachments.map((a) => `[${a.type === "card" ? "卡片" : "资产"}: ${a.label}; id=${a.id}]`).join(" ")}\n\n${text}`
       : text;
@@ -613,7 +621,7 @@ export function ManagerChatPanel({
     const managerMessageId = createMessageId();
     setMessages((prev) => [
       ...prev,
-      { id: userMessageId, role: "user", content: text, state: "done" },
+      { id: userMessageId, role: "user", content: text, attachments: messageAttachments, state: "done" },
       { id: managerMessageId, role: "manager", content: "", thinking: "", thinkingState: "idle", tools: [], state: "thinking" },
     ]);
     setDraft("");
@@ -792,6 +800,51 @@ export function ManagerChatPanel({
     return <Sparkles size={12} />;
   }
 
+  function renderMessageText(message: ChatMessage) {
+    if (message.role === "manager") {
+      return (
+        <div className="manager-markdown">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+          {message.state === "thinking" || message.state === "streaming" ? <span className="manager-stream-cursor" /> : null}
+        </div>
+      );
+    }
+    return (
+      <>
+        {message.content}
+        {message.state === "thinking" || message.state === "streaming" ? <span className="manager-stream-cursor" /> : null}
+      </>
+    );
+  }
+
+  function renderMessageAttachments(message: ChatMessage) {
+    if (!message.attachments?.length) {
+      return null;
+    }
+    return (
+      <div className={`manager-message-attachments ${message.role}`}>
+        {message.attachments.map((attachment) => (
+          <a
+            key={`${message.id}-${attachment.id}`}
+            className="manager-message-attachment"
+            href={attachment.type === "asset" ? api.getResultAssetContentUrl(projectId, attachment.id) : undefined}
+            onClick={(event) => {
+              if (attachment.type !== "asset") {
+                event.preventDefault();
+              }
+            }}
+            target={attachment.type === "asset" ? "_blank" : undefined}
+            rel={attachment.type === "asset" ? "noreferrer" : undefined}
+            title={attachment.label}
+          >
+            {attachment.type === "card" ? <Sparkles size={13} /> : <FileText size={13} />}
+            <span>{attachment.label}</span>
+          </a>
+        ))}
+      </div>
+    );
+  }
+
   return (
     <section className="manager-chat-panel" style={{ maxHeight: "calc(100vh - 140px)" }}>
       <div className="manager-chat-header">
@@ -858,14 +911,11 @@ export function ManagerChatPanel({
                     ))}
                   </div>
                 ) : null}
+                {message.role === "user" ? renderMessageAttachments(message) : null}
                 <div className={`manager-message-bubble ${message.role}`}>
-                  <div className="manager-message-text">
-                    {message.content}
-                    {message.role === "manager" && (message.state === "thinking" || message.state === "streaming") ? (
-                      <span className="manager-stream-cursor" />
-                    ) : null}
-                  </div>
+                  <div className="manager-message-text">{renderMessageText(message)}</div>
                 </div>
+                {message.role === "manager" ? renderMessageAttachments(message) : null}
               </div>
             </div>
             ))

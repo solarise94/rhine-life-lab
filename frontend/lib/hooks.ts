@@ -4,6 +4,35 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
+import { CreateProjectPayload } from "@/lib/types";
+
+export function useProjects() {
+  return useQuery({
+    queryKey: queryKeys.projects,
+    queryFn: () => api.listProjects(),
+  });
+}
+
+export function useCreateProjectMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: CreateProjectPayload) => api.createProject(payload),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
+    },
+  });
+}
+
+export function useDeleteProjectMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (projectId: string) => api.deleteProject(projectId),
+    onSuccess: async (_data, projectId) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
+      queryClient.removeQueries({ queryKey: queryKeys.project(projectId) });
+    },
+  });
+}
 
 export function useProjectSnapshot(projectId: string) {
   return useQuery({

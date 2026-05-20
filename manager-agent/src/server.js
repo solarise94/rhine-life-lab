@@ -14,28 +14,34 @@ const WAIT_LOG_INTERVAL_MS = Number(process.env.MANAGER_AGENT_WAIT_LOG_INTERVAL_
 
 const SYSTEM_PROMPT = `You are the Manager AI for Blueprint RE, a bioinformatics workflow manager.
 
-You are an interactive chat agent. Answer ordinary questions directly. Use tools only when current project context, data asset timeline, result asset preview, or card changes are needed.
+You are an interactive project agent. Answer directly when the user is asking a general question. Use tools when they materially improve correctness or when the user asks you to inspect or change the current project.
 
-Hard permissions:
-- You may read project context through get_project_context.
-- You may inspect data assets, planned outputs, producer/consumer relations, and workspace paths through list_data_assets.
-- You may create, update, and cancel cards through create_card, update_card, and delete_card.
-- You may read result assets through read_result_asset, but not arbitrary files.
-- You must not run shell commands, write scripts, execute analyses, or edit files.
-- If a tool fails validation, inspect the error, correct your arguments, and retry when possible.
+Core model:
+- The blueprint is represented by cards. A card is the editable unit of the blueprint.
+- Data assets are referenced by asset_id. Card outputs are expected/planned assets; later card inputs can reuse those asset_ids.
+- Card step is the timeline layer. A card must be later than the assets it consumes.
 
-Tool-use contract:
-- For greetings, explanations, brainstorming, or analysis suggestions, answer in text without tools unless current project state is required.
-- Before changing a card, call get_project_context if exact ids are uncertain.
-- Call list_data_assets when selecting input asset ids, file ids, step numbers, or downstream dependencies.
-- Do not use or mention blueprint proposal, blueprint review, or approval flows. Card tools apply direct validated changes.
-- For multi-step workflow creation, create the next valid card layer. Use card.outputs[].asset_id as the source of planned assets and downstream card.inputs[].asset_id to reuse those ids.
-- If the backend says a card step is too early, increase step to the required value. If an input asset is missing, use list_data_assets or create an upstream card output first.
-- Reuse existing card ids and module ids when updating existing work. Create new ids only for genuinely new cards.
+Available capabilities:
+- get_project_context reads current cards, modules, assets, runs, and claims.
+- list_data_assets reads materialized assets, planned outputs, workspace paths, producer/consumer relations, and timeline steps.
+- create_card, update_card, and delete_card directly modify blueprint cards after backend validation.
+- read_result_asset reads a whitelisted result asset preview by asset_id.
+
+Judgment:
+- Decide whether current project context is needed. If exact card ids, asset ids, steps, or current blueprint state matter, inspect the project first.
+- For broad workflow additions, inspect data assets/timeline before choosing steps and asset_ids.
+- For simple conceptual questions, answer without tools.
+- For blueprint/card changes, use card tools directly once you have enough context. Do not describe a change as complete unless a write tool succeeded.
+- If a write tool returns ok:false, use the message/retry_hint to correct arguments and retry when the correction is clear. If it is not clear, inspect context or ask a focused question.
+- For multi-step workflow creation, you may create multiple cards in one conversation. Re-check the timeline when useful.
+- Reuse existing card ids when updating existing work. Create new ids only for genuinely new cards.
+- Do not use or mention blueprint proposal, blueprint review, or approval flows. Card tools are the source of truth for blueprint edits.
 - Keep final replies concise and user-facing.
 
 Card fields:
 - Required for create_card: card_id, card_type, title, status, summary.
+- Common card_type values: module, module_group.
+- Common status values: planned, proposed, accepted, cancelled, failed, stale, superseded.
 - Useful fields: step, why, inputs, outputs, key_findings, manager_review, next_actions, linked_modules, linked_runs, linked_assets, progress_note.
 - Inputs and outputs are arrays shaped like { label, asset_id?, status? }.
 - Prefer status "planned" for future work, "cancelled" for dormant/deleted cards, and "accepted" only for completed accepted work.`;
@@ -133,6 +139,45 @@ function textResult(text, details = {}, terminate = false) {
   };
 }
 
+function toolErrorResult(error, context = {}) {
+  const message = error instanceof Error ? error.message : String(error);
+  const payload = {
+    ok: false,
+    error_type: context.error_type || "tool_error",
+    message,
+    retry_hint: context.retry_hint || retryHintForToolError(message),
+    should_retry: context.should_retry ?? isRetryableToolError(message),
+    ...context,
+  };
+  return textResult(JSON.stringify(payload, null, 2), payload, false);
+}
+
+function isRetryableToolError(message) {
+  return /step too early|input asset .*missing|duplicate card_id|duplicate planned output|card not found|asset_id|required|title is required|summary is required/i.test(message);
+}
+
+function retryHintForToolError(message) {
+  if (/step too early/i.test(message)) {
+    return "Increase the card step to the minimum required by the error, then retry the same write tool.";
+  }
+  if (/input asset .*missing|asset_id/i.test(message)) {
+    return "Call list_data_assets to find the correct asset_id, or create an upstream card output first.";
+  }
+  if (/duplicate card_id/i.test(message)) {
+    return "Use update_card for the existing card, or choose a new card_id for genuinely new work.";
+  }
+  if (/duplicate planned output/i.test(message)) {
+    return "Reuse the existing planned asset_id as an input, or choose a distinct output asset_id.";
+  }
+  if (/card not found/i.test(message)) {
+    return "Call get_project_context to find the current card_id before retrying.";
+  }
+  if (/title is required|summary is required|required/i.test(message)) {
+    return "Fill the required card fields and retry.";
+  }
+  return "Inspect the error and retry with corrected arguments if the correction is clear.";
+}
+
 function logManagerEvent(event, fields = {}) {
   console.log(
     JSON.stringify({
@@ -228,7 +273,7 @@ function createTools(request) {
     {
       name: "get_project_context",
       label: "Read project context",
-      description: "Read the current Blueprint project, cards, modules, assets, runs, and claims. This is read-only. Use before referencing ids or changing cards.",
+      description: "Read the current Blueprint project. The blueprint is represented by cards. Returns cards, modules, materialized assets, runs, and claims. Use when current ids or state matter.",
       parameters: Type.Object({}),
       execute: async (toolCallId, _params, signal) => {
         const payload = await callLoggedTool(
@@ -247,7 +292,7 @@ function createTools(request) {
     {
       name: "list_data_assets",
       label: "Read data assets timeline",
-      description: "Read data assets, planned outputs, card timeline, and workspace path mapping. Use this when you need step order, producer/consumer relations, or to resolve file ids to workspace paths.",
+      description: "Read materialized assets, planned card outputs, card timeline, producer/consumer relations, and workspace path mapping. Use when choosing input asset_ids, output asset_ids, file ids, or card step layers.",
       parameters: Type.Object({}),
       execute: async (toolCallId, _params, signal) => {
         const payload = await callLoggedTool(
@@ -266,17 +311,17 @@ function createTools(request) {
     {
       name: "create_card",
       label: "Create card",
-      description: "Create a card directly. Use step, inputs, outputs, and linked_modules to express the card's place in the timeline.",
+      description: "Create a new blueprint card directly. A card is a blueprint unit. Use inputs[].asset_id and outputs[].asset_id to connect the DAG; use step to place it in the timeline. Backend validation returns ok:false with retry hints when arguments need correction.",
       parameters: Type.Object({
         card_id: Type.String(),
-        card_type: Type.String(),
+        card_type: Type.String({ description: "Usually module or module_group." }),
         title: Type.String(),
-        status: Type.String(),
+        status: Type.String({ description: "Usually planned for future work; proposed for tentative work; accepted only for completed accepted work; cancelled for removed work." }),
         step: Type.Optional(Type.Number()),
         summary: Type.String(),
         why: Type.Optional(Type.String()),
-        inputs: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
-        outputs: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
+        inputs: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()), { description: "Array of { label, asset_id?, status? }. Use exact asset_id values from list_data_assets when known." })),
+        outputs: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()), { description: "Array of { label, asset_id?, status? }. These are expected/planned assets for downstream cards." })),
         key_findings: Type.Optional(Type.Array(Type.String())),
         manager_review: Type.Optional(Type.String()),
         next_actions: Type.Optional(Type.Array(Type.String())),
@@ -286,31 +331,35 @@ function createTools(request) {
         progress_note: Type.Optional(Type.String()),
       }),
       execute: async (toolCallId, params, signal) => {
-        const payload = await callLoggedTool(
-          "create_card",
-          toolCallId,
-          projectId,
-          baseUrl,
-          token,
-          `/internal/manager-tools/projects/${projectId}/cards`,
-          {
-            method: "POST",
-            body: params,
-          },
-          signal,
-        );
-        return textResult(JSON.stringify(payload, null, 2), payload, true);
+        try {
+          const payload = await callLoggedTool(
+            "create_card",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/cards`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify({ ok: true, ...payload }, null, 2), { ok: true, ...payload });
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "create_card_failed", tool_name: "create_card" });
+        }
       },
     },
     {
       name: "update_card",
       label: "Update card",
-      description: "Update an existing card directly. The backend will reject cards whose step is earlier than their input assets require.",
+      description: "Update an existing blueprint card directly. Use this for modifying blueprint content, status, step, inputs, outputs, or linked assets. Backend validation returns ok:false with retry hints when arguments need correction.",
       parameters: Type.Object({
         card_id: Type.String(),
-        card_type: Type.Optional(Type.String()),
+        card_type: Type.Optional(Type.String({ description: "Usually module or module_group." })),
         title: Type.Optional(Type.String()),
-        status: Type.Optional(Type.String()),
+        status: Type.Optional(Type.String({ description: "Usually planned, proposed, accepted, cancelled, failed, stale, or superseded." })),
         step: Type.Optional(Type.Number()),
         summary: Type.Optional(Type.String()),
         why: Type.Optional(Type.String()),
@@ -326,26 +375,30 @@ function createTools(request) {
       }),
       execute: async (toolCallId, params, signal) => {
         const { card_id: cardId, ...body } = params;
-        const payload = await callLoggedTool(
-          "update_card",
-          toolCallId,
-          projectId,
-          baseUrl,
-          token,
-          `/internal/manager-tools/projects/${projectId}/cards/${cardId}`,
-          {
-            method: "PATCH",
-            body,
-          },
-          signal,
-        );
-        return textResult(JSON.stringify(payload, null, 2), payload, true);
+        try {
+          const payload = await callLoggedTool(
+            "update_card",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/cards/${cardId}`,
+            {
+              method: "PATCH",
+              body,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify({ ok: true, ...payload }, null, 2), { ok: true, ...payload });
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "update_card_failed", tool_name: "update_card" });
+        }
       },
     },
     {
       name: "delete_card",
       label: "Delete card",
-      description: "Cancel a card by exact card_id.",
+      description: "Cancel a blueprint card by exact card_id. This marks the card as cancelled instead of deleting historical records. Use get_project_context first if the exact card_id is uncertain.",
       parameters: Type.Object({
         card_id: Type.String(),
         reason: Type.Optional(Type.String()),
@@ -353,20 +406,24 @@ function createTools(request) {
       }),
       execute: async (toolCallId, params, signal) => {
         const { card_id: cardId, ...body } = params;
-        const payload = await callLoggedTool(
-          "delete_card",
-          toolCallId,
-          projectId,
-          baseUrl,
-          token,
-          `/internal/manager-tools/projects/${projectId}/cards/${cardId}`,
-          {
-            method: "DELETE",
-            body,
-          },
-          signal,
-        );
-        return textResult(JSON.stringify(payload, null, 2), payload, true);
+        try {
+          const payload = await callLoggedTool(
+            "delete_card",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/cards/${cardId}`,
+            {
+              method: "DELETE",
+              body,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify({ ok: true, ...payload }, null, 2), { ok: true, ...payload });
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "delete_card_failed", tool_name: "delete_card" });
+        }
       },
     },
     {
@@ -556,12 +613,13 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     if (event.type === "tool_execution_end") {
       const label = toolStatusLabel(event.toolName);
       const details = event.result?.details;
+      const toolFailed = Boolean(event.isError || details?.ok === false);
       logManagerEvent("tool_execution_end", {
         run_id: runId,
         project_id: projectId,
         tool_name: event.toolName,
         tool_call_id: event.toolCallId,
-        is_error: Boolean(event.isError),
+        is_error: toolFailed,
         details_bytes: payloadSize(details),
         ...summarizeToolPayload(event.toolName, details),
       });
@@ -569,9 +627,9 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
         type: "tool_end",
         tool_name: event.toolName,
         tool_call_id: event.toolCallId,
-        label: event.isError ? `${label.active}失败` : label.done,
+        label: toolFailed ? `${label.active}失败` : label.done,
         done_label: label.done,
-        is_error: Boolean(event.isError),
+        is_error: toolFailed,
       });
     }
     if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -582,7 +640,7 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     user_request: payload.message,
     selected_context: payload.context || {},
     instruction:
-      "Answer naturally. Use tools only when the user asks about current project state, data asset timeline, result assets, or card changes. For card changes, choose the next valid card layer from the timeline and use create_card, update_card, or delete_card directly.",
+      "Answer naturally. Decide whether project tools are needed. If you change the blueprint, remember that cards are the blueprint units and use create_card, update_card, or delete_card directly. After ok:false tool results, correct and retry when the fix is clear.",
   };
   const abortController = new AbortController();
   const timeoutId = setTimeout(() => {

@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   BarChart3,
+  ChevronDown,
   FileText,
   FolderGit2,
   Files,
@@ -16,7 +17,7 @@ import {
 } from "lucide-react";
 
 import { api } from "@/lib/api";
-import { useChatSessions } from "@/lib/hooks";
+import { useChatSessions, useProjects } from "@/lib/hooks";
 import { queryKeys } from "@/lib/query-keys";
 import { useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 import { ChatSessionSummary } from "@/lib/types";
@@ -35,11 +36,18 @@ export function SideNav({ projectId, current }: { projectId: string; current: st
   const router = useRouter();
   const queryClient = useQueryClient();
   const sessionsQuery = useChatSessions(projectId);
+  const projectsQuery = useProjects();
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const currentChatSessionId = useWorkspaceUiStore((s) => s.currentChatSessionIdByProject[projectId]);
   const setCurrentChatSessionId = useWorkspaceUiStore((s) => s.setCurrentChatSessionId);
   const clearAttachments = useWorkspaceUiStore((s) => s.clearAttachments);
   const clearDraftMessage = useWorkspaceUiStore((s) => s.clearDraftMessage);
   const sessions = sessionsQuery.data?.items ?? [];
+  const projects = useMemo(
+    () => [...(projectsQuery.data?.items ?? [])].sort((left, right) => left.name.localeCompare(right.name)),
+    [projectsQuery.data],
+  );
+  const currentProject = projects.find((project) => project.project_id === projectId);
 
   const createSessionMutation = useMutation({
     mutationFn: () => api.createChatSession(projectId),
@@ -118,6 +126,13 @@ export function SideNav({ projectId, current }: { projectId: string; current: st
     router.push(`/projects/${projectId}/tasks`);
   }
 
+  function openProject(nextProjectId: string) {
+    setProjectMenuOpen(false);
+    if (nextProjectId !== projectId) {
+      router.push(`/projects/${nextProjectId}/tasks`);
+    }
+  }
+
   return (
     <aside className="side-nav">
       <div className="nav-brand">
@@ -149,6 +164,44 @@ export function SideNav({ projectId, current }: { projectId: string; current: st
             </p>
           </div>
         </div>
+      </div>
+
+      <div className="nav-project-switcher">
+        <button
+          type="button"
+          className="nav-project-button"
+          onClick={() => setProjectMenuOpen((value) => !value)}
+          title="切换项目"
+        >
+          <Beaker size={16} />
+          <span className="nav-project-copy">
+            <strong>{currentProject?.name ?? projectId}</strong>
+            <span>{projectId}</span>
+          </span>
+          <ChevronDown size={15} />
+        </button>
+        {projectMenuOpen ? (
+          <div className="nav-project-menu">
+            {projects.map((project) => (
+              <button
+                key={project.project_id}
+                type="button"
+                className={project.project_id === projectId ? "active" : ""}
+                onClick={() => openProject(project.project_id)}
+              >
+                <Beaker size={14} />
+                <span>{project.name}</span>
+              </button>
+            ))}
+            <div className="nav-project-divider" />
+            <Link href="/projects" onClick={() => setProjectMenuOpen(false)}>
+              管理项目
+            </Link>
+            <Link href="/projects" onClick={() => setProjectMenuOpen(false)}>
+              新建项目
+            </Link>
+          </div>
+        ) : null}
       </div>
 
       <div className="nav-section-label nav-session-label">

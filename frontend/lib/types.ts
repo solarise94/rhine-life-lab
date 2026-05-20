@@ -155,6 +155,7 @@ export interface ChatSessionMessageRecord {
   content: string;
   proposal?: Proposal | null;
   thinking?: string | null;
+  attachments?: Array<{ type: "card" | "asset"; id: string; label: string }> | null;
   state?: "idle" | "thinking" | "streaming" | "done" | "error" | null;
 }
 
@@ -197,7 +198,7 @@ export interface Proposal {
   updated_at: string;
 }
 
-export interface ProjectSummary {
+export interface ProjectState {
   project_id: string;
   name: string;
   status: string;
@@ -205,13 +206,22 @@ export interface ProjectSummary {
   current_goal: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface ProjectSummary extends ProjectState {
   card_counts: Record<string, number>;
   result_counts: Record<string, number>;
 }
 
+export interface CreateProjectPayload {
+  project_id: string;
+  name: string;
+  current_goal: string;
+}
+
 export interface ProjectSnapshot {
   summary: ProjectSummary;
-  project: ProjectSummary;
+  project: ProjectState;
   cards: Card[];
   graph: {
     modules: Array<Record<string, unknown>>;

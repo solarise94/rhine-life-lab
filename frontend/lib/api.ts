@@ -6,9 +6,12 @@ import {
   ChatSessionMessageRecord,
   ChatSessionSummary,
   ChatUploadResponse,
+  CreateProjectPayload,
   Proposal,
   ProjectFiles,
   ProjectSnapshot,
+  ProjectState,
+  ProjectSummary,
   ReportSection,
   RunEvent,
   RuntimeApprovalDecision,
@@ -81,6 +84,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  listProjects() {
+    return request<{ items: ProjectSummary[] }>("/projects");
+  },
+  createProject(payload: CreateProjectPayload) {
+    return request<{ project: ProjectState }>("/projects", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+  deleteProject(projectId: string) {
+    return request<{ ok: boolean }>(`/projects/${projectId}`, {
+      method: "DELETE",
+    });
+  },
   getProject(projectId: string) {
     return request<ProjectSnapshot>(`/projects/${projectId}`);
   },

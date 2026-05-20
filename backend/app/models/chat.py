@@ -39,12 +39,19 @@ class ChatResponse(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ChatMessageAttachment(BaseModel):
+    type: Literal["card", "asset"]
+    id: str
+    label: str
+
+
 class ChatSessionMessage(BaseModel):
     id: str
     role: Literal["user", "manager"]
     content: str
     proposal: Proposal | None = None
     thinking: str | None = None
+    attachments: list[ChatMessageAttachment] = Field(default_factory=list)
     state: Literal["idle", "thinking", "streaming", "done", "error"] | None = None
 
 

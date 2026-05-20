@@ -29,6 +29,12 @@ def create_project(request: CreateProjectRequest, project_service: ProjectServic
     return {"project": project}
 
 
+@router.delete("/{project_id}")
+def delete_project(project_id: str, project_service: ProjectService = Depends(get_project_service)) -> dict:
+    project_service.delete_project(project_id)
+    return {"ok": True}
+
+
 @router.get("/{project_id}")
 def get_project(project_id: str, project_service: ProjectService = Depends(get_project_service)) -> dict:
     return project_service.get_project_snapshot(project_id)

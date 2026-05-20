@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import re
+import shutil
+from pathlib import Path
 from threading import RLock
+
+from fastapi import HTTPException
 
 from app.core.config import get_settings
 from app.core.paths import (
@@ -24,6 +29,9 @@ from app.services.graph_store import GraphStore
 from app.services.utils import atomic_write_json, utc_now
 
 
+PROJECT_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
 class ProjectService:
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -31,6 +39,7 @@ class ProjectService:
         self._locks: dict[str, RLock] = {}
 
     def project_path(self, project_id: str) -> Path:
+        self._validate_project_id(project_id)
         return project_root(self.settings.data_root, project_id)
 
     def lock_for(self, project_id: str) -> RLock:
@@ -74,6 +83,8 @@ class ProjectService:
         seed_demo: bool = False,
     ) -> ProjectState:
         root = self.project_path(project_id)
+        if root.exists():
+            raise HTTPException(status_code=409, detail=f"Project already exists: {project_id}")
         root.mkdir(parents=True, exist_ok=True)
         for relative in [
             GRAPH_DIR,
@@ -137,6 +148,15 @@ class ProjectService:
         git.init_repo()
         git.commit("Initialize project scaffold")
         return state
+
+    def delete_project(self, project_id: str) -> None:
+        root = self.project_path(project_id)
+        if not root.exists():
+            raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+        if len(self.list_projects()) <= 1:
+            raise HTTPException(status_code=400, detail="Cannot delete the only project.")
+        shutil.rmtree(root)
+        self._locks.pop(project_id, None)
 
     def _seed_demo(self, store: GraphStore, state: ProjectState) -> None:
         now = utc_now()
@@ -325,6 +345,8 @@ class ProjectService:
         store.save_cards(cards)
 
     def get_project_snapshot(self, project_id: str) -> dict:
+        if not (self.project_path(project_id) / "project.json").exists():
+            raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
         store = self.graph_store(project_id)
         project = store.load_project_state()
         cards = store.load_cards()
@@ -350,3 +372,11 @@ class ProjectService:
             key = getattr(item, attr)
             counts[key] = counts.get(key, 0) + 1
         return counts
+
+    @staticmethod
+    def _validate_project_id(project_id: str) -> None:
+        if not PROJECT_ID_RE.fullmatch(project_id):
+            raise HTTPException(
+                status_code=422,
+                detail="project_id must use lowercase letters, numbers, and hyphens only.",
+            )

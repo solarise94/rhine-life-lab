@@ -5,245 +5,43 @@ import time
 import unittest
 
 from app.core.config import get_settings
+from app.models.cards import Card
 from app.models.chat import ChatRequest, ChatSessionMessage
 from app.models.graph import Asset, GraphState
 from app.models.patches import GraphPatch, ValidationResult
 from app.services.chat_session_service import ChatSessionService
-from app.services.manifest_service import ManifestService
-from app.services.manager_planner import DeepSeekManagerPlanner, ManagerPlanDraft, ManagerPlanningError
-from app.services.manager_service import ManagerService
 from app.services.flow_service import FlowService
+from app.services.manager_planner import DeepSeekManagerPlanner, ManagerPlanningError
+from app.services.manager_service import ManagerService
+from app.services.manifest_service import ManifestService
 from app.services.patch_apply import PatchApplyService
 from app.services.patch_validator import PatchValidator
 from app.services.project_file_service import ProjectFileService
 from app.services.project_service import ProjectService
-from app.services.runtime_approval_service import RuntimeApprovalService
 from app.services.result_asset_service import ResultAssetService
+from app.services.runtime_approval_service import RuntimeApprovalService
 from app.services.worker_service import WorkerService
-
-
-class StubPlanner:
-    def __init__(self) -> None:
-        self.turns = 0
-
-    def agent_turn(self, messages: list[dict], tools: list[dict]) -> dict:
-        self.turns += 1
-        if self.turns == 1:
-            return {
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": "toolu_planner",
-                        "name": "planner_patch",
-                        "input": {"instruction": "客户想增加免疫浸润分析模块"},
-                    }
-                ]
-            }
-        return {"content": [{"type": "text", "text": "我已生成一个可审核的免疫浸润分析 proposal。"}]}
-
-    def plan(self, snapshot: dict, chat_request: ChatRequest, extra_context: dict | None = None) -> ManagerPlanDraft:
-        return ManagerPlanDraft.model_validate(
-            {
-                "response_type": "proposal",
-                "message": "我建议新增免疫浸润分析模块。",
-                "title": "新增免疫浸润分析",
-                "summary": "我建议新增“免疫浸润分析”模块，依赖当前已接受的 DEG 结果。",
-                "impact_summary": "会新增一个下游模块和卡片，不影响现有差异表达结果。",
-                "patch_type": "add_module",
-                "reason": chat_request.message,
-                "ops": [
-                    {
-                        "op": "create_module",
-                        "payload": {
-                            "module_id": "module_immune_infiltration_test",
-                            "title": "免疫浸润分析",
-                            "status": "planned",
-                            "summary": "基于已接受的 DEG 结果进行免疫浸润分析。",
-                            "depends_on_assets": ["deg_table_v1"],
-                            "expected_outputs": ["immune_score_table", "immune_heatmap"],
-                            "linked_cards": ["card_immune_infiltration_test"],
-                        },
-                    },
-                    {
-                        "op": "create_card",
-                        "payload": {
-                            "card_id": "card_immune_infiltration_test",
-                            "card_type": "module",
-                            "title": "免疫浸润分析",
-                            "status": "planned",
-                            "summary": "基于差异表达结果新增免疫浸润分析模块。",
-                            "why": "用于解释免疫相关微环境变化。",
-                            "inputs": [],
-                            "outputs": [],
-                            "key_findings": [],
-                            "manager_review": "待执行。",
-                            "next_actions": ["开始执行", "修改方案", "取消模块"],
-                            "linked_modules": ["module_immune_infiltration_test"],
-                            "linked_runs": [],
-                            "linked_assets": ["deg_table_v1"],
-                        },
-                    },
-                ],
-            }
-        )
-
-
-class GoLikePlanner:
-    def __init__(self) -> None:
-        self.turns = 0
-
-    def agent_turn(self, messages: list[dict], tools: list[dict]) -> dict:
-        self.turns += 1
-        if self.turns == 1:
-            return {
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": "toolu_planner",
-                        "name": "planner_patch",
-                        "input": {"instruction": "增加 GO 富集分析"},
-                    }
-                ]
-            }
-        return {"content": [{"type": "text", "text": "我已生成一个 GO 富集分析 proposal。"}]}
-
-    def plan(self, snapshot: dict, chat_request: ChatRequest, extra_context: dict | None = None) -> ManagerPlanDraft:
-        return ManagerPlanDraft.model_validate(
-            {
-                "response_type": "proposal",
-                "message": "建议在功能富集分析下新增 GO 子模块。",
-                "title": "新增 GO 富集分析子模块",
-                "summary": "在现有功能富集分析模块组下新增 GO 富集分析子模块。",
-                "impact_summary": "会新增 GO 富集分析 card，并挂到现有模块组下。",
-                "patch_type": "add_module",
-                "reason": chat_request.message,
-                "ops": [
-                    {
-                        "op": "create_module",
-                        "payload": {
-                            "module_id": "module_go_enrichment",
-                            "title": "GO 富集分析",
-                            "status": "planned",
-                            "summary": "基于 DEG 结果进行 GO 富集分析。",
-                            "depends_on_assets": ["deg_table_v1", "ranked_gene_list_v1"],
-                            "expected_outputs": ["go_enrichment_table", "go_dot_plot"],
-                        },
-                    },
-                    {
-                        "op": "add_submodule",
-                        "payload": {
-                            "parent_module_id": "module_group_enrichment",
-                            "child_module_id": "module_go_enrichment",
-                        },
-                    },
-                    {
-                        "op": "create_card",
-                        "payload": {
-                            "card_id": "card_go_enrichment",
-                            "card_type": "module",
-                            "title": "GO 富集分析",
-                            "status": "proposed",
-                            "summary": "基于 DEG 结果进行 GO 富集分析。",
-                            "linked_modules": ["module_go_enrichment"],
-                            "linked_assets": ["deg_table_v1", "ranked_gene_list_v1"],
-                        },
-                    },
-                ],
-            }
-        )
-
-
-class ModifyLikePlanner:
-    def __init__(self) -> None:
-        self.turns = 0
-
-    def agent_turn(self, messages: list[dict], tools: list[dict]) -> dict:
-        self.turns += 1
-        if self.turns == 1:
-            return {
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": "toolu_planner",
-                        "name": "planner_patch",
-                        "input": {"instruction": "强调免疫浸润分析依赖 DEG"},
-                    }
-                ]
-            }
-        return {"content": [{"type": "text", "text": "我已生成一个修改免疫浸润说明的 proposal。"}]}
-
-    def plan(self, snapshot: dict, chat_request: ChatRequest, extra_context: dict | None = None) -> ManagerPlanDraft:
-        return ManagerPlanDraft.model_validate(
-            {
-                "response_type": "proposal",
-                "message": "更新免疫浸润分析描述，强调 DEG 依赖。",
-                "title": "修改免疫浸润分析提案",
-                "summary": "更新免疫浸润分析 card 与 module 的描述，强调 DEG 依赖。",
-                "impact_summary": "会更新现有 card 与 module 的说明文案。",
-                "patch_type": "update_card",
-                "reason": chat_request.message,
-                "ops": [
-                    {
-                        "op": "update_card",
-                        "payload": {
-                            "card_id": "card_immune_module",
-                            "title": "免疫浸润分析（依赖 DEG 结果）",
-                            "summary": "该模块严格依赖上游 DEG 结果。",
-                            "linked_assets": ["deg_table_v1"],
-                            "next_actions": ["接受提案", "修改提案", "查看影响"],
-                        },
-                    },
-                    {
-                        "op": "update_card",
-                        "payload": {
-                            "card_id": "module_immune_infiltration",
-                            "summary": "严格依赖上游差异表达分析模块的 DEG 结果表。",
-                            "depends_on_assets": ["deg_table_v1"],
-                            "expected_outputs": ["immune_score_table", "immune_heatmap"],
-                        },
-                    },
-                ],
-            }
-        )
-
-
-class FailingPlanner:
-    def agent_turn(self, messages: list[dict], tools: list[dict]) -> dict:
-        raise ManagerPlanningError("agent llm failed")
-
-    def plan(self, snapshot: dict, chat_request: ChatRequest, extra_context: dict | None = None) -> ManagerPlanDraft:
-        raise ManagerPlanningError("planner failed")
-
-
-class ToolDecisionPlanner:
-    def __init__(self) -> None:
-        self.turns = 0
-
-    def agent_turn(self, messages: list[dict], tools: list[dict]) -> dict:
-        self.turns += 1
-        if self.turns == 1:
-            return {
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": "toolu_add",
-                        "name": "draft_add_module",
-                        "input": {"instruction": "请新增一个 GO 富集分析模块并生成对应 card"},
-                    }
-                ]
-            }
-        return {"content": [{"type": "text", "text": "我已通过工具生成 GO 富集分析 proposal。"}]}
-
-    def plan(self, snapshot: dict, chat_request: ChatRequest, extra_context: dict | None = None) -> ManagerPlanDraft:
-        raise AssertionError("Planner should not be called when harness selected a backend tool")
 
 
 class AnswerOnlyPlanner:
     def agent_turn(self, messages: list[dict], tools: list[dict]) -> dict:
         return {"content": [{"type": "text", "text": "这是 DeepSeek 普通聊天回复。"}]}
 
-    def plan(self, snapshot: dict, chat_request: ChatRequest, extra_context: dict | None = None) -> ManagerPlanDraft:
-        raise AssertionError("Planner should not be called for ordinary chat")
+
+class FailingPlanner:
+    def agent_turn(self, messages: list[dict], tools: list[dict]) -> dict:
+        raise ManagerPlanningError("agent llm failed")
+
+
+class StubGitService:
+    def commit(self, _message: str) -> str:
+        return "test-commit"
+
+    def log(self, limit: int = 20) -> list[dict[str, str]]:
+        return []
+
+    def head(self) -> str:
+        return "test-commit"
 
 
 class ManagerFlowTest(unittest.TestCase):
@@ -258,7 +56,8 @@ class ManagerFlowTest(unittest.TestCase):
             current_goal="Test flow",
             seed_demo=True,
         )
-        self.manager = ManagerService(self.project_service, planner=StubPlanner())
+        self.project_service.git_service = lambda _project_id: StubGitService()
+        self.manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
         self.validator = PatchValidator(self.project_service)
         self.apply = PatchApplyService(self.project_service, self.validator)
         self.manifest_service = ManifestService(self.project_service)
@@ -272,23 +71,15 @@ class ManagerFlowTest(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_chat_accept_patch(self) -> None:
-        response = self.manager.chat("test-project", ChatRequest(message="客户想增加免疫浸润分析模块"))
-        self.assertIsNotNone(response.proposal)
-        proposal = self.manager.accept_proposal("test-project", response.proposal.proposal_id)
-        patch_payload = self.project_service.graph_store("test-project").load_patch(proposal.patch_id)
-        result = self.apply.apply_patch("test-project", GraphPatch.model_validate(patch_payload))
-        snapshot = self.project_service.get_project_snapshot("test-project")
-        self.assertTrue(result.commit_hash)
-        self.assertTrue(any(card.title == "免疫浸润分析" and card.status == "planned" for card in snapshot["cards"]))
-
     def test_run_and_review(self) -> None:
         run = self.worker.start_run("test-project", "card_enrichment_group")
         self._wait_for_run("test-project", run["run_id"])
         snapshot = self.project_service.get_project_snapshot("test-project")
         card = next(item for item in snapshot["cards"] if item.card_id == "card_enrichment_group")
         self.assertEqual(card.status, "needs_review")
+
         self.worker.review_run("test-project", run["run_id"], accept=True)
+
         snapshot = self.project_service.get_project_snapshot("test-project")
         card = next(item for item in snapshot["cards"] if item.card_id == "card_enrichment_group")
         self.assertEqual(card.status, "accepted")
@@ -385,6 +176,341 @@ class ManagerFlowTest(unittest.TestCase):
 
         remaining = self.chat_session_service.list_sessions("test-project")
         self.assertEqual([second.session_id], [item.session_id for item in remaining])
+
+    def test_plain_chat_calls_llm_answer_and_does_not_mutate_cards(self) -> None:
+        before_cards = self.project_service.graph_store("test-project").load_cards()
+
+        response = self.manager.chat("test-project", ChatRequest(message="你好，先帮我解释一下现在项目里有哪些分析模块"))
+
+        after_cards = self.project_service.graph_store("test-project").load_cards()
+        self.assertIsNone(response.proposal)
+        self.assertEqual([card.model_dump() for card in before_cards], [card.model_dump() for card in after_cards])
+        self.assertEqual("这是 DeepSeek 普通聊天回复。", response.message)
+
+    def test_plain_chat_llm_error_is_not_hidden(self) -> None:
+        manager = ManagerService(self.project_service, planner=FailingPlanner())
+        with self.assertRaises(ManagerPlanningError):
+            manager.chat("test-project", ChatRequest(message="hi"))
+
+    def test_analysis_suggestion_question_stays_plain_chat(self) -> None:
+        response = self.manager.chat("test-project", ChatRequest(message="帮我看看我现在的分析流程，有没有还可以补充的"))
+        self.assertIsNone(response.proposal)
+        self.assertEqual("这是 DeepSeek 普通聊天回复。", response.message)
+
+    def test_get_project_context_exposes_cards_and_graph(self) -> None:
+        context = self.manager.blueprint_tools.get_project_context("test-project")
+        self.assertEqual("test-project", context["project"]["project_id"])
+        self.assertTrue(any(card["card_id"] == "card_de_analysis" for card in context["cards"]))
+        self.assertTrue(any(module["module_id"] == "module_de_analysis" for module in context["modules"]))
+        self.assertTrue(any(asset["asset_id"] == "deg_table_v1" for asset in context["assets"]))
+
+    def test_list_data_assets_exposes_materialized_and_planned_timeline(self) -> None:
+        self.manager.blueprint_tools.create_card(
+            "test-project",
+            {
+                "card_id": "card_go_bp",
+                "title": "GO BP 富集分析",
+                "summary": "基于 DEG 结果进行 GO BP 富集。",
+                "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
+                "outputs": [{"label": "GO BP enrichment", "asset_id": "go_bp_result"}],
+            },
+        )
+
+        listing = self.manager.blueprint_tools.list_data_assets("test-project")
+        self.assertTrue(any(asset["asset_id"] == "deg_table_v1" for asset in listing["materialized_assets"]))
+        self.assertTrue(any(asset["planned"] and asset["producer_card_id"] == "card_go_bp" for asset in listing["planned_assets"]))
+        enrichment = next(card for card in listing["cards"] if card["card_id"] == "card_enrichment_group")
+        self.assertEqual(2, enrichment["step"])
+        self.assertEqual(["deg_table_v1", "ranked_gene_list_v1"], enrichment["required_asset_ids"])
+        self.assertEqual({"audit_card_tools": False}, listing["tool_policy"])
+
+    def test_create_card_assigns_step_and_output_asset_ids(self) -> None:
+        result = self.manager.blueprint_tools.create_card(
+            "test-project",
+            {
+                "card_id": "card_go_bp",
+                "title": "GO BP 富集分析",
+                "summary": "基于 DEG 结果进行 GO BP 富集。",
+                "why": "解释差异基因的生物过程。",
+                "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
+                "outputs": [{"label": "GO BP enrichment"}],
+                "linked_modules": ["module_group_enrichment"],
+                "linked_assets": ["deg_table_v1"],
+            },
+        )
+
+        card = Card.model_validate(result["card"])
+        self.assertEqual("card_go_bp", card.card_id)
+        self.assertEqual(2, card.step)
+        self.assertTrue(card.outputs[0].asset_id)
+        snapshot = self.project_service.get_project_snapshot("test-project")
+        self.assertTrue(any(item.card_id == "card_go_bp" for item in snapshot["cards"]))
+
+    def test_create_card_rejects_missing_input_with_retryable_error(self) -> None:
+        with self.assertRaisesRegex(ManagerPlanningError, "Input asset missing_deg is missing"):
+            self.manager.blueprint_tools.create_card(
+                "test-project",
+                {
+                    "card_id": "card_missing_input",
+                    "title": "Missing Input",
+                    "summary": "Should fail because input is unknown.",
+                    "inputs": [{"label": "missing", "asset_id": "missing_deg"}],
+                    "outputs": [{"label": "result", "asset_id": "missing_input_result"}],
+                },
+            )
+
+    def test_create_card_rejects_step_earlier_than_input_asset_timeline(self) -> None:
+        self.manager.blueprint_tools.create_card(
+            "test-project",
+            {
+                "card_id": "card_qc",
+                "title": "QC",
+                "summary": "Produce filtered counts.",
+                "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
+                "outputs": [{"label": "filtered counts", "asset_id": "filtered_counts"}],
+            },
+        )
+
+        with self.assertRaisesRegex(ManagerPlanningError, "Increase step to at least 2"):
+            self.manager.blueprint_tools.create_card(
+                "test-project",
+                {
+                    "card_id": "card_downstream_too_early",
+                    "title": "Downstream",
+                    "summary": "Consumes a planned upstream output.",
+                    "step": 1,
+                    "inputs": [{"label": "filtered counts", "asset_id": "filtered_counts"}],
+                    "outputs": [{"label": "downstream result", "asset_id": "downstream_result"}],
+                },
+            )
+
+    def test_update_card_changes_content_and_revalidates_step(self) -> None:
+        self.manager.blueprint_tools.create_card(
+            "test-project",
+            {
+                "card_id": "card_qc",
+                "title": "QC",
+                "summary": "Produce filtered counts.",
+                "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
+                "outputs": [{"label": "filtered counts", "asset_id": "filtered_counts"}],
+            },
+        )
+        result = self.manager.blueprint_tools.update_card(
+            "test-project",
+            {
+                "card_id": "card_qc",
+                "title": "QC and filtering",
+                "summary": "Filter low-quality samples and features.",
+            },
+        )
+        self.assertEqual("QC and filtering", result["card"]["title"])
+
+        with self.assertRaisesRegex(ManagerPlanningError, "Increase step to at least 2"):
+            self.manager.blueprint_tools.update_card(
+                "test-project",
+                {
+                    "card_id": "card_qc",
+                    "inputs": [{"label": "own output", "asset_id": "filtered_counts"}],
+                    "step": 1,
+                },
+            )
+
+    def test_delete_card_marks_card_cancelled(self) -> None:
+        result = self.manager.blueprint_tools.delete_card(
+            "test-project",
+            {"card_id": "card_immune_module", "reason": "用户暂时不做免疫浸润分析"},
+        )
+        self.assertEqual("cancelled", result["card"]["status"])
+        self.assertIn("用户暂时不做免疫浸润分析", result["card"]["manager_review"])
+
+        snapshot = self.project_service.get_project_snapshot("test-project")
+        card = next(item for item in snapshot["cards"] if item.card_id == "card_immune_module")
+        self.assertEqual("cancelled", card.status)
+
+    def test_create_card_rejects_duplicate_card_id_and_output_asset(self) -> None:
+        with self.assertRaisesRegex(ManagerPlanningError, "Duplicate card_id"):
+            self.manager.blueprint_tools.create_card(
+                "test-project",
+                {
+                    "card_id": "card_de_analysis",
+                    "title": "Duplicate",
+                    "summary": "Duplicate card id.",
+                    "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
+                    "outputs": [{"label": "duplicate", "asset_id": "duplicate_output"}],
+                },
+            )
+
+        with self.assertRaisesRegex(ManagerPlanningError, "already exists as a materialized asset"):
+            self.manager.blueprint_tools.create_card(
+                "test-project",
+                {
+                    "card_id": "card_duplicate_deg",
+                    "title": "Duplicate DEG",
+                    "summary": "Duplicate a planned or materialized output.",
+                    "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
+                    "outputs": [{"label": "DEG", "asset_id": "deg_table_v1"}],
+                },
+            )
+
+        self.manager.blueprint_tools.create_card(
+            "test-project",
+            {
+                "card_id": "card_first_planned_output",
+                "title": "First planned output",
+                "summary": "Creates a planned output asset.",
+                "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
+                "outputs": [{"label": "planned result", "asset_id": "planned_duplicate_result"}],
+            },
+        )
+        with self.assertRaisesRegex(ManagerPlanningError, "Duplicate planned output asset_id values"):
+            self.manager.blueprint_tools.create_card(
+                "test-project",
+                {
+                    "card_id": "card_second_planned_output",
+                    "title": "Second planned output",
+                    "summary": "Tries to create the same planned output asset.",
+                    "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
+                    "outputs": [{"label": "planned result", "asset_id": "planned_duplicate_result"}],
+                },
+            )
+
+    def test_multi_card_timeline_and_dag_are_derived_from_card_outputs(self) -> None:
+        self.project_service.create_project(
+            project_id="timeline-project",
+            name="Timeline Project",
+            current_goal="Build a layered workflow",
+            seed_demo=False,
+        )
+        store = self.project_service.graph_store("timeline-project")
+        store.save_graph(
+            GraphState(
+                assets=[
+                    Asset(
+                        asset_id="raw_counts",
+                        asset_type="count_matrix",
+                        title="raw_counts.tsv",
+                        status="candidate",
+                        path="data/uploads/raw_counts.tsv",
+                        summary="Uploaded raw count matrix.",
+                    )
+                ]
+            )
+        )
+        manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
+
+        manager.blueprint_tools.create_card(
+            "timeline-project",
+            {
+                "card_id": "card_qc",
+                "title": "数据校验与过滤",
+                "summary": "过滤低质量样本并输出 filtered counts。",
+                "inputs": [{"label": "Raw counts", "asset_id": "raw_counts"}],
+                "outputs": [{"label": "Filtered counts", "asset_id": "filtered_counts"}],
+            },
+        )
+        manager.blueprint_tools.create_card(
+            "timeline-project",
+            {
+                "card_id": "card_deseq2",
+                "title": "DESeq2 差异分析",
+                "summary": "基于 filtered counts 输出 DEG 结果。",
+                "inputs": [{"label": "Filtered counts", "asset_id": "filtered_counts"}],
+                "outputs": [{"label": "DEG results", "asset_id": "deseq2_results"}],
+            },
+        )
+        manager.blueprint_tools.create_card(
+            "timeline-project",
+            {
+                "card_id": "card_kegg",
+                "title": "KEGG 通路富集",
+                "summary": "基于 DEG results 做 KEGG 富集。",
+                "inputs": [{"label": "DEG results", "asset_id": "deseq2_results"}],
+                "outputs": [{"label": "KEGG results", "asset_id": "kegg_results"}],
+            },
+        )
+
+        listing = manager.blueprint_tools.list_data_assets("timeline-project")
+        steps = {card["card_id"]: card["step"] for card in listing["cards"]}
+        self.assertEqual({"card_qc": 1, "card_deseq2": 2, "card_kegg": 3}, steps)
+
+        flow = FlowService(self.project_service).get_asset_flow("timeline-project")
+        self.assertTrue(
+            any(
+                edge["source_card_id"] == "card_qc"
+                and edge["target_card_id"] == "card_deseq2"
+                and edge["asset_id"] == "filtered_counts"
+                for edge in flow["card_edges"]
+            )
+        )
+        self.assertTrue(
+            any(
+                edge["source_card_id"] == "card_deseq2"
+                and edge["target_card_id"] == "card_kegg"
+                and edge["asset_id"] == "deseq2_results"
+                for edge in flow["card_edges"]
+            )
+        )
+
+        work_order = FlowService(self.project_service).get_work_order("timeline-project")
+        deseq2 = next(item for item in work_order["work_items"] if item["card_id"] == "card_deseq2")
+        kegg = next(item for item in work_order["work_items"] if item["card_id"] == "card_kegg")
+        self.assertEqual(["card_qc"], deseq2["depends_on_card_ids"])
+        self.assertEqual(["card_deseq2"], kegg["depends_on_card_ids"])
+        self.assertFalse(deseq2["can_start"])
+        self.assertIn("upstream_cards_not_accepted", deseq2["block_reasons"])
+
+    def test_read_result_asset_tool_returns_preview(self) -> None:
+        detail = self.manager.blueprint_tools.read_result_asset("test-project", "deg_table_v1")
+        self.assertEqual(detail["asset"].asset_id, "deg_table_v1")
+        self.assertIn("preview", detail)
+
+    def test_asset_flow_and_work_order_are_derived_for_ui(self) -> None:
+        asset_flow = self.flow_service.get_asset_flow("test-project")
+        self.assertTrue(
+            any(
+                edge["source_card_id"] == "card_de_analysis"
+                and edge["target_card_id"] == "card_enrichment_group"
+                and edge["asset_id"] == "deg_table_v1"
+                for edge in asset_flow["card_edges"]
+            )
+        )
+        self.assertTrue(
+            any(
+                edge["source_card_id"] is None
+                and edge["target_card_id"] == "card_de_analysis"
+                and edge["asset_id"] == "count_matrix_v1"
+                for edge in asset_flow["card_edges"]
+            )
+        )
+
+        work_order = self.flow_service.get_work_order("test-project")
+        enrichment = next(item for item in work_order["work_items"] if item["card_id"] == "card_enrichment_group")
+        immune = next(item for item in work_order["work_items"] if item["card_id"] == "card_immune_module")
+        self.assertIn("card_de_analysis", enrichment["depends_on_card_ids"])
+        self.assertTrue(enrichment["can_start"])
+        self.assertFalse(immune["can_start"])
+        self.assertIn("proposal_not_accepted", immune["block_reasons"])
+        self.assertTrue(any("card_enrichment_group" in batch["card_ids"] for batch in work_order["parallel_batches"]))
+
+    def test_tool_policy_can_enable_card_tool_audit(self) -> None:
+        policy = self.manager.blueprint_tools.set_tool_policy("test-project", {"audit_card_tools": True})
+        self.assertEqual({"audit_card_tools": True}, policy["tool_policy"])
+
+        self.manager.blueprint_tools.create_card(
+            "test-project",
+            {
+                "card_id": "card_audited",
+                "title": "Audited Card",
+                "summary": "Audit should be recorded when enabled.",
+                "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
+                "outputs": [{"label": "result", "asset_id": "audited_result"}],
+            },
+        )
+
+        graph = self.project_service.graph_store("test-project").load_graph()
+        audit_log = graph.metadata.get("card_tool_audit")
+        self.assertEqual("create_card", audit_log[-1]["action"])
+        self.assertEqual("card_audited", audit_log[-1]["card_id"])
 
     def test_validator_rejects_missing_ids_for_status_and_summary_ops(self) -> None:
         patch = GraphPatch.model_validate(
@@ -483,10 +609,29 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertIn("set_card_status", str(ctx.exception))
         self.assertIn("card_de_analysis", str(ctx.exception))
 
-    def test_git_commit_failure_does_not_rollback_applied_patch(self) -> None:
-        response = self.manager.chat("test-project", ChatRequest(message="客户想增加免疫浸润分析模块"))
-        proposal = self.manager.get_proposal("test-project", response.proposal.proposal_id)
-        patch_payload = self.project_service.graph_store("test-project").load_patch(proposal.patch_id)
+    def test_apply_patch_keeps_mutation_when_git_commit_fails(self) -> None:
+        patch = GraphPatch.model_validate(
+            {
+                "patch_id": "patch_create_direct_card",
+                "patch_type": "add_module",
+                "source": "manager_ai",
+                "reason": "test git failure",
+                "ops": [
+                    {
+                        "op": "create_card",
+                        "payload": {
+                            "card_id": "card_direct_patch",
+                            "card_type": "module",
+                            "title": "Direct Patch Card",
+                            "status": "planned",
+                            "summary": "Card created by patch apply.",
+                            "inputs": [],
+                            "outputs": [],
+                        },
+                    }
+                ],
+            }
+        )
 
         class BrokenGitService:
             def commit(self, _message: str) -> str:
@@ -495,586 +640,18 @@ class ManagerFlowTest(unittest.TestCase):
         original_git_service = self.project_service.git_service
         self.project_service.git_service = lambda _project_id: BrokenGitService()
         try:
-            result = self.apply.apply_patch("test-project", GraphPatch.model_validate(patch_payload))
+            result = self.apply.apply_patch("test-project", patch)
         finally:
             self.project_service.git_service = original_git_service
 
         snapshot = self.project_service.get_project_snapshot("test-project")
         self.assertIsNone(result.commit_hash)
         self.assertTrue(any("git commit failed" in warning for warning in result.warnings))
-        self.assertTrue(any(card.title == "免疫浸润分析" and card.status == "planned" for card in snapshot["cards"]))
-
-    def test_modify_proposal(self) -> None:
-        response = self.manager.chat("test-project", ChatRequest(message="客户想增加免疫浸润分析模块"))
-        proposal = self.manager.modify_proposal("test-project", response.proposal.proposal_id, ChatRequest(message="把说明改得更强调 DEG 依赖"))
-        self.assertEqual(proposal.proposal_id, response.proposal.proposal_id)
-        self.assertTrue(proposal.patch_id.startswith("patch_"))
-
-    def test_accept_go_like_proposal_creates_card(self) -> None:
-        manager = ManagerService(self.project_service, planner=GoLikePlanner())
-        response = manager.chat("test-project", ChatRequest(message="增加 GO 富集分析"))
-        proposal = manager.get_proposal("test-project", response.proposal.proposal_id)
-        patch_payload = self.project_service.graph_store("test-project").load_patch(proposal.patch_id)
-        result = self.apply.apply_patch("test-project", GraphPatch.model_validate(patch_payload))
-        manager.mark_proposal_status("test-project", proposal.proposal_id, "accepted")
-        snapshot = self.project_service.get_project_snapshot("test-project")
-        self.assertTrue(result.commit_hash)
-        self.assertTrue(any(card.card_id == "card_go_enrichment" for card in snapshot["cards"]))
-        group = next(module for module in snapshot["graph"].modules if module.module_id == "module_group_enrichment")
-        self.assertTrue(any(item.module_id == "module_go_enrichment" for item in group.submodules))
-
-    def test_accept_modify_like_proposal_updates_existing_card_and_module(self) -> None:
-        manager = ManagerService(self.project_service, planner=ModifyLikePlanner())
-        response = manager.chat("test-project", ChatRequest(message="强调免疫浸润分析依赖 DEG"))
-        proposal = manager.get_proposal("test-project", response.proposal.proposal_id)
-        patch_payload = self.project_service.graph_store("test-project").load_patch(proposal.patch_id)
-        self.apply.apply_patch("test-project", GraphPatch.model_validate(patch_payload))
-        manager.mark_proposal_status("test-project", proposal.proposal_id, "accepted")
-        snapshot = self.project_service.get_project_snapshot("test-project")
-        card = next(item for item in snapshot["cards"] if item.card_id == "card_immune_module")
-        module = next(item for item in snapshot["graph"].modules if item.module_id == "module_immune_infiltration")
-        self.assertIn("DEG", card.title)
-        self.assertIn("DEG", card.summary)
-        self.assertIn("DEG", module.summary)
-
-    def test_plain_chat_calls_llm_answer_and_does_not_create_proposal(self) -> None:
-        manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
-        before = self.project_service.graph_store("test-project").load_proposals()
-        response = manager.chat("test-project", ChatRequest(message="你好，先帮我解释一下现在项目里有哪些分析模块"))
-        after = self.project_service.graph_store("test-project").load_proposals()
-        self.assertIsNone(response.proposal)
-        self.assertEqual(len(before), len(after))
-        self.assertEqual("这是 DeepSeek 普通聊天回复。", response.message)
-
-    def test_plain_chat_llm_error_is_not_hidden(self) -> None:
-        manager = ManagerService(self.project_service, planner=FailingPlanner())
-        with self.assertRaises(ManagerPlanningError):
-            manager.chat("test-project", ChatRequest(message="hi"))
-
-    def test_analysis_suggestion_question_stays_plain_chat(self) -> None:
-        manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
-        response = manager.chat("test-project", ChatRequest(message="帮我看看我现在的分析流程，有没有还可以补充的"))
-        self.assertIsNone(response.proposal)
-        self.assertEqual("这是 DeepSeek 普通聊天回复。", response.message)
-
-    def test_tool_layer_go_request_creates_acceptible_proposal_and_card(self) -> None:
-        manager = ManagerService(self.project_service, planner=ToolDecisionPlanner())
-        response = manager.chat("test-project", ChatRequest(message="请新增一个 GO 富集分析模块并生成对应 card"))
-        self.assertIsNotNone(response.proposal)
-        self.assertIn("GO 富集分析", response.proposal.title)
-        patch_payload = self.project_service.graph_store("test-project").load_patch(response.proposal.patch_id)
-        result = self.apply.apply_patch("test-project", GraphPatch.model_validate(patch_payload))
-        manager.mark_proposal_status("test-project", response.proposal.proposal_id, "accepted")
-        snapshot = self.project_service.get_project_snapshot("test-project")
-        self.assertTrue(result.commit_hash)
-        self.assertTrue(any(card.card_id == "card_go_enrichment" for card in snapshot["cards"]))
-        self.assertTrue(any(module.module_id == "module_go_enrichment" for module in snapshot["graph"].modules))
-
-    def test_delete_and_restore_module_tools_create_applyable_proposals(self) -> None:
-        manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
-        delete_response = manager.blueprint_tools.delete_module_proposal(
-            "test-project",
-            {"module_id": "module_immune_infiltration", "reason": "用户要删除免疫浸润分析"},
-        )
-        self.assertIsNotNone(delete_response.proposal)
-        patch_payload = self.project_service.graph_store("test-project").load_patch(delete_response.proposal.patch_id)
-        self.apply.apply_patch("test-project", GraphPatch.model_validate(patch_payload))
-        manager.mark_proposal_status("test-project", delete_response.proposal.proposal_id, "accepted")
-        snapshot = self.project_service.get_project_snapshot("test-project")
-        module = next(item for item in snapshot["graph"].modules if item.module_id == "module_immune_infiltration")
-        card = next(item for item in snapshot["cards"] if item.card_id == "card_immune_module")
-        self.assertEqual(module.status, "cancelled")
-        self.assertEqual(card.status, "cancelled")
-
-        restore_response = manager.blueprint_tools.restore_module_proposal(
-            "test-project",
-            {"module_id": "module_immune_infiltration", "reason": "用户要恢复免疫浸润分析"},
-        )
-        patch_payload = self.project_service.graph_store("test-project").load_patch(restore_response.proposal.patch_id)
-        self.apply.apply_patch("test-project", GraphPatch.model_validate(patch_payload))
-        manager.mark_proposal_status("test-project", restore_response.proposal.proposal_id, "accepted")
-        snapshot = self.project_service.get_project_snapshot("test-project")
-        module = next(item for item in snapshot["graph"].modules if item.module_id == "module_immune_infiltration")
-        card = next(item for item in snapshot["cards"] if item.card_id == "card_immune_module")
-        self.assertEqual(module.status, "planned")
-        self.assertEqual(card.status, "planned")
-
-    def test_read_result_asset_tool_returns_preview(self) -> None:
-        manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
-        detail = manager.blueprint_tools.read_result_asset("test-project", "deg_table_v1")
-        self.assertEqual(detail["asset"].asset_id, "deg_table_v1")
-        self.assertIn("preview", detail)
-
-    def test_asset_flow_and_work_order_are_derived_for_ui(self) -> None:
-        asset_flow = self.flow_service.get_asset_flow("test-project")
-        self.assertTrue(
-            any(
-                edge["source_card_id"] == "card_de_analysis"
-                and edge["target_card_id"] == "card_enrichment_group"
-                and edge["asset_id"] == "deg_table_v1"
-                for edge in asset_flow["card_edges"]
-            )
-        )
-        self.assertTrue(
-            any(
-                edge["source_card_id"] is None
-                and edge["target_card_id"] == "card_de_analysis"
-                and edge["asset_id"] == "count_matrix_v1"
-                for edge in asset_flow["card_edges"]
-            )
-        )
-
-        work_order = self.flow_service.get_work_order("test-project")
-        enrichment = next(item for item in work_order["work_items"] if item["card_id"] == "card_enrichment_group")
-        immune = next(item for item in work_order["work_items"] if item["card_id"] == "card_immune_module")
-        self.assertIn("card_de_analysis", enrichment["depends_on_card_ids"])
-        self.assertTrue(enrichment["can_start"])
-        self.assertFalse(immune["can_start"])
-        self.assertIn("proposal_not_accepted", immune["block_reasons"])
-        self.assertTrue(any("card_enrichment_group" in batch["card_ids"] for batch in work_order["parallel_batches"]))
-
-    def test_single_layer_proposal_returns_asset_sufficiency_metadata(self) -> None:
-        self.project_service.create_project(
-            project_id="layered-project",
-            name="Layered Project",
-            current_goal="Build blueprint step by step",
-            seed_demo=False,
-        )
-        store = self.project_service.graph_store("layered-project")
-        store.save_graph(
-            GraphState(
-                assets=[
-                    Asset(
-                        asset_id="upload_counts_v1",
-                        asset_type="count_matrix",
-                        title="gene_count_matrix.annotated.txt",
-                        status="candidate",
-                        path="data/upload/gene_count_matrix.annotated.txt",
-                        summary="用户上传的原始计数矩阵。",
-                    )
-                ]
-            )
-        )
-
-        manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
-        response = manager.blueprint_tools.save_patch_proposal(
-            "layered-project",
-            {
-                "title": "新增数据准备层",
-                "summary": "先创建数据准备与样本分组模块。",
-                "impact_summary": "新增第一层可执行模块。",
-                "patch_type": "add_module",
-                "reason": "先落第一层",
-                "ops": [
-                    {
-                        "op": "create_module",
-                        "payload": {
-                            "module_id": "module_data_prep",
-                            "title": "数据准备与样本分组",
-                            "status": "planned",
-                            "summary": "读取上传计数矩阵并生成标准化矩阵和样本元数据。",
-                            "depends_on_assets": ["upload_counts_v1"],
-                            "expected_outputs": ["normalized_matrix", "sample_metadata"],
-                            "linked_cards": ["card_data_prep"],
-                        },
-                    },
-                    {
-                        "op": "create_card",
-                        "payload": {
-                            "card_id": "card_data_prep",
-                            "card_type": "module",
-                            "title": "数据准备与样本分组",
-                            "status": "planned",
-                            "summary": "读取原始计数矩阵并生成标准化表达矩阵和样本元数据。",
-                            "why": "这是整个流程的起点。",
-                            "inputs": [{"label": "原始计数矩阵", "asset_id": "upload_counts_v1", "status": "existing"}],
-                            "outputs": [
-                                {"label": "标准化表达矩阵", "status": "planned"},
-                                {"label": "样本元数据", "status": "planned"},
-                            ],
-                            "key_findings": [],
-                            "manager_review": "先准备上游数据资产。",
-                            "next_actions": ["接受提案"],
-                            "linked_modules": ["module_data_prep"],
-                            "linked_assets": ["upload_counts_v1"],
-                        },
-                    },
-                ],
-            },
-        )
-        sufficiency = response.metadata["proposal_asset_sufficiency"]
-        card_entry = next(item for item in sufficiency["cards"] if item["card_id"] == "card_data_prep")
-        self.assertTrue(card_entry["ready_now"])
-        self.assertTrue(any(item["state"] == "candidate_input_available" for item in card_entry["required_assets"]))
-        patch_payload = store.load_patch(response.proposal.patch_id)
-        create_card = next(op for op in patch_payload["ops"] if op["op"] == "create_card")
-        self.assertTrue(all(item.get("asset_id") for item in create_card["payload"]["outputs"]))
-        self.apply.apply_patch("layered-project", GraphPatch.model_validate(patch_payload))
-        work_order = self.flow_service.get_work_order("layered-project")
-        work_item = next(item for item in work_order["work_items"] if item["card_id"] == "card_data_prep")
-        self.assertTrue(work_item["can_start"])
-
-    def test_plan_blueprint_is_read_only_and_reports_layer_dependencies(self) -> None:
-        self.project_service.create_project(
-            project_id="plan-project",
-            name="Plan Project",
-            current_goal="Plan complete RNA-seq workflow",
-            seed_demo=False,
-        )
-        store = self.project_service.graph_store("plan-project")
-        store.save_graph(
-            GraphState(
-                assets=[
-                    Asset(
-                        asset_id="upload_counts_v1",
-                        asset_type="count_matrix",
-                        title="gene_count_matrix.annotated.txt",
-                        status="candidate",
-                        path="data/upload/gene_count_matrix.annotated.txt",
-                        summary="用户上传的原始计数矩阵。",
-                    )
-                ]
-            )
-        )
-
-        manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
-        before = store.load_proposals()
-        plan = manager.blueprint_tools.plan_blueprint(
-            "plan-project",
-            {
-                "objective": "从原始计数矩阵构建完整 RNA-seq 分析蓝图",
-                "assumptions": ["前 3 个样本为 OAA，后 3 个样本为 2D-gal"],
-                "steps": [
-                    {
-                        "step_id": "step_data_prep",
-                        "title": "数据准备与样本分组",
-                        "specialist": "Data Prep Specialist",
-                        "module_id": "module_data_prep",
-                        "card_id": "card_data_prep",
-                        "input_assets": [{"label": "原始计数矩阵", "asset_id": "upload_counts_v1"}],
-                        "output_assets": [
-                            {"label": "标准化表达矩阵", "asset_id": "asset_normalized_matrix_v1"},
-                            {"label": "样本元数据", "asset_id": "asset_sample_metadata_v1"},
-                        ],
-                    },
-                    {
-                        "step_id": "step_de",
-                        "title": "差异表达分析",
-                        "specialist": "DEG Specialist",
-                        "module_id": "module_de_analysis",
-                        "card_id": "card_de_analysis",
-                        "depends_on_step_ids": ["step_data_prep"],
-                        "input_assets": [
-                            {"label": "标准化表达矩阵", "asset_id": "asset_normalized_matrix_v1"},
-                            {"label": "样本元数据", "asset_id": "asset_sample_metadata_v1"},
-                        ],
-                        "output_assets": [{"label": "DEG 结果表", "asset_id": "asset_deg_table_v1"}],
-                    },
-                ],
-            },
-        )
-        after = store.load_proposals()
-
-        self.assertEqual(before, after)
-        self.assertEqual("none", plan["write_effect"])
-        self.assertEqual("step_data_prep", plan["next_executable_step_id"])
-        first_step = next(item for item in plan["steps"] if item["step_id"] == "step_data_prep")
-        second_step = next(item for item in plan["steps"] if item["step_id"] == "step_de")
-        self.assertTrue(first_step["is_currently_executable"])
-        self.assertFalse(second_step["is_currently_executable"])
-        self.assertTrue(any(item["state"] == "candidate_input_available" for item in first_step["asset_sufficiency"]))
-        self.assertTrue(any(item["state"] == "planned_from_workflow" for item in second_step["asset_sufficiency"]))
-
-    def test_review_blueprint_plan_checks_structured_assets_only(self) -> None:
-        self.project_service.create_project(
-            project_id="review-plan-project",
-            name="Review Plan Project",
-            current_goal="Review complete RNA-seq workflow",
-            seed_demo=False,
-        )
-        store = self.project_service.graph_store("review-plan-project")
-        store.save_graph(
-            GraphState(
-                assets=[
-                    Asset(
-                        asset_id="upload_counts_v1",
-                        asset_type="count_matrix",
-                        title="gene_count_matrix.annotated.txt",
-                        status="candidate",
-                        path="data/upload/gene_count_matrix.annotated.txt",
-                        summary="用户上传的原始计数矩阵。",
-                    )
-                ]
-            )
-        )
-        manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
-        before = store.load_proposals()
-
-        review = manager.blueprint_tools.review_blueprint_plan(
-            "review-plan-project",
-            {
-                "plan": {
-                    "objective": "从原始计数矩阵构建完整 RNA-seq 分析蓝图",
-                    "steps": [
-                        {
-                            "step_id": "step_data_prep",
-                            "title": "数据准备与样本分组",
-                            "module_id": "module_data_prep",
-                            "card_id": "card_data_prep",
-                            "input_assets": [{"label": "原始计数矩阵", "asset_id": "upload_counts_v1"}],
-                            "output_assets": [{"label": "标准化表达矩阵", "asset_id": "asset_normalized_matrix_v1"}],
-                        },
-                        {
-                            "step_id": "step_de",
-                            "title": "差异表达分析",
-                            "module_id": "module_de_analysis",
-                            "card_id": "card_de_analysis",
-                            "depends_on_step_ids": ["step_data_prep"],
-                            "input_assets": [{"label": "标准化表达矩阵", "asset_id": "asset_normalized_matrix_v1"}],
-                            "output_assets": [{"label": "DEG 结果表", "asset_id": "asset_deg_table_v1"}],
-                        },
-                    ],
-                }
-            },
-        )
-        after = store.load_proposals()
-
-        self.assertEqual(before, after)
-        self.assertTrue(review["approved"])
-        self.assertEqual("step_data_prep", review["next_executable_step_id"])
-        first_step = next(item for item in review["step_reviews"] if item["step_id"] == "step_data_prep")
-        second_step = next(item for item in review["step_reviews"] if item["step_id"] == "step_de")
-        self.assertTrue(first_step["is_currently_executable"])
-        self.assertFalse(second_step["is_currently_executable"])
-        self.assertIn("waiting for planned input", second_step["block_reasons"][0])
-
-        invalid_review = manager.blueprint_tools.review_blueprint_plan(
-            "review-plan-project",
-            {
-                "plan": {
-                    "objective": "缺少结构化 asset id 的错误计划",
-                    "steps": [
-                        {
-                            "step_id": "step_bad",
-                            "title": "差异表达分析",
-                            "module_id": "module_de_analysis",
-                            "card_id": "card_de_analysis",
-                            "input_assets": [{"label": "标准化表达矩阵"}],
-                            "output_assets": [{"label": "DEG 结果表", "asset_id": "asset_deg_table_v1"}],
-                        }
-                    ],
-                }
-            },
-        )
-        self.assertFalse(invalid_review["approved"])
-        self.assertTrue(any(item["code"] == "missing_input_asset_id" for item in invalid_review["errors"]))
-
-    def test_stale_proposal_ids_return_planning_errors(self) -> None:
-        manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
-        with self.assertRaisesRegex(ManagerPlanningError, "Proposal not found"):
-            manager.modify_proposal("test-project", "proposal_missing", ChatRequest(message="修改不存在的 proposal"))
-        with self.assertRaisesRegex(ManagerPlanningError, "Proposal not found"):
-            manager.replace_proposal_with_draft(
-                "test-project",
-                "proposal_missing",
-                ManagerPlanDraft(
-                    response_type="proposal",
-                    message="missing",
-                    title="missing",
-                    summary="missing",
-                    impact_summary="missing",
-                    patch_type="update_card",
-                    reason="test",
-                    ops=[],
-                ),
-            )
-
-    def test_unknown_update_targets_are_planning_errors(self) -> None:
-        manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
-        with self.assertRaisesRegex(ManagerPlanningError, "unknown card"):
-            manager.blueprint_tools.save_patch_proposal(
-                "test-project",
-                {
-                    "title": "更新不存在卡片",
-                    "summary": "更新不存在卡片。",
-                    "impact_summary": "应返回可读错误。",
-                    "patch_type": "update_card",
-                    "reason": "test",
-                    "ops": [{"op": "update_card", "payload": {"card_id": "card_missing", "summary": "x"}}],
-                },
-            )
-        with self.assertRaisesRegex(ManagerPlanningError, "unknown module"):
-            manager.blueprint_tools.save_patch_proposal(
-                "test-project",
-                {
-                    "title": "更新不存在模块",
-                    "summary": "更新不存在模块。",
-                    "impact_summary": "应返回可读错误。",
-                    "patch_type": "update_card",
-                    "reason": "test",
-                    "ops": [{"op": "update_module", "payload": {"module_id": "module_missing", "summary": "x"}}],
-                },
-            )
-
-    def test_cycle_in_proposal_dependencies_is_rejected(self) -> None:
-        manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
-        with self.assertRaisesRegex(ManagerPlanningError, "Dependency cycle detected"):
-            manager.blueprint_tools.save_patch_proposal(
-                "test-project",
-                {
-                    "title": "循环依赖测试",
-                    "summary": "两个 card 互相依赖对方产物。",
-                    "impact_summary": "应被拒绝。",
-                    "patch_type": "add_module",
-                    "reason": "test",
-                    "ops": [
-                        {
-                            "op": "create_card",
-                            "payload": {
-                                "card_id": "card_cycle_a",
-                                "card_type": "module",
-                                "title": "Cycle A",
-                                "status": "planned",
-                                "summary": "A",
-                                "why": "test",
-                                "inputs": [{"label": "asset b", "asset_id": "asset_cycle_b"}],
-                                "outputs": [{"label": "asset a", "asset_id": "asset_cycle_a"}],
-                                "key_findings": [],
-                                "manager_review": "test",
-                                "next_actions": [],
-                                "linked_modules": [],
-                                "linked_assets": [],
-                            },
-                        },
-                        {
-                            "op": "create_card",
-                            "payload": {
-                                "card_id": "card_cycle_b",
-                                "card_type": "module",
-                                "title": "Cycle B",
-                                "status": "planned",
-                                "summary": "B",
-                                "why": "test",
-                                "inputs": [{"label": "asset a", "asset_id": "asset_cycle_a"}],
-                                "outputs": [{"label": "asset b", "asset_id": "asset_cycle_b"}],
-                                "key_findings": [],
-                                "manager_review": "test",
-                                "next_actions": [],
-                                "linked_modules": [],
-                                "linked_assets": [],
-                            },
-                        },
-                    ],
-                },
-            )
+        self.assertTrue(any(card.card_id == "card_direct_patch" for card in snapshot["cards"]))
 
     def test_go_spec_does_not_match_good_or_going(self) -> None:
-        manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
-        self.assertIsNone(manager.tool_layer._resolve_spec("please create a good module"))
-        self.assertIsNone(manager.tool_layer._resolve_spec("we are going to discuss the plan"))
-
-    def test_multi_layer_proposal_is_rejected_until_split_by_layer(self) -> None:
-        self.project_service.create_project(
-            project_id="layered-project-multi",
-            name="Layered Multi Project",
-            current_goal="Build blueprint step by step",
-            seed_demo=False,
-        )
-        store = self.project_service.graph_store("layered-project-multi")
-        store.save_graph(
-            GraphState(
-                assets=[
-                    Asset(
-                        asset_id="upload_counts_v1",
-                        asset_type="count_matrix",
-                        title="gene_count_matrix.annotated.txt",
-                        status="candidate",
-                        path="data/upload/gene_count_matrix.annotated.txt",
-                        summary="用户上传的原始计数矩阵。",
-                    )
-                ]
-            )
-        )
-
-        manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
-        with self.assertRaises(ManagerPlanningError) as ctx:
-            manager.blueprint_tools.save_patch_proposal(
-                "layered-project-multi",
-                {
-                    "title": "一次性新增完整 RNA-seq 流程",
-                    "summary": "同时新增数据准备和差异表达模块。",
-                    "impact_summary": "尝试把上下游层一次写入。",
-                    "patch_type": "add_module",
-                    "reason": "测试分层校验",
-                    "ops": [
-                        {
-                            "op": "create_module",
-                            "payload": {
-                                "module_id": "module_data_prep",
-                                "title": "数据准备与样本分组",
-                                "status": "planned",
-                                "summary": "读取上传计数矩阵并生成标准化矩阵和样本元数据。",
-                                "depends_on_assets": ["upload_counts_v1"],
-                                "expected_outputs": ["normalized_matrix", "sample_metadata"],
-                                "linked_cards": ["card_data_prep"],
-                            },
-                        },
-                        {
-                            "op": "create_card",
-                            "payload": {
-                                "card_id": "card_data_prep",
-                                "card_type": "module",
-                                "title": "数据准备与样本分组",
-                                "status": "planned",
-                                "summary": "读取原始计数矩阵并生成标准化表达矩阵和样本元数据。",
-                                "why": "这是整个流程的起点。",
-                                "inputs": [{"label": "原始计数矩阵", "asset_id": "upload_counts_v1", "status": "existing"}],
-                                "outputs": [
-                                    {"label": "标准化表达矩阵", "status": "planned"},
-                                    {"label": "样本元数据", "status": "planned"},
-                                ],
-                                "key_findings": [],
-                                "manager_review": "先准备上游数据资产。",
-                                "next_actions": ["接受提案"],
-                                "linked_modules": ["module_data_prep"],
-                                "linked_assets": ["upload_counts_v1"],
-                            },
-                        },
-                        {
-                            "op": "create_module",
-                            "payload": {
-                                "module_id": "module_de_analysis",
-                                "title": "差异表达分析",
-                                "status": "planned",
-                                "summary": "使用标准化矩阵和样本元数据做差异表达分析。",
-                                "linked_cards": ["card_de_analysis"],
-                            },
-                        },
-                        {
-                            "op": "create_card",
-                            "payload": {
-                                "card_id": "card_de_analysis",
-                                "card_type": "module",
-                                "title": "差异表达分析",
-                                "status": "planned",
-                                "summary": "基于标准化表达矩阵执行 DESeq2 分析。",
-                                "why": "识别差异基因。",
-                                "inputs": [
-                                    {"label": "标准化表达矩阵", "status": "planned"},
-                                    {"label": "样本元数据", "status": "planned"},
-                                ],
-                                "outputs": [{"label": "DEG 结果表", "status": "planned"}],
-                                "key_findings": [],
-                                "manager_review": "等待上游完成。",
-                                "next_actions": ["接受提案"],
-                                "linked_modules": ["module_de_analysis"],
-                                "linked_assets": [],
-                            },
-                        },
-                    ],
-                },
-            )
-        self.assertIn("downstream layers", str(ctx.exception))
+        self.assertIsNone(self.manager.tool_layer._resolve_spec("please create a good module"))
+        self.assertIsNone(self.manager.tool_layer._resolve_spec("we are going to discuss the plan"))
 
     def _wait_for_run(self, project_id: str, run_id: str) -> None:
         deadline = time.time() + 5

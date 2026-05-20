@@ -33,12 +33,7 @@ class ManagerService:
         self.tool_layer = tool_layer or ManagerToolLayer()
         self.intent_router = ManagerIntentRouter()
         self.settings = get_settings()
-        self.blueprint_tools = ManagerBlueprintTools(
-            project_service=self.project_service,
-            save_proposal=self._save_proposal_draft,
-            replace_proposal=self.replace_proposal_with_draft,
-            tool_layer=self.tool_layer,
-        )
+        self.blueprint_tools = ManagerBlueprintTools(project_service=self.project_service)
 
     def chat(self, project_id: str, request: ChatRequest) -> ChatResponse:
         if self.settings.manager_backend == "pi" and self.planner.__class__ is DeepSeekManagerPlanner:
@@ -340,23 +335,40 @@ class ManagerService:
             raise ManagerPlanningError(
                 "Manager proposal requires unavailable assets for: "
                 + ", ".join(sufficiency["missing_asset_cards"])
-                + ". Submit only the next executable layer whose inputs already exist."
+                + ". Add a producing card output for each planned asset, or use an existing materialized asset."
             )
-        if sufficiency["downstream_layer_cards"]:
+        if sufficiency["duplicate_output_assets"]:
             raise ManagerPlanningError(
-                "Manager proposal spans downstream layers in one tool call: "
-                + ", ".join(sufficiency["downstream_layer_cards"])
-                + ". Plan the full workflow first, but draft only the current layer. Wait for upstream assets before proposing the next layer."
+                "Manager proposal has duplicate planned output assets: "
+                + ", ".join(sufficiency["duplicate_output_assets"])
+            )
+        if sufficiency["cycle_card_ids"]:
+            raise ManagerPlanningError(
+                "Dependency cycle detected among proposal cards: "
+                + ", ".join(sufficiency["cycle_card_ids"])
             )
         return normalized_patch, validation.warnings, diagnostics
 
     @staticmethod
     def _proposal_asset_diagnostics(snapshot: dict, patch: GraphPatch) -> dict:
         existing_assets = {asset.asset_id: asset for asset in snapshot["graph"].assets}
+        existing_cards = {card.card_id: card for card in snapshot["cards"]}
         patch_cards: dict[str, dict] = {}
         producer_by_asset: dict[str, str] = {}
+        producer_sources: dict[str, str] = {}
+        duplicate_producers: dict[str, list[str]] = {}
         dependency_map: dict[str, set[str]] = {}
         card_reports: list[dict] = []
+
+        for card in existing_cards.values():
+            for output in card.outputs:
+                if not output.asset_id:
+                    continue
+                if output.asset_id in producer_by_asset and producer_by_asset[output.asset_id] != card.card_id:
+                    duplicate_producers.setdefault(output.asset_id, [producer_by_asset[output.asset_id]]).append(card.card_id)
+                    continue
+                producer_by_asset[output.asset_id] = card.card_id
+                producer_sources[output.asset_id] = "existing_card_output"
 
         for op in patch.ops:
             if op.op not in {"create_card", "update_card"}:
@@ -368,11 +380,16 @@ class ManagerService:
             patch_cards[card_id] = payload
             for output in payload.get("outputs") or []:
                 asset_id = output.get("asset_id")
-                if asset_id:
-                    producer_by_asset[asset_id] = card_id
+                if not asset_id:
+                    continue
+                if asset_id in producer_by_asset and producer_by_asset[asset_id] != card_id:
+                    duplicate_producers.setdefault(asset_id, [producer_by_asset[asset_id]]).append(card_id)
+                    continue
+                producer_by_asset[asset_id] = card_id
+                producer_sources[asset_id] = "proposal_card_output"
 
         missing_asset_cards: list[str] = []
-        downstream_layer_cards: list[str] = []
+        duplicate_output_assets = sorted(duplicate_producers)
 
         for card_id, payload in patch_cards.items():
             dependencies: set[str] = set()
@@ -388,12 +405,14 @@ class ManagerService:
                 if asset_id in producer_by_asset and producer_by_asset[asset_id] != card_id:
                     upstream_card_id = producer_by_asset[asset_id]
                     dependencies.add(upstream_card_id)
+                    state = "planned_from_same_proposal" if upstream_card_id in patch_cards else "planned_from_existing_card"
                     assets_report.append(
                         {
                             "label": label,
                             "asset_id": asset_id,
-                            "state": "planned_from_same_proposal",
+                            "state": state,
                             "producer_card_id": upstream_card_id,
+                            "producer_source": producer_sources.get(asset_id),
                         }
                     )
                 elif asset_id in existing_assets and existing_assets[asset_id].status in {"valid", "candidate"}:
@@ -431,14 +450,14 @@ class ManagerService:
         for report in card_reports:
             report["layer_index"] = layer_index.get(report["card_id"], 0)
             report["ready_now"] = not dependency_map.get(report["card_id"]) and report["card_id"] not in missing_asset_cards
-            if dependency_map.get(report["card_id"]):
-                downstream_layer_cards.append(report["card_id"])
 
         return {
             "proposal_asset_sufficiency": {
                 "cards": card_reports,
                 "missing_asset_cards": missing_asset_cards,
-                "downstream_layer_cards": downstream_layer_cards,
+                "downstream_layer_cards": [],
+                "duplicate_output_assets": duplicate_output_assets,
+                "cycle_card_ids": [],
                 "max_layer_index": max(layer_index.values(), default=0),
             }
         }
