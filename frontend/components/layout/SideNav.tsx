@@ -8,7 +8,6 @@ import {
   BarChart3,
   FileText,
   FolderGit2,
-  Layers3,
   Files,
   Beaker,
   MessageSquareText,
@@ -23,7 +22,6 @@ import { useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 import { ChatSessionSummary } from "@/lib/types";
 
 const primary = [
-  { href: "tasks", label: "蓝图工作台", icon: Layers3 },
   { href: "results", label: "结果库", icon: BarChart3 },
   { href: "files", label: "文件管理", icon: Files },
   { href: "report", label: "报告", icon: FileText },
@@ -153,21 +151,6 @@ export function SideNav({ projectId, current }: { projectId: string; current: st
         </div>
       </div>
 
-      <div className="nav-section-label">工作台</div>
-      <div className="nav-links">
-        {primary.map((item) => {
-          const Icon = item.icon;
-          const href = `/projects/${projectId}/${item.href}`;
-          const isActive = current === item.href;
-          return (
-            <Link key={item.href} href={href} className={`nav-link ${isActive ? "active" : ""}`}>
-              <Icon size={16} />
-              <span>{item.label}</span>
-            </Link>
-          );
-        })}
-      </div>
-
       <div className="nav-section-label nav-session-label">
         <span>Sessions</span>
         <button
@@ -202,6 +185,21 @@ export function SideNav({ projectId, current }: { projectId: string; current: st
                 <Trash2 size={13} />
               </button>
             </div>
+          );
+        })}
+      </div>
+
+      <div className="nav-section-label">工作台</div>
+      <div className="nav-links">
+        {primary.map((item) => {
+          const Icon = item.icon;
+          const href = `/projects/${projectId}/${item.href}`;
+          const isActive = current === item.href;
+          return (
+            <Link key={item.href} href={href} className={`nav-link ${isActive ? "active" : ""}`}>
+              <Icon size={16} />
+              <span>{item.label}</span>
+            </Link>
           );
         })}
       </div>

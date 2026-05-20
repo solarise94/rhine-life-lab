@@ -8,7 +8,6 @@ import { api } from "@/lib/api";
 import {
   useAdvancedGit,
   useAdvancedGraph,
-  useAdvancedProposals,
   useProjectFiles,
   useProjectReport,
   useProjectResults,
@@ -25,7 +24,6 @@ import {
   useWorkspaceRefresh,
 } from "@/lib/hooks";
 import { queryKeys } from "@/lib/query-keys";
-import { useAdvancedViewStore } from "@/lib/stores/advanced-view-store";
 import { useReportViewStore } from "@/lib/stores/report-view-store";
 import { useResultsViewStore } from "@/lib/stores/results-view-store";
 import { useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
@@ -73,8 +71,6 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const setSelectedAsset = useResultsViewStore((s) => s.setSelectedAsset);
   const selectedSectionId = useReportViewStore((s) => s.selectedSectionByProject[projectId]);
   const setSelectedSection = useReportViewStore((s) => s.setSelectedSection);
-  const activeAdvancedDocument = useAdvancedViewStore((s) => s.activeDocumentByProject[projectId] ?? "graph");
-  const setActiveAdvancedDocument = useAdvancedViewStore((s) => s.setActiveDocument);
   const refreshWorkspace = useWorkspaceRefresh(projectId);
 
   const projectQuery = useProjectSnapshot(projectId);
@@ -84,7 +80,6 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const reportQuery = useProjectReport(projectId, view === "report");
   const advancedGraphQuery = useAdvancedGraph(projectId, view === "advanced");
   const advancedGitQuery = useAdvancedGit(projectId, view === "advanced");
-  const advancedProposalsQuery = useAdvancedProposals(projectId, view === "advanced");
   const startRunMutation = useStartRunMutation(projectId);
   const reviewRunMutation = useReviewRunMutation(projectId);
   const reorderReportMutation = useReportReorderMutation(projectId);
@@ -205,7 +200,6 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
       <ManagerChatPanel
         projectId={projectId}
         sessionId={currentChatSessionId}
-        proposals={snapshot.proposals}
         mentionableAssets={snapshot.graph.assets}
         onRefresh={refreshWorkspace}
       />
@@ -238,10 +232,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               view === "results"
                 ? "Accepted and candidate results"
                 : view === "files"
-                ? "Uploads, data assets, and execution files"
-                : view === "report"
-                ? "Report assembly"
-                : "Graph, proposals, and Git history"
+              ? "Uploads, data assets, and execution files"
+              : view === "report"
+              ? "Report assembly"
+                : "Graph and Git history"
             }
           />
         ) : null}
@@ -313,9 +307,6 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               <AdvancedPanels
                 graph={advancedGraphQuery.data?.graph ?? null}
                 gitItems={advancedGitQuery.data?.items ?? []}
-                proposals={advancedProposalsQuery.data?.items ?? []}
-                activeDocument={activeAdvancedDocument}
-                onSelectDocument={(document) => setActiveAdvancedDocument(projectId, document)}
               />
               <CardDetailPanel card={selectedCard} summary={snapshot.summary} />
             </div>
@@ -328,7 +319,6 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             mobileTab === "chat" ? (
               <ManagerChatPanel
                 projectId={projectId}
-                proposals={snapshot.proposals}
                 mentionableAssets={snapshot.graph.assets}
                 onRefresh={refreshWorkspace}
               />
@@ -398,9 +388,6 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   <AdvancedPanels
                     graph={advancedGraphQuery.data?.graph ?? null}
                     gitItems={advancedGitQuery.data?.items ?? []}
-                    proposals={advancedProposalsQuery.data?.items ?? []}
-                    activeDocument={activeAdvancedDocument}
-                    onSelectDocument={(document) => setActiveAdvancedDocument(projectId, document)}
                   />
                   <CardDetailPanel card={selectedCard} summary={snapshot.summary} />
                 </>

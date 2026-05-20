@@ -44,7 +44,7 @@ Your job is to read the user's intent plus the current project graph, then retur
 
 Rules:
 - Use only the tool `submit_manager_plan`.
-- `response_type="proposal"` when the user asks to add, change, rerun, review, rollback, or otherwise mutate project state.
+- `response_type="proposal"` when the user asks to add, change, rerun, review, rollback, or otherwise mutate project state. The result should be a direct card/edit plan, not a blueprint design workflow.
 - `response_type="message"` only when no graph mutation should happen yet.
 - Never output free text outside the tool call.
 - Keep summaries concrete and user-facing.
@@ -67,9 +67,9 @@ Before you return the tool call, do an internal self-check:
 Use these op contracts:
 - `create_module`: requires `module_id`, `title`. Optional: `status`, `summary`, `depends_on_assets`, `expected_outputs`, `linked_cards`.
 - `create_module_group`: requires `module_id`, `title`. Optional: `status`, `summary`, `depends_on_assets`, `expected_outputs`, `linked_cards`.
-- `add_submodule`: requires `parent_module_id`, `module_id`, `title`. `parent_module_id` must be an existing module group. `module_id` should usually refer to a module created in the same proposal or an existing module.
-- `create_card`: must create a valid card object. Required fields include `card_id`, `card_type`, `title`, `status`, `summary`. Prefer also setting `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_runs`, `linked_assets`.
-- `update_card`: requires `card_id` of an existing card. Only use card fields such as `title`, `status`, `summary`, `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_assets`, `progress_note`. Never use it for modules. To delete a card, set `status` to `cancelled` and keep the card metadata intact for auditability.
+- `add_submodule`: requires `parent_module_id`, `module_id`, `title`. `parent_module_id` must be an existing module group. `module_id` should usually refer to a module created in the same change or an existing module.
+- `create_card`: must create a valid card object. Required fields include `card_id`, `card_type`, `title`, `status`, `summary`. Prefer also setting `step`, `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_runs`, `linked_assets`.
+- `update_card`: requires `card_id` of an existing card. Only use card fields such as `step`, `title`, `status`, `summary`, `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_assets`, `progress_note`. Never use it for modules. To delete a card, set `status` to `cancelled` and keep the card metadata intact for auditability.
 - `update_module`: requires `module_id` of an existing module. Only use module fields such as `title`, `status`, `summary`, `depends_on_assets`, `expected_outputs`, `linked_cards`.
 - `set_card_status`: requires `card_id`, `status`.
 - `set_module_status`: requires `module_id`, `status`.
@@ -79,7 +79,7 @@ Use these op contracts:
 Preferred patterns:
 - To add a new analysis card: usually create a module first, then create a card linked to that module.
 - To add a submodule under a module group: create the module, then add it via `add_submodule`, then create its card.
-- To modify the wording of an existing module proposal: use `update_card` for the card and `update_module` for the module.
+- To modify the wording of an existing card/module pair: use `update_card` for the card and `update_module` for the module.
 - For multi-step workflows, think through the full dependency chain first, but return only the next executable layer in a single proposal. Do not include downstream cards that depend on assets planned in the same proposal.
 """
 
@@ -100,9 +100,9 @@ You can either answer directly or call tools. You do not directly modify files o
 Tool rules:
 - Use `get_project_context` when you need current graph/cards/assets/proposals.
 - For ordinary greetings, explanations, reviews, suggestions, and "what else can we do" questions, answer directly after inspecting context.
-- Use proposal tools only when the user clearly asks to add, create, modify, rerun, rollback, or otherwise change the blueprint.
-- Proposal tools create auditable proposals only. They never apply changes.
-- Never claim a blueprint change has been applied. The user must accept a proposal in the UI.
+- Use direct card tools when the user clearly asks to add, create, modify, delete, rerun, rollback, or otherwise change the blueprint.
+- Direct card tools apply the requested card change immediately after validation.
+- Never claim a blueprint change has been applied unless the tool actually succeeded.
 - If a tool returns an error, explain the error clearly instead of pretending success.
 - For multi-step workflows, plan the whole sequence mentally, but when you call a proposal tool submit only the current executable layer whose inputs already exist in project context.
 

@@ -44,6 +44,7 @@ class Card(BaseModel):
     card_type: CardType
     title: str
     status: CardStatus
+    step: int | None = None
     aggregate_status: AggregateStatus | None = None
     summary: str
     why: str = ""
@@ -57,4 +58,3 @@ class Card(BaseModel):
     linked_assets: list[str] = Field(default_factory=list)
     technical_refs: TechnicalRefs = Field(default_factory=TechnicalRefs)
     progress_note: str | None = None
-

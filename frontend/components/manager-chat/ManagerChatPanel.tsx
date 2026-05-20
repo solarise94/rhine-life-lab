@@ -59,7 +59,7 @@ const DEFAULT_MANAGER_MESSAGE: ChatMessage = {
   id: "welcome",
   role: "manager",
   state: "done",
-  content: "可以先正常聊天和查看上下文；当你明确要求调整蓝图时，我会通过后端工具生成 proposal，再校验和应用 patch。",
+  content: "可以先正常聊天和查看上下文；当你明确要求调整蓝图时，我会通过后端工具直接读写 cards，并按数据资产时间线校验。",
 };
 
 function isProposalShape(value: unknown): value is Proposal {
@@ -175,13 +175,13 @@ function upsertSessionSummary(
 export function ManagerChatPanel({
   projectId,
   sessionId,
-  proposals,
+  proposals = [],
   mentionableAssets,
   onRefresh,
 }: {
   projectId: string;
   sessionId?: string | null;
-  proposals: Proposal[];
+  proposals?: Proposal[];
   mentionableAssets: Asset[];
   onRefresh: () => Promise<void>;
 }) {
@@ -866,25 +866,10 @@ export function ManagerChatPanel({
                     ) : null}
                   </div>
                 </div>
-                {message.proposal ? renderProposalControls(message.proposal) : null}
               </div>
             </div>
             ))
           )}
-
-          {!sessionBusy && !sessionLoadError && openProposals.length ? (
-            <div className="manager-message-row manager">
-              <div className="manager-message-avatar">M</div>
-              <div className="manager-message-content manager">
-                <div className="manager-message-role">待处理提案</div>
-                {openProposals.map((proposal) => (
-                  <div key={proposal.proposal_id} className="stack">
-                    {renderProposalControls(proposal)}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
         </div>
 
         {attachments.length ? (
