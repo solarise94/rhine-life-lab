@@ -64,9 +64,23 @@ BLUEPRINT_PI_MANAGER_URL=http://127.0.0.1:18002
 BLUEPRINT_BACKEND_API_BASE_URL=http://127.0.0.1:18001/api
 BLUEPRINT_INTERNAL_TOOL_TOKEN=change-me
 BLUEPRINT_MANAGER_TIMEOUT_SECONDS=600
-BLUEPRINT_DEFAULT_WORKER_TYPE=shell
-# Optional real executor commands:
-# BLUEPRINT_OPENCODE_COMMAND=opencode run --task {task_packet_path}
+BLUEPRINT_DEFAULT_WORKER_TYPE=pi
+# The pi executor requires BLUEPRINT_PI_COMMAND to point at a real non-interactive pi CLI or wrapper.
+# DeepSeek settings are reused by the backend executor reviewer, not as a pi fallback executor.
+# Command-template placeholders:
+# {python} {project_root} {run_dir} {result_dir} {task_packet_path}
+# {manifest_path} {transcript_path} {executor_brief_path} {executor_prompt_path}
+# {adapter_contract_path} {manager_brief_path} {worker_type}
+# For opencode / pi / claude-code these values are provider CLI launch templates
+# consumed by the unified wrapper, not the backend worker command itself.
+# Codex currently remains a direct backend command template.
+# Replace <tool-specific-args> with the syntax expected by your installed CLI.
+# A local wrapper script is usually the least fragile option if provider CLI flags change.
+# BLUEPRINT_OPENCODE_COMMAND=opencode <tool-specific-args> {executor_prompt_path}
+# BLUEPRINT_CODEX_COMMAND=codex <tool-specific-args> {executor_prompt_path}
+# BLUEPRINT_CLAUDE_CODE_COMMAND=claude-code <tool-specific-args> {executor_prompt_path}
+# BLUEPRINT_PI_COMMAND=pi --no-session -p @{executor_prompt_path}
+# BLUEPRINT_OPENCODE_COMMAND=bash /absolute/path/to/opencode-launch.sh {executor_prompt_path}
 ```
 
 前端：
@@ -136,4 +150,4 @@ journalctl --user -u blueprint-re-frontend.service -n 100 --no-pager
 
 ## 说明
 
-Manager AI 现在通过 Pi agent sidecar 进行正常聊天和工具循环；sidecar 不加载 shell/write/edit 工具，只能调用后端受控工具读取蓝图、生成/修改/删除 proposal。如果模型不可用、工具校验失败且无法自修复、或密钥缺失，`/chat` 会直接失败并返回错误，不再走关键词 fallback。Worker 已切成异步子进程执行模型，默认本地 `shell` scaffold 可直接跑通，`opencode/pi/claude_code/codex` 适配器通过环境变量命令模板接入。
+Manager AI 现在通过 Pi agent sidecar 进行正常聊天和工具循环；sidecar 不加载 shell/write/edit 工具，只能调用后端受控工具读取蓝图、生成/修改/删除 proposal。如果模型不可用、工具校验失败且无法自修复、或密钥缺失，`/chat` 会直接失败并返回错误，不再走关键词 fallback。Worker 已切成异步子进程执行模型；默认执行器类型是 `pi`，但必须通过 `BLUEPRINT_PI_COMMAND` 指向真实非交互 Pi CLI 或 wrapper。`opencode/pi/claude_code` 通过统一 wrapper 接入外部 provider CLI launch template；它们统一收到 `task_packet.json`、`executor_prompt.md`、`adapter_contract.json` 和 `BLUEPRINT_*` 运行时环境变量。执行器完成后，后端会校验 manifest、代码证据和输出资产，并用 Manager AI 的 DeepSeek 配置运行 reviewer；最终 card/graph 更新仍由 Manager review 处理。

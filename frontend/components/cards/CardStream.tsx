@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Archive, ChevronDown, ChevronUp } from "lucide-react";
-import { Card, WorkOrder } from "@/lib/types";
+import { Card, WorkOrder, WorkerCapability } from "@/lib/types";
 import { ModuleCard } from "./ModuleCard";
 import { ConnectionLines } from "./ConnectionLines";
 
@@ -16,6 +16,9 @@ export function CardStream({
   onStartRun,
   onReviewRun,
   onAskManager,
+  workerCapabilities = [],
+  selectedWorkerByCard = {},
+  onSelectWorker,
 }: {
   projectId: string;
   cards: Card[];
@@ -26,6 +29,9 @@ export function CardStream({
   onStartRun: (card: Card) => void;
   onReviewRun: (card: Card) => void;
   onAskManager?: (text: string) => void;
+  workerCapabilities?: WorkerCapability[];
+  selectedWorkerByCard?: Record<string, string | undefined>;
+  onSelectWorker?: (card: Card, workerType: string) => void;
 }) {
   const moduleCards = useMemo(() => cards.filter((c) => c.card_type !== "system"), [cards]);
   const archivedCards = useMemo(
@@ -142,6 +148,9 @@ export function CardStream({
                       onStartRun={onStartRun}
                       onReviewRun={onReviewRun}
                       onAskManager={onAskManager}
+                      workerCapabilities={workerCapabilities}
+                      selectedWorkerType={selectedWorkerByCard[card.card_id]}
+                      onSelectWorker={onSelectWorker}
                     />
                   </div>
                 ))}
@@ -181,6 +190,9 @@ export function CardStream({
                         onStartRun={onStartRun}
                         onReviewRun={onReviewRun}
                         onAskManager={onAskManager}
+                        workerCapabilities={workerCapabilities}
+                        selectedWorkerType={selectedWorkerByCard[card.card_id]}
+                        onSelectWorker={onSelectWorker}
                       />
                     </div>
                   ))}

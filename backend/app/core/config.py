@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     pi_manager_url: str = "http://127.0.0.1:18002"
     backend_api_base_url: str = "http://127.0.0.1:18001/api"
     internal_tool_token: SecretStr | None = None
-    default_worker_type: str = "shell"
+    default_worker_type: str = "pi"
     worker_timeout_seconds: int = 900
     opencode_command: str | None = None
     pi_command: str | None = None

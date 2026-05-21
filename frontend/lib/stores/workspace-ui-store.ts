@@ -8,10 +8,12 @@ export type Attachment = { type: "card" | "asset"; id: string; label: string };
 
 export const EMPTY_CARD_PAGE_BY_ID: Record<string, CardPage> = {};
 export const EMPTY_ATTACHMENTS: Attachment[] = [];
+export const EMPTY_SELECTED_WORKER_BY_CARD: Record<string, string | undefined> = {};
 
 interface WorkspaceUiState {
   currentChatSessionIdByProject: Record<string, string | null | undefined>;
   selectedCardByProject: Record<string, string | null | undefined>;
+  selectedWorkerByProject: Record<string, Record<string, string | undefined>>;
   noticesByProject: Record<string, string | null>;
   expandedCardByProject: Record<string, string | undefined>;
   cardPageByProject: Record<string, Record<string, CardPage>>;
@@ -20,6 +22,7 @@ interface WorkspaceUiState {
   draftMessageByProject: Record<string, string>;
   setCurrentChatSessionId: (projectId: string, sessionId?: string | null) => void;
   setSelectedCard: (projectId: string, cardId?: string | null) => void;
+  setSelectedWorker: (projectId: string, cardId: string, workerType?: string) => void;
   setNotice: (projectId: string, message: string | null) => void;
   setExpandedCard: (projectId: string, cardId?: string) => void;
   setCardPage: (projectId: string, cardId: string, page: CardPage) => void;
@@ -36,6 +39,7 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
     (set) => ({
       currentChatSessionIdByProject: {},
       selectedCardByProject: {},
+      selectedWorkerByProject: {},
       noticesByProject: {},
       expandedCardByProject: {},
       cardPageByProject: {},
@@ -43,26 +47,48 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
       mobileTabByProject: {},
       draftMessageByProject: {},
       setCurrentChatSessionId: (projectId, sessionId) =>
-        set((state) => ({
-          currentChatSessionIdByProject: {
-            ...state.currentChatSessionIdByProject,
-            [projectId]: sessionId,
-          },
-        })),
+        set((state) => {
+          if (state.currentChatSessionIdByProject[projectId] === sessionId) return state;
+          return {
+            currentChatSessionIdByProject: {
+              ...state.currentChatSessionIdByProject,
+              [projectId]: sessionId,
+            },
+          };
+        }),
       setSelectedCard: (projectId, cardId) =>
-        set((state) => ({
-          selectedCardByProject: {
-            ...state.selectedCardByProject,
-            [projectId]: cardId,
-          },
-        })),
+        set((state) => {
+          if (state.selectedCardByProject[projectId] === cardId) return state;
+          return {
+            selectedCardByProject: {
+              ...state.selectedCardByProject,
+              [projectId]: cardId,
+            },
+          };
+        }),
+      setSelectedWorker: (projectId, cardId, workerType) =>
+        set((state) => {
+          if (state.selectedWorkerByProject[projectId]?.[cardId] === workerType) return state;
+          return {
+            selectedWorkerByProject: {
+              ...state.selectedWorkerByProject,
+              [projectId]: {
+                ...(state.selectedWorkerByProject[projectId] ?? {}),
+                [cardId]: workerType,
+              },
+            },
+          };
+        }),
       setNotice: (projectId, message) =>
-        set((state) => ({
-          noticesByProject: {
-            ...state.noticesByProject,
-            [projectId]: message,
-          },
-        })),
+        set((state) => {
+          if (state.noticesByProject[projectId] === message) return state;
+          return {
+            noticesByProject: {
+              ...state.noticesByProject,
+              [projectId]: message,
+            },
+          };
+        }),
       setExpandedCard: (projectId, cardId) =>
         set((state) => ({
           expandedCardByProject: {
@@ -71,15 +97,18 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
           },
         })),
       setCardPage: (projectId, cardId, page) =>
-        set((state) => ({
-          cardPageByProject: {
-            ...state.cardPageByProject,
-            [projectId]: {
-              ...(state.cardPageByProject[projectId] ?? {}),
-              [cardId]: page,
+        set((state) => {
+          if (state.cardPageByProject[projectId]?.[cardId] === page) return state;
+          return {
+            cardPageByProject: {
+              ...state.cardPageByProject,
+              [projectId]: {
+                ...(state.cardPageByProject[projectId] ?? {}),
+                [cardId]: page,
+              },
             },
-          },
-        })),
+          };
+        }),
       addAttachment: (projectId, attachment) =>
         set((state) => {
           const list = state.attachmentsByProject[projectId] ?? [];
@@ -106,19 +135,25 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
           },
         })),
       setMobileTab: (projectId, tab) =>
-        set((state) => ({
-          mobileTabByProject: {
-            ...state.mobileTabByProject,
-            [projectId]: tab,
-          },
-        })),
+        set((state) => {
+          if (state.mobileTabByProject[projectId] === tab) return state;
+          return {
+            mobileTabByProject: {
+              ...state.mobileTabByProject,
+              [projectId]: tab,
+            },
+          };
+        }),
       setDraftMessage: (projectId, message) =>
-        set((state) => ({
-          draftMessageByProject: {
-            ...state.draftMessageByProject,
-            [projectId]: message,
-          },
-        })),
+        set((state) => {
+          if (state.draftMessageByProject[projectId] === message) return state;
+          return {
+            draftMessageByProject: {
+              ...state.draftMessageByProject,
+              [projectId]: message,
+            },
+          };
+        }),
       clearDraftMessage: (projectId) =>
         set((state) => ({
           draftMessageByProject: {
@@ -128,11 +163,12 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
         })),
     }),
     {
-      name: "blueprint-workspace-ui-v2",
+      name: "blueprint-workspace-ui-v3",
       storage: createJSONStorage(() => sessionStorage),
       partialize: (state) => ({
         currentChatSessionIdByProject: state.currentChatSessionIdByProject,
         selectedCardByProject: state.selectedCardByProject,
+        selectedWorkerByProject: state.selectedWorkerByProject,
         expandedCardByProject: state.expandedCardByProject,
         cardPageByProject: state.cardPageByProject,
         attachmentsByProject: state.attachmentsByProject,

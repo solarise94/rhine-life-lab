@@ -31,22 +31,277 @@
       "title": "ExecutionPolicy",
       "type": "object"
     },
+    "ExecutorContext": {
+      "properties": {
+        "executor_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Executor Profile"
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Skills",
+          "type": "array"
+        },
+        "instruction_blocks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Instruction Blocks",
+          "type": "array"
+        },
+        "references": {
+          "items": {
+            "$ref": "#/$defs/ExecutorReference"
+          },
+          "title": "References",
+          "type": "array"
+        },
+        "tool_policy": {
+          "$ref": "#/$defs/ExecutorToolPolicy"
+        },
+        "runtime_bindings": {
+          "$ref": "#/$defs/RuntimeBindings"
+        }
+      },
+      "title": "ExecutorContext",
+      "type": "object"
+    },
+    "ExecutorReference": {
+      "properties": {
+        "type": {
+          "default": "file",
+          "enum": [
+            "file",
+            "directory",
+            "url",
+            "template"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "ExecutorReference",
+      "type": "object"
+    },
+    "ExecutorToolPolicy": {
+      "properties": {
+        "network": {
+          "default": "prompt",
+          "title": "Network",
+          "type": "string"
+        },
+        "python": {
+          "default": true,
+          "title": "Python",
+          "type": "boolean"
+        },
+        "rscript": {
+          "default": false,
+          "title": "Rscript",
+          "type": "boolean"
+        },
+        "shell": {
+          "default": true,
+          "title": "Shell",
+          "type": "boolean"
+        },
+        "git_write": {
+          "default": false,
+          "title": "Git Write",
+          "type": "boolean"
+        }
+      },
+      "title": "ExecutorToolPolicy",
+      "type": "object"
+    },
     "ExpectedOutput": {
       "properties": {
         "role": {
           "title": "Role",
           "type": "string"
         },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
         "path_hint": {
           "title": "Path Hint",
           "type": "string"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
         }
       },
       "required": [
         "role",
+        "type",
         "path_hint"
       ],
       "title": "ExpectedOutput",
+      "type": "object"
+    },
+    "ManagerReportingContract": {
+      "properties": {
+        "transport": {
+          "default": "stdout_bp_event",
+          "enum": [
+            "stdout_bp_event",
+            "file_jsonl"
+          ],
+          "title": "Transport",
+          "type": "string"
+        },
+        "stdout_prefix": {
+          "default": "BP_EVENT ",
+          "title": "Stdout Prefix",
+          "type": "string"
+        },
+        "file_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File Path"
+        },
+        "message_types": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Message Types",
+          "type": "array"
+        }
+      },
+      "title": "ManagerReportingContract",
+      "type": "object"
+    },
+    "RunContext": {
+      "properties": {
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "worker_type": {
+          "title": "Worker Type",
+          "type": "string"
+        },
+        "project_root": {
+          "title": "Project Root",
+          "type": "string"
+        },
+        "run_dir": {
+          "title": "Run Dir",
+          "type": "string"
+        },
+        "result_dir": {
+          "title": "Result Dir",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "worker_type",
+        "project_root",
+        "run_dir",
+        "result_dir"
+      ],
+      "title": "RunContext",
+      "type": "object"
+    },
+    "RuntimeBindings": {
+      "properties": {
+        "conda_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conda Env"
+        },
+        "container_image": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container Image"
+        },
+        "working_dir": {
+          "default": ".",
+          "title": "Working Dir",
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Env",
+          "type": "object"
+        }
+      },
+      "title": "RuntimeBindings",
       "type": "object"
     },
     "TaskPacketAsset": {
@@ -62,6 +317,30 @@
         "type": {
           "title": "Type",
           "type": "string"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
         }
       },
       "required": [
@@ -70,6 +349,119 @@
         "type"
       ],
       "title": "TaskPacketAsset",
+      "type": "object"
+    },
+    "TaskPacketCardInput": {
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
+        },
+        "asset_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Path"
+        },
+        "asset_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Type"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "title": "TaskPacketCardInput",
+      "type": "object"
+    },
+    "TaskPacketCardOutput": {
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "path_hint": {
+          "title": "Path Hint",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "role",
+        "type",
+        "path_hint"
+      ],
+      "title": "TaskPacketCardOutput",
       "type": "object"
     }
   },
@@ -86,6 +478,30 @@
       "title": "Card Id",
       "type": "string"
     },
+    "card_title": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Card Title"
+    },
+    "card_status": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Card Status"
+    },
     "goal": {
       "title": "Goal",
       "type": "string"
@@ -95,6 +511,20 @@
         "$ref": "#/$defs/TaskPacketAsset"
       },
       "title": "Input Assets",
+      "type": "array"
+    },
+    "card_inputs": {
+      "items": {
+        "$ref": "#/$defs/TaskPacketCardInput"
+      },
+      "title": "Card Inputs",
+      "type": "array"
+    },
+    "card_outputs": {
+      "items": {
+        "$ref": "#/$defs/TaskPacketCardOutput"
+      },
+      "title": "Card Outputs",
       "type": "array"
     },
     "expected_outputs": {
@@ -138,6 +568,39 @@
     "worker_instructions": {
       "title": "Worker Instructions",
       "type": "string"
+    },
+    "run_context": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RunContext"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "executor_context": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutorContext"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "manager_reporting_contract": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ManagerReportingContract"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

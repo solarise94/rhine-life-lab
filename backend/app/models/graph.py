@@ -9,7 +9,7 @@ from app.models.cards import CardStatus
 
 ModuleType = Literal["analysis_module", "module_group"]
 AssetStatus = Literal["candidate", "valid", "stale", "superseded", "rejected", "archived", "missing"]
-RunStatus = Literal["queued", "running", "needs_approval", "success", "failed", "cancelled"]
+RunStatus = Literal["queued", "running", "reviewing", "needs_approval", "success", "failed", "cancelled", "reviewed"]
 ClaimStatus = Literal["candidate", "valid", "stale", "superseded", "rejected", "archived", "missing"]
 
 
@@ -66,7 +66,11 @@ class RunRecord(BaseModel):
     summary: str
     started_at: str
     finished_at: str | None = None
-    worker_type: str = "fake_worker"
+    worker_type: str = "pi"
+    cancel_reason: str | None = None
+    archived_at: str | None = None
+    cleanup_status: Literal["pending", "completed"] | None = None
+    needs_manager_attention: bool = False
 
 
 class ReportItem(BaseModel):

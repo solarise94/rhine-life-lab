@@ -6,6 +6,7 @@ const STATUS_GRADIENTS: Record<string, [string, string]> = {
   proposed: ["#8b5cf6", "#a78bfa"],
   planned: ["#3b82f6", "#22d3ee"],
   running: ["#f59e0b", "#fbbf24"],
+  reviewing: ["#f59e0b", "#22d3ee"],
   needs_review: ["#f59e0b", "#fbbf24"],
   accepted: ["#22c55e", "#34d399"],
   rejected: ["#ef4444", "#f87171"],
@@ -32,7 +33,7 @@ export function SpecialistAvatar({
     .toUpperCase();
 
   const [c1, c2] = STATUS_GRADIENTS[status] ?? STATUS_GRADIENTS.planned;
-  const glowOpacity = status === "running" ? 0.5 : status === "proposed" ? 0.25 : 0.35;
+  const glowOpacity = status === "running" || status === "reviewing" ? 0.5 : status === "proposed" ? 0.25 : 0.35;
 
   return (
     <div

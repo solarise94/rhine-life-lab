@@ -4,6 +4,7 @@ import csv
 import mimetypes
 from pathlib import Path
 
+from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
 from app.models.graph import Asset
@@ -17,7 +18,10 @@ class ResultAssetService:
 
     def get_asset(self, project_id: str, asset_id: str) -> Asset:
         graph = self.project_service.graph_store(project_id).load_graph()
-        return next(item for item in graph.assets if item.asset_id == asset_id)
+        asset = next((item for item in graph.assets if item.asset_id == asset_id), None)
+        if asset is None:
+            raise HTTPException(status_code=404, detail=f"Result asset not found: {asset_id}")
+        return asset
 
     def get_asset_detail(self, project_id: str, asset_id: str) -> dict:
         asset = self.get_asset(project_id, asset_id)

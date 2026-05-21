@@ -27,6 +27,7 @@ from app.models.project import ProjectState, ProjectSummary
 from app.services.git_service import GitService
 from app.services.graph_store import GraphStore
 from app.services.utils import atomic_write_json, utc_now
+from app.workers.registry import build_worker_registry
 
 
 PROJECT_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -363,6 +364,7 @@ class ProjectService:
             "graph": graph,
             "proposals": store.load_proposals(),
             "git_log": self.git_service(project_id).log(),
+            "worker_capabilities": self._worker_capabilities(),
         }
 
     @staticmethod
@@ -372,6 +374,10 @@ class ProjectService:
             key = getattr(item, attr)
             counts[key] = counts.get(key, 0) + 1
         return counts
+
+    def _worker_capabilities(self) -> list[dict]:
+        registry = build_worker_registry()
+        return [adapter.capability_metadata(self.settings) for adapter in registry.values()]
 
     @staticmethod
     def _validate_project_id(project_id: str) -> None:

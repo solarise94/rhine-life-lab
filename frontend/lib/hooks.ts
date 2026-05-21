@@ -126,7 +126,7 @@ export function useRunEvents(projectId: string, runId?: string, runStatus?: stri
     queryFn: () => api.getRunEvents(projectId, runId!),
     enabled: Boolean(runId),
     refetchInterval: (query) => {
-      if (runStatus && ["success", "failed", "cancelled"].includes(runStatus)) {
+      if (runStatus && ["success", "failed", "cancelled", "reviewed"].includes(runStatus)) {
         return false;
       }
       const data = query.state.data;
@@ -140,7 +140,7 @@ export function useRuntimeApprovals(projectId: string, runId?: string, runStatus
     queryKey: queryKeys.runtimeApprovals(projectId, runId ?? "none"),
     queryFn: () => api.getRuntimeApprovals(projectId, runId!),
     enabled: Boolean(runId),
-    refetchInterval: runStatus && ["success", "failed", "cancelled"].includes(runStatus) ? false : 4_000,
+    refetchInterval: runStatus && ["success", "failed", "cancelled", "reviewed"].includes(runStatus) ? false : 4_000,
   });
 }
 
@@ -167,6 +167,46 @@ export function useStartRunMutation(projectId: string) {
   const refresh = useWorkspaceRefresh(projectId);
   return useMutation({
     mutationFn: ({ cardId, workerType }: { cardId: string; workerType?: string }) => api.startRun(projectId, cardId, workerType),
+    onSuccess: async () => {
+      await refresh();
+    },
+  });
+}
+
+export function useCancelRunMutation(projectId: string) {
+  const refresh = useWorkspaceRefresh(projectId);
+  return useMutation({
+    mutationFn: ({ runId, reason }: { runId: string; reason?: string }) => api.cancelRun(projectId, runId, reason),
+    onSuccess: async () => {
+      await refresh();
+    },
+  });
+}
+
+export function useCleanupRunMutation(projectId: string) {
+  const refresh = useWorkspaceRefresh(projectId);
+  return useMutation({
+    mutationFn: ({ runId, reason }: { runId: string; reason?: string }) => api.cleanupRun(projectId, runId, reason),
+    onSuccess: async () => {
+      await refresh();
+    },
+  });
+}
+
+export function useResetCardRunStateMutation(projectId: string) {
+  const refresh = useWorkspaceRefresh(projectId);
+  return useMutation({
+    mutationFn: ({ cardId }: { cardId: string }) => api.resetCardRunState(projectId, cardId),
+    onSuccess: async () => {
+      await refresh();
+    },
+  });
+}
+
+export function useRerunCardMutation(projectId: string) {
+  const refresh = useWorkspaceRefresh(projectId);
+  return useMutation({
+    mutationFn: ({ cardId, workerType }: { cardId: string; workerType?: string }) => api.rerunCard(projectId, cardId, workerType),
     onSuccess: async () => {
       await refresh();
     },

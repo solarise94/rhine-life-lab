@@ -2,6 +2,7 @@ export type CardStatus =
   | "proposed"
   | "planned"
   | "running"
+  | "reviewing"
   | "needs_review"
   | "accepted"
   | "rejected"
@@ -33,6 +34,7 @@ export interface Card {
   linked_runs: string[];
   linked_assets: string[];
   progress_note?: string | null;
+  executor_context?: Record<string, unknown> | null;
 }
 
 export interface Asset {
@@ -103,11 +105,13 @@ export interface WorkItem {
   title: string;
   status: CardStatus;
   card_type: string;
+  step?: number;
   required_asset_ids: string[];
   produced_asset_ids: string[];
   depends_on_card_ids: string[];
   blocked_by_card_ids: string[];
   blocked_by_asset_ids: string[];
+  planned_input_asset_ids?: string[];
   can_start: boolean;
   block_reasons: string[];
   active: boolean;
@@ -174,7 +178,18 @@ export interface ChatSessionDetail extends ChatSessionSummary {
 export interface ExecutionFileEntry {
   path: string;
   name: string;
-  category: "task_packet" | "manifest" | "review_context" | "transcript" | "generated_script" | string;
+  category:
+    | "task_packet"
+    | "adapter_contract"
+    | "executor_brief"
+    | "executor_prompt"
+    | "manifest"
+    | "filesystem_audit"
+    | "manager_brief"
+    | "review_context"
+    | "transcript"
+    | "generated_script"
+    | string;
   run_id?: string | null;
   size_bytes: number;
   updated_at: number;
@@ -213,6 +228,20 @@ export interface ProjectSummary extends ProjectState {
   result_counts: Record<string, number>;
 }
 
+export interface WorkerCapability {
+  worker_type: string;
+  configured: boolean;
+  requires_configuration: boolean;
+  declares_network_access: boolean;
+  execution_mode: string;
+  launch_template_setting?: string | null;
+  wrapper_module?: string | null;
+  provider?: string | null;
+  resolved_launch_template?: string | null;
+  recommended_launch_examples: string[];
+  notes: string[];
+}
+
 export interface CreateProjectPayload {
   project_id: string;
   name: string;
@@ -233,18 +262,33 @@ export interface ProjectSnapshot {
   };
   proposals: Proposal[];
   git_log: Array<{ hash: string; date: string; subject: string }>;
+  worker_capabilities?: WorkerCapability[];
 }
 
 export interface RunRecord {
   run_id: string;
   card_id: string;
   module_id?: string | null;
-  status: string;
+  status: "queued" | "running" | "reviewing" | "needs_approval" | "success" | "failed" | "cancelled" | "reviewed";
   title: string;
   summary: string;
   started_at: string;
   finished_at?: string | null;
   worker_type: string;
+  cancel_reason?: string | null;
+  archived_at?: string | null;
+  cleanup_status?: "pending" | "completed" | null;
+  needs_manager_attention?: boolean;
+}
+
+export interface StartRunResponse {
+  run_id: string;
+  card_id: string;
+  worker_type: string;
+  status: "queued" | "needs_approval" | "cancelled";
+  latest_event?: RunEvent;
+  pending_approvals?: RuntimeApprovalDecision[];
+  rejected_approvals?: RuntimeApprovalDecision[];
 }
 
 export interface RunEvent {
@@ -254,6 +298,7 @@ export interface RunEvent {
   message: string;
   event_type: string;
   created_at: string;
+  payload?: Record<string, unknown>;
 }
 
 export interface RuntimeApprovalDecision {

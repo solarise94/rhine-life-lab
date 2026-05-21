@@ -4,11 +4,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.models.executor import ExecutorContext
+
 
 CardStatus = Literal[
     "proposed",
     "planned",
     "running",
+    "reviewing",
     "needs_review",
     "accepted",
     "rejected",
@@ -58,3 +61,4 @@ class Card(BaseModel):
     linked_assets: list[str] = Field(default_factory=list)
     technical_refs: TechnicalRefs = Field(default_factory=TechnicalRefs)
     progress_note: str | None = None
+    executor_context: ExecutorContext | None = None

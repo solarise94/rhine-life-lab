@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.models.cards import Card, CardAssetRef
 from app.services.asset_timeline_service import AssetTimelineService
 from app.services.manager_planner import ManagerPlanningError
+from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.project_service import ProjectService
 from app.services.result_asset_service import ResultAssetService
 from app.services.utils import utc_now
@@ -77,6 +78,8 @@ class ManagerBlueprintTools:
             cards.append(card)
             graph = store.load_graph()
             self._sync_module_links(graph, card, previous_card=None)
+            ModuleGroupStateService.sync_linked_module_status_from_card(card, graph.modules)
+            ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
             store.save_graph(graph)
             store.save_cards(cards)
             self._audit_card_tool(project_id, "create_card", card.card_id, payload)
@@ -104,6 +107,8 @@ class ManagerBlueprintTools:
             cards[index] = updated
             graph = store.load_graph()
             self._sync_module_links(graph, updated, previous_card=previous)
+            ModuleGroupStateService.sync_linked_module_status_from_card(updated, graph.modules)
+            ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
             store.save_graph(graph)
             store.save_cards(cards)
             self._audit_card_tool(project_id, "update_card", card_id, payload)
@@ -133,6 +138,8 @@ class ManagerBlueprintTools:
             cards[index] = updated
             graph = store.load_graph()
             self._sync_module_links(graph, updated, previous_card=existing)
+            ModuleGroupStateService.sync_linked_module_status_from_card(updated, graph.modules)
+            ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
             store.save_graph(graph)
             store.save_cards(cards)
             self._audit_card_tool(project_id, "delete_card", card_id, payload)
@@ -180,6 +187,7 @@ class ManagerBlueprintTools:
             "linked_runs": list(payload.get("linked_runs") or []),
             "linked_assets": list(payload.get("linked_assets") or []),
             "progress_note": payload.get("progress_note"),
+            "executor_context": payload.get("executor_context"),
         }
         if not card_payload["title"]:
             raise ManagerPlanningError("card title is required.")

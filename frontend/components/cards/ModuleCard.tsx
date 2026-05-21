@@ -11,7 +11,7 @@ import {
   Sparkles,
   Archive,
 } from "lucide-react";
-import { Card } from "@/lib/types";
+import { Card, WorkerCapability } from "@/lib/types";
 import { CardStatusBadge } from "./CardStatusBadge";
 import { SpecialistAvatar } from "./SpecialistAvatar";
 import { FileBag } from "./FileBag";
@@ -25,6 +25,9 @@ export function ModuleCard({
   onStartRun,
   onReviewRun,
   onAskManager,
+  workerCapabilities = [],
+  selectedWorkerType,
+  onSelectWorker,
 }: {
   projectId: string;
   card: Card;
@@ -33,6 +36,9 @@ export function ModuleCard({
   onStartRun: (card: Card) => void;
   onReviewRun: (card: Card) => void;
   onAskManager?: (text: string) => void;
+  workerCapabilities?: WorkerCapability[];
+  selectedWorkerType?: string;
+  onSelectWorker?: (card: Card, workerType: string) => void;
 }) {
   const cardPages = useWorkspaceUiStore((s) => s.cardPageByProject[projectId] ?? EMPTY_CARD_PAGE_BY_ID);
   const setCardPage = useWorkspaceUiStore((s) => s.setCardPage);
@@ -40,8 +46,9 @@ export function ModuleCard({
   const fileCount = card.outputs.filter((o) => o.asset_id).length;
 
   const isGhost = card.status === "proposed";
-  const isRunning = card.status === "running";
+  const isRunning = card.status === "running" || card.status === "reviewing";
   const isDormant = card.status === "cancelled" || card.status === "rejected";
+  const configuredWorkers = workerCapabilities.filter((item) => item.configured);
 
   const pages: CardPage[] = isDormant
     ? ["specialist", "result", "detail", "archive"]
@@ -142,9 +149,29 @@ export function ModuleCard({
                 </div>
 
                 {card.status === "planned" ? (
-                  <button className="btn primary" style={{ width: "100%", marginTop: 8 }} onClick={(e) => { e.stopPropagation(); onStartRun(card); }}>
-                    <Play size={14} /> 开始执行
-                  </button>
+                  <div className="executor-run-control">
+                    <label className="executor-select-label" onClick={(e) => e.stopPropagation()}>
+                      <span>执行器</span>
+                      <select
+                        value={selectedWorkerType ?? configuredWorkers[0]?.worker_type ?? ""}
+                        onChange={(e) => onSelectWorker?.(card, e.target.value)}
+                        disabled={!configuredWorkers.length}
+                      >
+                        {configuredWorkers.length ? (
+                          configuredWorkers.map((item) => (
+                            <option key={item.worker_type} value={item.worker_type}>
+                              {item.worker_type}{item.execution_mode === "builtin_pi_agent" ? " · DeepSeek" : ""}
+                            </option>
+                          ))
+                        ) : (
+                          <option value="">未配置真实执行器</option>
+                        )}
+                      </select>
+                    </label>
+                    <button className="btn primary" style={{ width: "100%" }} onClick={(e) => { e.stopPropagation(); onStartRun(card); }}>
+                      <Play size={14} /> 开始执行
+                    </button>
+                  </div>
                 ) : null}
               </div>
             </div>
@@ -166,9 +193,14 @@ export function ModuleCard({
                   </div>
                 ) : null}
                 
+                {card.status === "reviewing" ? (
+                  <div className="muted" style={{ marginTop: 12, fontSize: 11 }}>
+                    Reviewer 正在自动验收，验收通过后会进入 accepted。
+                  </div>
+                ) : null}
                 {card.status === "needs_review" && card.linked_runs.length ? (
                   <button className="btn success" style={{ width: "100%", marginTop: 12 }} onClick={(e) => { e.stopPropagation(); onReviewRun(card); }}>
-                    <CheckCircle2 size={14} /> 接受结果
+                    <CheckCircle2 size={14} /> 人工接受旧结果
                   </button>
                 ) : null}
               </div>
@@ -185,7 +217,7 @@ export function ModuleCard({
                 </div>
 
                 <div className="inline-actions" style={{ marginTop: 12, borderTop: "1px dashed var(--line)", paddingTop: 8 }}>
-                  {(card.status === "accepted" || card.status === "failed") && (
+                  {card.status === "failed" && (
                     <button className="btn secondary" style={{ fontSize: 10, padding: "4px 8px", flex: 1 }} onClick={(e) => { e.stopPropagation(); onStartRun(card); }}>
                       <RotateCcw size={12} /> 重新运行
                     </button>

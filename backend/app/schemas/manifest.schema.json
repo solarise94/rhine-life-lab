@@ -1,5 +1,54 @@
 {
   "$defs": {
+    "CodeArtifact": {
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "language": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Language"
+        },
+        "purpose": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Purpose"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "CodeArtifact",
+      "type": "object"
+    },
     "CreatedAsset": {
       "properties": {
         "role": {
@@ -13,6 +62,30 @@
         "path": {
           "title": "Path",
           "type": "string"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
         },
         "description": {
           "anyOf": [
@@ -48,6 +121,30 @@
         "type": {
           "title": "Type",
           "type": "string"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
         }
       },
       "required": [
@@ -90,6 +187,18 @@
       },
       "title": "Created Assets",
       "type": "array"
+    },
+    "code_artifacts": {
+      "items": {
+        "$ref": "#/$defs/CodeArtifact"
+      },
+      "title": "Code Artifacts",
+      "type": "array"
+    },
+    "validation_evidence": {
+      "additionalProperties": true,
+      "title": "Validation Evidence",
+      "type": "object"
     },
     "commands_executed": {
       "items": {

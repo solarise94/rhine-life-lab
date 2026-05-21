@@ -29,6 +29,18 @@ class RuntimeApprovalDecisionRequest(BaseModel):
     approve: bool
 
 
+class CancelRunRequest(BaseModel):
+    reason: str | None = None
+
+
+class CleanupRunRequest(BaseModel):
+    reason: str | None = None
+
+
+class RerunCardRequest(BaseModel):
+    worker_type: str | None = None
+
+
 @router.post("/cards/{card_id}/start-run")
 def start_run(
     project_id: str,
@@ -37,6 +49,25 @@ def start_run(
     worker_service: WorkerService = Depends(get_worker_service),
 ) -> dict:
     return worker_service.start_run(project_id, card_id, worker_type=request.worker_type if request else None)
+
+
+@router.post("/cards/{card_id}/reset-run-state")
+def reset_card_run_state(
+    project_id: str,
+    card_id: str,
+    worker_service: WorkerService = Depends(get_worker_service),
+) -> dict:
+    return worker_service.reset_card_run_state(project_id, card_id)
+
+
+@router.post("/cards/{card_id}/rerun")
+def rerun_card(
+    project_id: str,
+    card_id: str,
+    request: RerunCardRequest | None = None,
+    worker_service: WorkerService = Depends(get_worker_service),
+) -> dict:
+    return worker_service.rerun_card(project_id, card_id, worker_type=request.worker_type if request else None)
 
 
 @router.get("/runs/{run_id}")
@@ -70,6 +101,26 @@ def review_run(
     worker_service: WorkerService = Depends(get_worker_service),
 ) -> dict:
     return worker_service.review_run(project_id, run_id, accept=request.accept)
+
+
+@router.post("/runs/{run_id}/cancel")
+def cancel_run(
+    project_id: str,
+    run_id: str,
+    request: CancelRunRequest | None = None,
+    worker_service: WorkerService = Depends(get_worker_service),
+) -> dict:
+    return worker_service.cancel_run(project_id, run_id, reason=request.reason if request else None)
+
+
+@router.post("/runs/{run_id}/cleanup")
+def cleanup_run(
+    project_id: str,
+    run_id: str,
+    request: CleanupRunRequest | None = None,
+    worker_service: WorkerService = Depends(get_worker_service),
+) -> dict:
+    return worker_service.cleanup_run(project_id, run_id, reason=request.reason if request else None)
 
 
 @router.get("/runs/{run_id}/runtime-approvals")
@@ -109,7 +160,7 @@ async def run_events_ws(project_id: str, run_id: str, websocket: WebSocket) -> N
                 sent += 1
             graph = store.load_graph()
             run = next((item for item in graph.runs if item.run_id == run_id), None)
-            if run and run.status in {"success", "failed", "cancelled"} and sent >= len(events):
+            if run and run.status in {"success", "failed", "cancelled", "reviewed"} and sent >= len(events):
                 await asyncio.sleep(0.25)
             else:
                 await asyncio.sleep(0.5)

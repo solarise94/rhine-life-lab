@@ -63,7 +63,12 @@ class ProjectFileService:
             for run_dir in sorted(path for path in runs_root.iterdir() if path.is_dir()):
                 for filename, category in (
                     ("task_packet.json", "task_packet"),
+                    ("adapter_contract.json", "adapter_contract"),
+                    ("executor_brief.md", "executor_brief"),
+                    ("executor_prompt.md", "executor_prompt"),
                     ("manifest.json", "manifest"),
+                    ("filesystem_audit.json", "filesystem_audit"),
+                    ("manager_brief.json", "manager_brief"),
                     ("review_context.json", "review_context"),
                     ("transcript.md", "transcript"),
                 ):

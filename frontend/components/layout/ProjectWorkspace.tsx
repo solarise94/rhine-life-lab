@@ -4,16 +4,20 @@ import { useEffect, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import dynamic from "next/dynamic";
 
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import {
   useAdvancedGit,
   useAdvancedGraph,
+  useCancelRunMutation,
+  useCleanupRunMutation,
   useProjectFiles,
   useProjectReport,
   useProjectResults,
   useProjectSnapshot,
+  useRerunCardMutation,
   useReportExportMutation,
   useReportReorderMutation,
+  useResetCardRunStateMutation,
   useResultAsset,
   useReviewRunMutation,
   useRunEvents,
@@ -26,7 +30,7 @@ import {
 import { queryKeys } from "@/lib/query-keys";
 import { useReportViewStore } from "@/lib/stores/report-view-store";
 import { useResultsViewStore } from "@/lib/stores/results-view-store";
-import { useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
+import { EMPTY_SELECTED_WORKER_BY_CARD, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 import { Card, RunEvent } from "@/lib/types";
 import { SideNav } from "./SideNav";
 import { ProjectHeader } from "./ProjectHeader";
@@ -60,9 +64,11 @@ type View = "tasks" | "results" | "files" | "report" | "advanced";
 export function ProjectWorkspace({ projectId, view }: { projectId: string; view: View }) {
   const queryClient = useQueryClient();
   const selectedCardId = useWorkspaceUiStore((s) => s.selectedCardByProject[projectId]);
+  const selectedWorkerByProject = useWorkspaceUiStore((s) => s.selectedWorkerByProject[projectId] ?? EMPTY_SELECTED_WORKER_BY_CARD);
   const currentChatSessionId = useWorkspaceUiStore((s) => s.currentChatSessionIdByProject[projectId] ?? null);
   const notice = useWorkspaceUiStore((s) => s.noticesByProject[projectId] ?? null);
   const setSelectedCard = useWorkspaceUiStore((s) => s.setSelectedCard);
+  const setSelectedWorker = useWorkspaceUiStore((s) => s.setSelectedWorker);
   const setNotice = useWorkspaceUiStore((s) => s.setNotice);
   const mobileTab = useWorkspaceUiStore((s) => s.mobileTabByProject[projectId] ?? "chat");
   const setMobileTab = useWorkspaceUiStore((s) => s.setMobileTab);
@@ -81,6 +87,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const advancedGraphQuery = useAdvancedGraph(projectId, view === "advanced");
   const advancedGitQuery = useAdvancedGit(projectId, view === "advanced");
   const startRunMutation = useStartRunMutation(projectId);
+  const cancelRunMutation = useCancelRunMutation(projectId);
+  const cleanupRunMutation = useCleanupRunMutation(projectId);
+  const resetCardRunStateMutation = useResetCardRunStateMutation(projectId);
+  const rerunCardMutation = useRerunCardMutation(projectId);
   const reviewRunMutation = useReviewRunMutation(projectId);
   const reorderReportMutation = useReportReorderMutation(projectId);
   const exportReportMutation = useReportExportMutation(projectId);
@@ -98,6 +108,18 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
       : snapshot?.cards.find((item) => item.card_id === selectedCardId) ?? defaultTaskCard;
   const selectedRunId = selectedCard?.linked_runs.at(-1);
   const selectedRun = snapshot?.graph.runs.find((item) => item.run_id === selectedRunId);
+  const selectedWorkItem = workOrderQuery.data?.work_items.find((item) => item.card_id === selectedCard?.card_id);
+  const configuredWorkers = useMemo(
+    () => (snapshot?.worker_capabilities ?? []).filter((item) => item.configured),
+    [snapshot?.worker_capabilities],
+  );
+  const activeRunCount = useMemo(
+    () => snapshot?.graph.runs.filter((item) => ["queued", "needs_approval", "running", "reviewing"].includes(item.status)).length ?? 0,
+    [snapshot?.graph.runs],
+  );
+  const selectedWorkerType = selectedCard
+    ? selectedWorkerByProject[selectedCard.card_id] ?? selectedRun?.worker_type ?? configuredWorkers[0]?.worker_type
+    : configuredWorkers[0]?.worker_type;
   const allResultAssets = useMemo(
     () => (resultsQuery.data ? [...resultsQuery.data.accepted, ...resultsQuery.data.candidate, ...resultsQuery.data.other] : []),
     [resultsQuery.data],
@@ -116,6 +138,18 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   }, [defaultTaskCard, projectId, selectedCardId, setSelectedCard]);
 
   useEffect(() => {
+    if (!selectedCard || !configuredWorkers.length) return;
+    const current = selectedWorkerByProject[selectedCard.card_id];
+    if (current && configuredWorkers.some((item) => item.worker_type === current)) return;
+    const fallback = selectedRun?.worker_type && configuredWorkers.some((item) => item.worker_type === selectedRun.worker_type)
+      ? selectedRun.worker_type
+      : configuredWorkers[0]?.worker_type;
+    if (fallback) {
+      setSelectedWorker(projectId, selectedCard.card_id, fallback);
+    }
+  }, [configuredWorkers, projectId, selectedCard, selectedRun?.worker_type, selectedWorkerByProject, setSelectedWorker]);
+
+  useEffect(() => {
     if (view !== "results" || !allResultAssets.length || selectedAssetId) return;
     setSelectedAsset(projectId, allResultAssets[0].asset_id);
   }, [allResultAssets, projectId, selectedAssetId, setSelectedAsset, view]);
@@ -124,6 +158,15 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     if (view !== "report" || !reportQuery.data?.sections.length || selectedSectionId) return;
     setSelectedSection(projectId, reportQuery.data.sections[0].item_id);
   }, [projectId, reportQuery.data, selectedSectionId, setSelectedSection, view]);
+
+  useEffect(() => {
+    if (view !== "tasks" || activeRunCount === 0) return;
+    const timer = window.setInterval(() => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.project(projectId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.workOrder(projectId) });
+    }, 2_000);
+    return () => window.clearInterval(timer);
+  }, [activeRunCount, projectId, queryClient, view]);
 
   useEffect(() => {
     if (view !== "tasks" || !selectedRunId) return;
@@ -138,15 +181,42 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
         if (items.some((item) => item.event_id === payload.event_id)) return previous;
         return { items: [...items, payload] };
       });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.project(projectId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.workOrder(projectId) });
     };
     return () => socket.close();
   }, [projectId, queryClient, selectedRunId, view]);
 
+  function reportActionError(error: unknown, fallback: string) {
+    setNotice(projectId, error instanceof Error ? error.message : fallback);
+  }
+
   async function handleStartRun(card: Card) {
     setNotice(projectId, null);
-    const response = await startRunMutation.mutateAsync({ cardId: card.card_id });
-    if (response.status === "needs_approval") {
-      setNotice(projectId, `Run ${response.run_id} 正在等待运行时批准。`);
+    setSelectedCard(projectId, card.card_id);
+    const workerType = selectedWorkerByProject[card.card_id] ?? configuredWorkers[0]?.worker_type;
+    try {
+      const response = await startRunMutation.mutateAsync({ cardId: card.card_id, workerType });
+      if (response.latest_event) {
+        queryClient.setQueryData(queryKeys.runEvents(projectId, response.run_id), { items: [response.latest_event] });
+      }
+      if (response.status === "needs_approval") {
+        setNotice(projectId, `Run ${response.run_id} 已用 ${response.worker_type} 启动，正在等待运行时批准。`);
+      } else if (response.status === "cancelled") {
+        setNotice(projectId, `Run ${response.run_id} 未启动：${response.worker_type} 的权限校验被拒绝。`);
+      } else if (response.latest_event?.message) {
+        setNotice(projectId, `[${response.worker_type}] ${response.latest_event.message}`);
+      } else {
+        setNotice(projectId, `Run ${response.run_id} 已用 ${response.worker_type} 启动。`);
+      }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409 && error.detail && typeof error.detail === "object") {
+        const blockDetails = (error.detail as { block_details?: { blocked_by_card_ids?: string[]; block_reasons?: string[] } }).block_details;
+        const blockers = [...(blockDetails?.blocked_by_card_ids ?? []), ...(blockDetails?.block_reasons ?? [])].filter(Boolean);
+        setNotice(projectId, blockers.length ? `当前不能启动：${blockers.join(", ")}` : error.message);
+        return;
+      }
+      setNotice(projectId, error instanceof Error ? error.message : "启动 run 失败。");
     }
   }
 
@@ -154,13 +224,70 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     const latestRun = card.linked_runs.at(-1);
     if (!latestRun) return;
     setNotice(projectId, null);
-    await reviewRunMutation.mutateAsync({ runId: latestRun, accept: true });
+    try {
+      await reviewRunMutation.mutateAsync({ runId: latestRun, accept: true });
+    } catch (error) {
+      reportActionError(error, "审核 run 失败。");
+    }
+  }
+
+  async function handleCancelRun() {
+    if (!selectedRunId) return;
+    setNotice(projectId, null);
+    try {
+      const response = await cancelRunMutation.mutateAsync({ runId: selectedRunId });
+      setNotice(projectId, `Run ${response.run_id} 已取消。`);
+    } catch (error) {
+      reportActionError(error, "取消 run 失败。");
+    }
+  }
+
+  async function handleCleanupRun() {
+    if (!selectedRunId) return;
+    setNotice(projectId, null);
+    try {
+      const response = await cleanupRunMutation.mutateAsync({ runId: selectedRunId });
+      setNotice(projectId, `Run ${response.run_id} 已清理归档。`);
+    } catch (error) {
+      reportActionError(error, "清理 run 失败。");
+    }
+  }
+
+  async function handleResetCardRunState() {
+    if (!selectedCard) return;
+    setNotice(projectId, null);
+    try {
+      const response = await resetCardRunStateMutation.mutateAsync({ cardId: selectedCard.card_id });
+      setNotice(projectId, `Card ${response.card_id} 已重置为 ${response.status}。`);
+    } catch (error) {
+      reportActionError(error, "重置 card 状态失败。");
+    }
+  }
+
+  async function handleRerunCard() {
+    if (!selectedCard) return;
+    setNotice(projectId, null);
+    const workerType = selectedWorkerByProject[selectedCard.card_id] ?? configuredWorkers[0]?.worker_type;
+    try {
+      const response = await rerunCardMutation.mutateAsync({ cardId: selectedCard.card_id, workerType });
+      if (response.latest_event) {
+        queryClient.setQueryData(queryKeys.runEvents(projectId, response.run_id), { items: [response.latest_event] });
+      }
+      setSelectedCard(projectId, selectedCard.card_id);
+      setNotice(projectId, response.latest_event?.message ?? `已用 ${response.worker_type} 重新创建 run ${response.run_id}。`);
+    } catch (error) {
+      reportActionError(error, "重新运行 card 失败。");
+    }
   }
 
   async function handleApprovalDecision(requestId: string, approve: boolean) {
     if (!selectedRunId) return;
-    await runtimeApprovalMutation.mutateAsync({ requestId, approve });
-    setNotice(projectId, approve ? `已批准 ${requestId}` : `已拒绝 ${requestId}`);
+    try {
+      await runtimeApprovalMutation.mutateAsync({ requestId, approve });
+      setNotice(projectId, approve ? `已批准 ${requestId}` : `已拒绝 ${requestId}`);
+    } catch (error) {
+      reportActionError(error, approve ? "批准权限请求失败。" : "拒绝权限请求失败。");
+    }
   }
 
   async function handleMoveReport(itemId: string, direction: "up" | "down") {
@@ -196,26 +323,48 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   }
 
   const tasksContent = (
-    <div className="workspace-two-col task-workspace">
-      <ManagerChatPanel
-        projectId={projectId}
-        sessionId={currentChatSessionId}
-        mentionableAssets={snapshot.graph.assets}
-        onRefresh={refreshWorkspace}
-      />
-      <CardStream
-        projectId={projectId}
-        cards={snapshot.cards}
-        workOrder={workOrderQuery.data}
-        selectedCardId={selectedCard?.card_id}
-        onSelect={(card) => setSelectedCard(projectId, card.card_id)}
-        onClearSelection={() => setSelectedCard(projectId, null)}
-        onStartRun={handleStartRun}
-        onReviewRun={handleReviewRun}
-        onAskManager={(text) => {
-          const store = useWorkspaceUiStore.getState();
-          store.setDraftMessage(projectId, text);
-          store.setMobileTab(projectId, "chat");
+    <div className="stack">
+      <div className="workspace-two-col task-workspace">
+        <ManagerChatPanel
+          projectId={projectId}
+          sessionId={currentChatSessionId}
+          mentionableAssets={snapshot.graph.assets}
+          onRefresh={refreshWorkspace}
+        />
+        <CardStream
+          projectId={projectId}
+          cards={snapshot.cards}
+          workOrder={workOrderQuery.data}
+          selectedCardId={selectedCard?.card_id}
+          onSelect={(card) => setSelectedCard(projectId, card.card_id)}
+          onClearSelection={() => setSelectedCard(projectId, null)}
+          onStartRun={handleStartRun}
+          onReviewRun={handleReviewRun}
+          onAskManager={(text) => {
+            const store = useWorkspaceUiStore.getState();
+            store.setDraftMessage(projectId, text);
+            store.setMobileTab(projectId, "chat");
+          }}
+          workerCapabilities={snapshot.worker_capabilities}
+          selectedWorkerByCard={selectedWorkerByProject}
+          onSelectWorker={(card, workerType) => {
+            setSelectedWorker(projectId, card.card_id, workerType);
+            setNotice(projectId, `Card ${card.card_id} 将使用 ${workerType} 执行。`);
+          }}
+        />
+      </div>
+      <CardDetailPanel
+        card={selectedCard}
+        summary={snapshot.summary}
+        workItem={selectedWorkItem}
+        run={selectedRun}
+        latestEvent={runEventsQuery.data?.items?.at(-1)}
+        workerCapabilities={snapshot.worker_capabilities}
+        selectedWorkerType={selectedWorkerType}
+        onSelectWorker={(workerType) => {
+          if (!selectedCard) return;
+          setSelectedWorker(projectId, selectedCard.card_id, workerType);
+          setNotice(projectId, `Card ${selectedCard.card_id} 将使用 ${workerType} 执行。`);
         }}
       />
     </div>
@@ -308,7 +457,17 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 graph={advancedGraphQuery.data?.graph ?? null}
                 gitItems={advancedGitQuery.data?.items ?? []}
               />
-              <CardDetailPanel card={selectedCard} summary={snapshot.summary} />
+              <CardDetailPanel
+                card={selectedCard}
+                summary={snapshot.summary}
+                workerCapabilities={snapshot.worker_capabilities}
+                selectedWorkerType={selectedWorkerType}
+                onSelectWorker={(workerType) => {
+                  if (!selectedCard) return;
+                  setSelectedWorker(projectId, selectedCard.card_id, workerType);
+                  setNotice(projectId, `Card ${selectedCard.card_id} 将使用 ${workerType} 执行。`);
+                }}
+              />
             </div>
           ) : null}
         </div>
@@ -336,6 +495,12 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   const store = useWorkspaceUiStore.getState();
                   store.setDraftMessage(projectId, text);
                   store.setMobileTab(projectId, "chat");
+                }}
+                workerCapabilities={snapshot.worker_capabilities}
+                selectedWorkerByCard={selectedWorkerByProject}
+                onSelectWorker={(card, workerType) => {
+                  setSelectedWorker(projectId, card.card_id, workerType);
+                  setNotice(projectId, `Card ${card.card_id} 将使用 ${workerType} 执行。`);
                 }}
               />
             )
@@ -389,7 +554,17 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     graph={advancedGraphQuery.data?.graph ?? null}
                     gitItems={advancedGitQuery.data?.items ?? []}
                   />
-                  <CardDetailPanel card={selectedCard} summary={snapshot.summary} />
+                  <CardDetailPanel
+                    card={selectedCard}
+                    summary={snapshot.summary}
+                    workerCapabilities={snapshot.worker_capabilities}
+                    selectedWorkerType={selectedWorkerType}
+                    onSelectWorker={(workerType) => {
+                      if (!selectedCard) return;
+                      setSelectedWorker(projectId, selectedCard.card_id, workerType);
+                      setNotice(projectId, `Card ${selectedCard.card_id} 将使用 ${workerType} 执行。`);
+                    }}
+                  />
                 </>
               ) : null}
             </div>
@@ -400,11 +575,22 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
         {view === "tasks" && selectedRun ? (
           <div style={{ marginTop: 16 }}>
             <RunEventsPanel
+              card={selectedCard}
               run={selectedRun}
               events={runEventsQuery.data?.items ?? []}
               approvals={runtimeApprovalsQuery.data?.items ?? []}
               onApprove={(requestId) => handleApprovalDecision(requestId, true)}
               onReject={(requestId) => handleApprovalDecision(requestId, false)}
+              onCancelRun={handleCancelRun}
+              onCleanupRun={handleCleanupRun}
+              onResetCard={handleResetCardRunState}
+              onRerunCard={handleRerunCard}
+              actionPending={
+                cancelRunMutation.isPending ||
+                cleanupRunMutation.isPending ||
+                resetCardRunStateMutation.isPending ||
+                rerunCardMutation.isPending
+              }
             />
           </div>
         ) : null}

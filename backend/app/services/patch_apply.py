@@ -6,6 +6,7 @@ from pathlib import Path
 from app.models.cards import Card, CardAssetRef
 from app.models.graph import Asset, Claim, GraphState, Module, ModuleRef, ReportItem, RunRecord
 from app.models.patches import ApplyResult, GraphPatch
+from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.patch_validator import PatchValidator
 from app.services.project_service import ProjectService
 from app.services.utils import atomic_write_json, read_json, utc_now
@@ -73,6 +74,8 @@ class PatchApplyService:
                         for key in ("title", "status", "summary", "depends_on_assets", "expected_outputs", "linked_cards"):
                             if key in payload:
                                 setattr(module, key, payload[key])
+                        if "status" in payload:
+                            ModuleGroupStateService.sync_linked_card_status_from_module(module, cards)
                     elif op.op == "add_submodule":
                         module = self._require_module(graph, payload["parent_module_id"], op.op, field_name="parent_module_id")
                         module.submodules.append(
@@ -86,18 +89,24 @@ class PatchApplyService:
                         module = self._require_module(graph, payload["parent_module_id"], op.op, field_name="parent_module_id")
                         module.submodules = [item for item in module.submodules if item.module_id != payload["module_id"]]
                     elif op.op == "create_card":
-                        cards.append(Card.model_validate(payload))
+                        card = Card.model_validate(payload)
+                        cards.append(card)
+                        ModuleGroupStateService.sync_linked_module_status_from_card(card, graph.modules)
                     elif op.op == "update_card":
                         card = self._require_card(cards, payload["card_id"], op.op)
                         for key, value in payload.items():
                             if key != "card_id":
                                 setattr(card, key, value)
+                        if "status" in payload:
+                            ModuleGroupStateService.sync_linked_module_status_from_card(card, graph.modules)
                     elif op.op == "set_card_status":
                         card = self._require_card(cards, payload["card_id"], op.op)
                         card.status = payload["status"]
+                        ModuleGroupStateService.sync_linked_module_status_from_card(card, graph.modules)
                     elif op.op == "set_module_status":
                         module = self._require_module(graph, payload["module_id"], op.op)
                         module.status = payload["status"]
+                        ModuleGroupStateService.sync_linked_card_status_from_module(module, cards)
                     elif op.op == "create_asset":
                         graph.assets.append(Asset.model_validate(payload))
                     elif op.op == "set_asset_status":
@@ -145,9 +154,7 @@ class PatchApplyService:
                     else:
                         raise ValueError(f"Unsupported op reached apply stage: {op.op}")
 
-                for card in cards:
-                    if card.card_type == "module_group":
-                        self._recompute_group_status(card, graph.modules)
+                ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
 
                 GraphState.model_validate(graph.model_dump())
                 [Card.model_validate(card.model_dump()) for card in cards]
@@ -272,30 +279,6 @@ class PatchApplyService:
             return True
         except Exception:
             return False
-
-    @staticmethod
-    def _recompute_group_status(card: Card, modules: list[Module]) -> None:
-        group = next((item for item in modules if item.module_id in card.linked_modules), None)
-        if not group or not group.submodules:
-            return
-        child_statuses = [item.status for item in group.submodules]
-        if all(status == "accepted" for status in child_statuses):
-            card.status = "accepted"
-            card.aggregate_status = "all_accepted"
-        elif any(status == "running" for status in child_statuses):
-            card.status = "running"
-            card.aggregate_status = "has_running"
-        elif any(status == "failed" for status in child_statuses):
-            card.status = "failed"
-            card.aggregate_status = "has_failed"
-        elif any(status == "stale" for status in child_statuses):
-            card.status = "stale"
-            card.aggregate_status = "stale"
-        elif any(status == "planned" for status in child_statuses):
-            card.status = "planned"
-            card.aggregate_status = "partially_planned"
-        else:
-            card.aggregate_status = "mixed"
 
     @staticmethod
     def _require_module(graph: GraphState, module_id: str, op_name: str, field_name: str = "module_id") -> Module:

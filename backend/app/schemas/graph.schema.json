@@ -167,6 +167,7 @@
             "proposed",
             "planned",
             "running",
+            "reviewing",
             "needs_review",
             "accepted",
             "rejected",
@@ -253,6 +254,7 @@
             "proposed",
             "planned",
             "running",
+            "reviewing",
             "needs_review",
             "accepted",
             "rejected",
@@ -341,9 +343,12 @@
           "enum": [
             "queued",
             "running",
+            "reviewing",
+            "needs_approval",
             "success",
             "failed",
-            "cancelled"
+            "cancelled",
+            "reviewed"
           ],
           "title": "Status",
           "type": "string"
@@ -373,9 +378,54 @@
           "title": "Finished At"
         },
         "worker_type": {
-          "default": "fake_worker",
+          "default": "pi",
           "title": "Worker Type",
           "type": "string"
+        },
+        "cancel_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cancel Reason"
+        },
+        "archived_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Archived At"
+        },
+        "cleanup_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "pending",
+                "completed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cleanup Status"
+        },
+        "needs_manager_attention": {
+          "default": false,
+          "title": "Needs Manager Attention",
+          "type": "boolean"
         }
       },
       "required": [

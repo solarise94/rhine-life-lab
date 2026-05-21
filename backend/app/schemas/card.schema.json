@@ -37,6 +37,160 @@
       "title": "CardAssetRef",
       "type": "object"
     },
+    "ExecutorContext": {
+      "properties": {
+        "executor_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Executor Profile"
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Skills",
+          "type": "array"
+        },
+        "instruction_blocks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Instruction Blocks",
+          "type": "array"
+        },
+        "references": {
+          "items": {
+            "$ref": "#/$defs/ExecutorReference"
+          },
+          "title": "References",
+          "type": "array"
+        },
+        "tool_policy": {
+          "$ref": "#/$defs/ExecutorToolPolicy"
+        },
+        "runtime_bindings": {
+          "$ref": "#/$defs/RuntimeBindings"
+        }
+      },
+      "title": "ExecutorContext",
+      "type": "object"
+    },
+    "ExecutorReference": {
+      "properties": {
+        "type": {
+          "default": "file",
+          "enum": [
+            "file",
+            "directory",
+            "url",
+            "template"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "ExecutorReference",
+      "type": "object"
+    },
+    "ExecutorToolPolicy": {
+      "properties": {
+        "network": {
+          "default": "prompt",
+          "title": "Network",
+          "type": "string"
+        },
+        "python": {
+          "default": true,
+          "title": "Python",
+          "type": "boolean"
+        },
+        "rscript": {
+          "default": false,
+          "title": "Rscript",
+          "type": "boolean"
+        },
+        "shell": {
+          "default": true,
+          "title": "Shell",
+          "type": "boolean"
+        },
+        "git_write": {
+          "default": false,
+          "title": "Git Write",
+          "type": "boolean"
+        }
+      },
+      "title": "ExecutorToolPolicy",
+      "type": "object"
+    },
+    "RuntimeBindings": {
+      "properties": {
+        "conda_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conda Env"
+        },
+        "container_image": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container Image"
+        },
+        "working_dir": {
+          "default": ".",
+          "title": "Working Dir",
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Env",
+          "type": "object"
+        }
+      },
+      "title": "RuntimeBindings",
+      "type": "object"
+    },
     "TechnicalRefs": {
       "properties": {
         "graph_nodes": {
@@ -82,6 +236,7 @@
         "proposed",
         "planned",
         "running",
+        "reviewing",
         "needs_review",
         "accepted",
         "rejected",
@@ -92,6 +247,18 @@
       ],
       "title": "Status",
       "type": "string"
+    },
+    "step": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Step"
     },
     "aggregate_status": {
       "anyOf": [
@@ -190,6 +357,17 @@
       ],
       "default": null,
       "title": "Progress Note"
+    },
+    "executor_context": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutorContext"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

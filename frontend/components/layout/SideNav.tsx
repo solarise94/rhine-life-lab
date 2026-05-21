@@ -32,6 +32,8 @@ function sortSessions(items: ChatSessionSummary[]) {
   return [...items].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
 }
 
+const EMPTY_SESSIONS: ChatSessionSummary[] = [];
+
 export function SideNav({ projectId, current }: { projectId: string; current: string }) {
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -42,7 +44,7 @@ export function SideNav({ projectId, current }: { projectId: string; current: st
   const setCurrentChatSessionId = useWorkspaceUiStore((s) => s.setCurrentChatSessionId);
   const clearAttachments = useWorkspaceUiStore((s) => s.clearAttachments);
   const clearDraftMessage = useWorkspaceUiStore((s) => s.clearDraftMessage);
-  const sessions = sessionsQuery.data?.items ?? [];
+  const sessions = sessionsQuery.data?.items ?? EMPTY_SESSIONS;
   const projects = useMemo(
     () => [...(projectsQuery.data?.items ?? [])].sort((left, right) => left.name.localeCompare(right.name)),
     [projectsQuery.data],

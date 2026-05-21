@@ -14,6 +14,7 @@ import {
   ProjectSummary,
   ReportSection,
   RunEvent,
+  StartRunResponse,
   RuntimeApprovalDecision,
   WorkOrder,
 } from "./types";
@@ -60,6 +61,18 @@ export type ChatStreamEvent =
   | { type: "done" }
   | { type: "error"; detail?: string };
 
+export class ApiError extends Error {
+  status: number;
+  detail: unknown;
+
+  constructor(status: number, message: string, detail: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -71,14 +84,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const text = await response.text();
+    let parsedDetail: unknown = text;
     let detail = text;
     try {
       const payload = text ? (JSON.parse(text) as { detail?: unknown }) : null;
+      parsedDetail = payload?.detail;
       if (typeof payload?.detail === "string" && payload.detail) {
         detail = payload.detail;
+      } else if (payload?.detail && typeof payload.detail === "object") {
+        const message = (payload.detail as { message?: string }).message;
+        detail = message || JSON.stringify(payload.detail);
       }
     } catch {}
-    throw new Error(detail || `API error: ${response.status}`);
+    throw new ApiError(response.status, detail || `API error: ${response.status}`, parsedDetail);
   }
   return response.json() as Promise<T>;
 }
@@ -270,13 +288,39 @@ export const api = {
     return request<{ proposal: Proposal }>(`/projects/${projectId}/proposals/${proposalId}/reject`, { method: "POST" });
   },
   startRun(projectId: string, cardId: string, workerType?: string) {
-    return request<{ run_id: string; card_id: string; status: string }>(`/projects/${projectId}/cards/${cardId}/start-run`, {
+    return request<StartRunResponse>(`/projects/${projectId}/cards/${cardId}/start-run`, {
+      method: "POST",
+      body: JSON.stringify({ worker_type: workerType ?? null }),
+    });
+  },
+  resetCardRunState(projectId: string, cardId: string) {
+    return request<{ card_id: string; status: string }>(`/projects/${projectId}/cards/${cardId}/reset-run-state`, {
+      method: "POST",
+    });
+  },
+  rerunCard(projectId: string, cardId: string, workerType?: string) {
+    return request<StartRunResponse>(`/projects/${projectId}/cards/${cardId}/rerun`, {
       method: "POST",
       body: JSON.stringify({ worker_type: workerType ?? null }),
     });
   },
   getRunEvents(projectId: string, runId: string) {
     return request<{ items: RunEvent[] }>(`/projects/${projectId}/runs/${runId}/events`);
+  },
+  cancelRun(projectId: string, runId: string, reason?: string) {
+    return request<{ run_id: string; status: string; summary: string }>(`/projects/${projectId}/runs/${runId}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason ?? null }),
+    });
+  },
+  cleanupRun(projectId: string, runId: string, reason?: string) {
+    return request<{ run_id: string; cleanup_status: string; archived_at?: string | null }>(
+      `/projects/${projectId}/runs/${runId}/cleanup`,
+      {
+        method: "POST",
+        body: JSON.stringify({ reason: reason ?? null }),
+      },
+    );
   },
   getRuntimeApprovals(projectId: string, runId: string) {
     return request<{ items: RuntimeApprovalDecision[] }>(`/projects/${projectId}/runs/${runId}/runtime-approvals`);

@@ -715,6 +715,40 @@ button {
   margin-top: 10px;
 }
 
+.executor-run-control {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.executor-select-label {
+  display: grid;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.executor-select-label select {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-solid);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 7px 9px;
+  outline: none;
+}
+
+.executor-select-label select:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px var(--blue-border);
+}
+
 /* ─── Buttons ─── */
 .btn {
   display: inline-flex;
@@ -2065,6 +2099,7 @@ button {
 .status-planned { background: var(--blue-bg); color: var(--blue-dark); border-color: var(--blue-border); }
 .status-running { background: var(--amber-bg); color: var(--amber-dark); border-color: var(--amber-border); }
 .status-needs_review { background: var(--amber-bg); color: var(--amber-dark); border-color: var(--amber-border); }
+.status-reviewing { background: var(--amber-bg); color: var(--amber-dark); border-color: var(--amber-border); }
 .status-accepted { background: var(--green-bg); color: var(--green-dark); border-color: var(--green-border); }
 .status-rejected,
 .status-failed { background: var(--red-bg); color: var(--red-dark); border-color: var(--red-border); }
