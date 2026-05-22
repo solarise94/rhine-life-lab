@@ -412,6 +412,7 @@ class ManagerFlowTest(unittest.TestCase):
         files = self.project_file_service.list_files("test-project")
         self.assertTrue(any(asset.asset_id == "upload_demo_notes" for asset in files["session_uploads"]))
         self.assertTrue(any(asset.asset_id == "deg_table_v1" for asset in files["data_assets"]))
+        self.assertTrue(any(asset.asset_id == "deg_table_v1" for asset in files["active_data_assets"]))
         self.assertTrue(any(item["category"] == "adapter_contract" for item in files["execution_files"]))
         self.assertTrue(any(item["category"] == "executor_brief" for item in files["execution_files"]))
         self.assertTrue(any(item["category"] == "executor_prompt" for item in files["execution_files"]))
@@ -422,6 +423,27 @@ class ManagerFlowTest(unittest.TestCase):
         agent_trace.write_text('{"status":"success"}\n', encoding="utf-8")
         files = self.project_file_service.list_files("test-project")
         self.assertTrue(any(item["category"] == "agent_trace" for item in files["execution_files"]))
+
+    def test_project_files_classify_superseded_assets_as_stale(self) -> None:
+        graph_store = self.project_service.graph_store("test-project")
+        graph = graph_store.load_graph()
+        graph.assets.append(
+            Asset(
+                asset_id="old_run_asset",
+                asset_type="table",
+                title="Old run output",
+                status="superseded",
+                created_by_run="run_old",
+                path="results/card_enrichment_group/run_old/old.tsv",
+                summary="Old output",
+            )
+        )
+        graph_store.save_graph(graph)
+
+        files = self.project_file_service.list_files("test-project")
+
+        self.assertTrue(any(asset.asset_id == "old_run_asset" for asset in files["stale_data_assets"]))
+        self.assertFalse(any(asset.asset_id == "old_run_asset" for asset in files["active_data_assets"]))
 
     def test_project_files_delete_session_upload_only(self) -> None:
         project_root = self.project_service.project_path("test-project")
@@ -451,6 +473,53 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertFalse(any(asset.asset_id == "upload_demo_notes" for asset in files["session_uploads"]))
         with self.assertRaises(PermissionError):
             self.project_file_service.delete_session_upload("test-project", "deg_table_v1")
+
+    def test_project_files_delete_unreferenced_data_asset(self) -> None:
+        project_root = self.project_service.project_path("test-project")
+        asset_path = project_root / "data" / "scratch_unused.tsv"
+        asset_path.parent.mkdir(parents=True, exist_ok=True)
+        asset_path.write_text("id\tvalue\nx\t1\n", encoding="utf-8")
+
+        graph_store = self.project_service.graph_store("test-project")
+        graph = graph_store.load_graph()
+        graph.assets.append(
+            Asset(
+                asset_id="scratch_unused",
+                asset_type="table",
+                title="scratch_unused.tsv",
+                status="candidate",
+                path="data/scratch_unused.tsv",
+                summary="Unused scratch asset",
+            )
+        )
+        graph_store.save_graph(graph)
+
+        removed = self.project_file_service.delete_data_asset("test-project", "scratch_unused")
+
+        self.assertEqual("scratch_unused", removed.asset_id)
+        self.assertFalse(asset_path.exists())
+        graph = graph_store.load_graph()
+        self.assertFalse(any(asset.asset_id == "scratch_unused" for asset in graph.assets))
+
+    def test_project_files_refuse_to_delete_card_referenced_data_asset(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            self.project_file_service.delete_data_asset("test-project", "deg_table_v1")
+
+        self.assertIn("still referenced by cards", str(ctx.exception))
+
+    def test_rerun_card_cleans_previous_execution_files(self) -> None:
+        run = self.worker.start_run("test-project", "card_enrichment_group")
+        self._wait_for_run("test-project", run["run_id"])
+        project_root = self.project_service.project_path("test-project")
+        self.assertTrue((project_root / "runs" / run["run_id"]).exists())
+        self.assertTrue((project_root / "scripts" / "generated" / run["run_id"]).exists())
+
+        rerun = self.worker.rerun_card("test-project", "card_enrichment_group")
+        self._wait_for_run("test-project", rerun["run_id"])
+
+        self.assertFalse((project_root / "runs" / run["run_id"]).exists())
+        self.assertFalse((project_root / "scripts" / "generated" / run["run_id"]).exists())
+        self.assertTrue((project_root / "runs" / rerun["run_id"]).exists())
 
     def test_chat_sessions_persist_messages_and_derive_summary(self) -> None:
         session = self.chat_session_service.create_session("test-project")

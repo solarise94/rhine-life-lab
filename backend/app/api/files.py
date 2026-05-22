@@ -29,6 +29,23 @@ def delete_session_upload(
     return {"ok": True, "asset": asset}
 
 
+@router.delete("/files/assets/{asset_id}")
+def delete_data_asset(
+    project_id: str,
+    asset_id: str,
+    project_file_service: ProjectFileService = Depends(get_project_file_service),
+) -> dict:
+    try:
+        asset = project_file_service.delete_data_asset(project_id, asset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Asset not found: {asset_id}") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"ok": True, "asset": asset}
+
+
 @router.get("/files/content")
 def get_project_file_content(
     project_id: str,

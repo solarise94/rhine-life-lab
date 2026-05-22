@@ -2,14 +2,22 @@
 
 import { GitCommit, ShieldAlert } from "lucide-react";
 import Editor from "@monaco-editor/react";
+import { PythonRuntime } from "@/lib/types";
 
 export function AdvancedPanels({
   graph,
   gitItems,
+  pythonRuntimes = [],
+  globalPythonRuntime,
+  onSelectGlobalPythonRuntime,
 }: {
   graph: Record<string, unknown> | null;
   gitItems: Array<{ hash: string; date: string; subject: string }>;
+  pythonRuntimes?: PythonRuntime[];
+  globalPythonRuntime?: string;
+  onSelectGlobalPythonRuntime?: (runtime: string) => void;
 }) {
+  const runtimeLabel = globalPythonRuntime && globalPythonRuntime !== "__system__" ? globalPythonRuntime : "system";
   return (
     <section className="panel">
       <div className="panel-header">
@@ -20,6 +28,35 @@ export function AdvancedPanels({
         <span style={{ color: "var(--muted)", fontSize: 12 }}>Diagnostics</span>
       </div>
       <div className="panel-body stack">
+        <div className="meta-block">
+          <h4>Executor Runtime</h4>
+          <div className="kv">
+            <label style={{ display: "grid", gap: 6 }}>
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>Global Python runtime</span>
+              <select
+                value={globalPythonRuntime ?? "__system__"}
+                onChange={(event) => onSelectGlobalPythonRuntime?.(event.target.value)}
+                style={{
+                  fontSize: 13,
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  border: "1px solid var(--line)",
+                  background: "var(--panel)",
+                  color: "var(--text)",
+                }}
+              >
+                {pythonRuntimes.map((item) => (
+                  <option key={`${item.manager}:${item.name}`} value={item.name}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="muted" style={{ fontSize: 12 }}>
+              当前默认：{runtimeLabel}。单张 card 仍可在执行前覆盖。
+            </div>
+          </div>
+        </div>
         <div
           className="meta-block"
           style={{ padding: 0, overflow: "hidden", border: "1px solid var(--line)" }}

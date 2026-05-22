@@ -187,6 +187,7 @@ export interface ExecutionFileEntry {
     | "manifest"
     | "filesystem_audit"
     | "manager_brief"
+    | "dependency_issue"
     | "review_context"
     | "transcript"
     | "agent_trace"
@@ -200,6 +201,8 @@ export interface ExecutionFileEntry {
 
 export interface ProjectFiles {
   data_assets: Asset[];
+  active_data_assets?: Asset[];
+  stale_data_assets?: Asset[];
   session_uploads: Asset[];
   execution_files: ExecutionFileEntry[];
 }

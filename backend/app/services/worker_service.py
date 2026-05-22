@@ -505,6 +505,7 @@ class WorkerService:
 
     def rerun_card(self, project_id: str, card_id: str, worker_type: str | None = None, python_runtime: str | None = None) -> dict:
         python_runtime = self._normalize_python_runtime(python_runtime)
+        old_execution_run_ids: list[str] = []
         lock = self.project_service.lock_for(project_id)
         with lock:
             store = self.project_service.graph_store(project_id)
@@ -517,6 +518,13 @@ class WorkerService:
                 raise HTTPException(status_code=409, detail=f"Card {card_id} cannot rerun from status {card.status}.")
             if self._has_active_run(graph.runs, card_id):
                 raise HTTPException(status_code=409, detail=f"Card {card_id} already has an active run.")
+            old_execution_run_ids = [
+                run.run_id
+                for run in graph.runs
+                if run.card_id == card_id
+                and run.status in {"success", "failed", "cancelled", "reviewed"}
+                and not (self._threads.get(run.run_id) and self._threads[run.run_id].is_alive())
+            ]
             if card.status != "planned":
                 previous_status = card.status
                 card.status = "planned"
@@ -526,6 +534,7 @@ class WorkerService:
                 ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
                 store.save_graph(graph)
                 store.save_cards(cards)
+        self._cleanup_execution_files_for_runs(project_id, old_execution_run_ids)
         return self.start_run(project_id, card_id, worker_type=worker_type, python_runtime=python_runtime)
 
     def review_run(self, project_id: str, run_id: str, accept: bool = True) -> dict:
@@ -542,6 +551,14 @@ class WorkerService:
         )
         self._commit_run_stage(project_id, run_id, "reviewed")
         return {"run_id": run_id, "accepted": accept}
+
+    def _cleanup_execution_files_for_runs(self, project_id: str, run_ids: list[str]) -> None:
+        if not run_ids:
+            return
+        project_root = self.project_service.project_path(project_id)
+        for run_id in dict.fromkeys(run_ids):
+            shutil.rmtree(project_root / "runs" / run_id, ignore_errors=True)
+            shutil.rmtree(project_root / "scripts" / "generated" / run_id, ignore_errors=True)
 
     def _finalize_run_review(self, project_id: str, run_id: str, *, accept: bool, source: str) -> dict:
         review_context = self.manifest_service.manifest_to_review_context(project_id, run_id)

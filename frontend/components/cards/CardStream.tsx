@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Archive, ChevronDown, ChevronUp } from "lucide-react";
-import { Card, WorkOrder, WorkerCapability } from "@/lib/types";
+import { Card, PythonRuntime, WorkOrder, WorkerCapability } from "@/lib/types";
 import { ModuleCard } from "./ModuleCard";
 import { ConnectionLines } from "./ConnectionLines";
 
@@ -19,6 +19,10 @@ export function CardStream({
   workerCapabilities = [],
   selectedWorkerByCard = {},
   onSelectWorker,
+  pythonRuntimes = [],
+  globalPythonRuntime,
+  selectedPythonRuntimeByCard = {},
+  onSelectPythonRuntime,
 }: {
   projectId: string;
   cards: Card[];
@@ -32,6 +36,10 @@ export function CardStream({
   workerCapabilities?: WorkerCapability[];
   selectedWorkerByCard?: Record<string, string | undefined>;
   onSelectWorker?: (card: Card, workerType: string) => void;
+  pythonRuntimes?: PythonRuntime[];
+  globalPythonRuntime?: string;
+  selectedPythonRuntimeByCard?: Record<string, string | undefined>;
+  onSelectPythonRuntime?: (card: Card, runtime?: string) => void;
 }) {
   const moduleCards = useMemo(() => cards.filter((c) => c.card_type !== "system"), [cards]);
   const archivedCards = useMemo(
@@ -142,6 +150,10 @@ export function CardStream({
                       workerCapabilities={workerCapabilities}
                       selectedWorkerType={selectedWorkerByCard[card.card_id]}
                       onSelectWorker={onSelectWorker}
+                      pythonRuntimes={pythonRuntimes}
+                      globalPythonRuntime={globalPythonRuntime}
+                      selectedPythonRuntime={selectedPythonRuntimeByCard[card.card_id]}
+                      onSelectPythonRuntime={onSelectPythonRuntime}
                     />
                   </div>
                 ))}
@@ -184,6 +196,10 @@ export function CardStream({
                         workerCapabilities={workerCapabilities}
                         selectedWorkerType={selectedWorkerByCard[card.card_id]}
                         onSelectWorker={onSelectWorker}
+                        pythonRuntimes={pythonRuntimes}
+                        globalPythonRuntime={globalPythonRuntime}
+                        selectedPythonRuntime={selectedPythonRuntimeByCard[card.card_id]}
+                        onSelectPythonRuntime={onSelectPythonRuntime}
                       />
                     </div>
                   ))}

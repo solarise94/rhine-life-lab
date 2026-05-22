@@ -12,6 +12,7 @@ const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const EXECUTION_CATEGORY_LABELS: Record<string, string> = {
   task_packet: "Task Packet",
   manifest: "Manifest",
+  dependency_issue: "Dependency Issue",
   review_context: "Review Context",
   transcript: "Transcript",
   agent_trace: "Agent Trace",
@@ -27,6 +28,14 @@ function formatBytes(size: number) {
 
 function formatTime(timestamp: number) {
   return new Date(timestamp * 1000).toLocaleString();
+}
+
+function fallbackActiveAssets(items: Asset[]) {
+  return items.filter((asset) => !["stale", "superseded", "rejected", "archived", "missing"].includes(asset.status));
+}
+
+function fallbackStaleAssets(items: Asset[]) {
+  return items.filter((asset) => ["stale", "superseded", "rejected", "archived", "missing"].includes(asset.status));
 }
 
 export function FilesPanel({
@@ -62,6 +71,16 @@ export function FilesPanel({
       setClientError(nextError instanceof Error ? nextError.message : "删除上传文件失败。");
     },
   });
+  const deleteAssetMutation = useMutation({
+    mutationFn: (assetId: string) => api.deleteDataAsset(projectId, assetId),
+    onSuccess: async () => {
+      setClientError(null);
+      await onRefresh();
+    },
+    onError: (nextError) => {
+      setClientError(nextError instanceof Error ? nextError.message : "删除数据资产失败。");
+    },
+  });
 
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -74,6 +93,9 @@ export function FilesPanel({
     }
     uploadMutation.mutate(file);
   }
+
+  const activeDataAssets = files?.active_data_assets ?? fallbackActiveAssets(files?.data_assets ?? []);
+  const staleDataAssets = files?.stale_data_assets ?? fallbackStaleAssets(files?.data_assets ?? []);
 
   return (
     <div className="stack">
@@ -125,12 +147,24 @@ export function FilesPanel({
       </section>
 
       <AssetSection
-        title="Data Assets"
-        description="正式数据资产。可下载，也可加入 Manager 上下文。"
-        items={files?.data_assets ?? []}
+        title="正在使用的数据资产"
+        description="仍被 cards、报告或下游资产引用的数据资产，通常是最新 accepted 结果或当前输入。"
+        items={activeDataAssets}
         projectId={projectId}
-        emptyText="当前没有正式数据资产。"
+        emptyText="当前没有正在使用的数据资产。"
         onAttachAsset={onAttachAsset}
+        onDeleteAsset={(asset) => deleteAssetMutation.mutate(asset.asset_id)}
+        deletingAssetId={deleteAssetMutation.isPending ? deleteAssetMutation.variables : undefined}
+      />
+      <AssetSection
+        title="过时的数据资产"
+        description="被 rerun 替换、标记为 stale/superseded，或已不再被 cards 引用的数据资产。"
+        items={staleDataAssets}
+        projectId={projectId}
+        emptyText="当前没有过时的数据资产。"
+        onAttachAsset={onAttachAsset}
+        onDeleteAsset={(asset) => deleteAssetMutation.mutate(asset.asset_id)}
+        deletingAssetId={deleteAssetMutation.isPending ? deleteAssetMutation.variables : undefined}
       />
       <AssetSection
         title="Session Uploads"

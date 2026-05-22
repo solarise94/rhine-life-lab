@@ -173,6 +173,11 @@ export const api = {
       method: "DELETE",
     });
   },
+  deleteDataAsset(projectId: string, assetId: string) {
+    return request<{ ok: boolean; asset: Asset }>(`/projects/${projectId}/files/assets/${assetId}`, {
+      method: "DELETE",
+    });
+  },
   getResultAsset(projectId: string, assetId: string) {
     return request<AssetDetail>(`/projects/${projectId}/results/${assetId}`);
   },

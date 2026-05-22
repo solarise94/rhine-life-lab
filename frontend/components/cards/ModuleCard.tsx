@@ -11,7 +11,7 @@ import {
   Sparkles,
   Archive,
 } from "lucide-react";
-import { Card, WorkerCapability } from "@/lib/types";
+import { Card, PythonRuntime, WorkerCapability } from "@/lib/types";
 import { CardStatusBadge } from "./CardStatusBadge";
 import { SpecialistAvatar } from "./SpecialistAvatar";
 import { FileBag } from "./FileBag";
@@ -28,6 +28,10 @@ export function ModuleCard({
   workerCapabilities = [],
   selectedWorkerType,
   onSelectWorker,
+  pythonRuntimes = [],
+  globalPythonRuntime,
+  selectedPythonRuntime,
+  onSelectPythonRuntime,
 }: {
   projectId: string;
   card: Card;
@@ -39,6 +43,10 @@ export function ModuleCard({
   workerCapabilities?: WorkerCapability[];
   selectedWorkerType?: string;
   onSelectWorker?: (card: Card, workerType: string) => void;
+  pythonRuntimes?: PythonRuntime[];
+  globalPythonRuntime?: string;
+  selectedPythonRuntime?: string;
+  onSelectPythonRuntime?: (card: Card, runtime?: string) => void;
 }) {
   const cardPages = useWorkspaceUiStore((s) => s.cardPageByProject[projectId] ?? EMPTY_CARD_PAGE_BY_ID);
   const setCardPage = useWorkspaceUiStore((s) => s.setCardPage);
@@ -49,6 +57,7 @@ export function ModuleCard({
   const isRunning = card.status === "running" || card.status === "reviewing";
   const isDormant = card.status === "cancelled" || card.status === "rejected";
   const configuredWorkers = workerCapabilities.filter((item) => item.configured);
+  const globalRuntimeLabel = globalPythonRuntime && globalPythonRuntime !== "__system__" ? globalPythonRuntime : "system";
 
   const pages: CardPage[] = isDormant
     ? ["specialist", "result", "detail", "archive"]
@@ -166,6 +175,21 @@ export function ModuleCard({
                         ) : (
                           <option value="">未配置真实执行器</option>
                         )}
+                      </select>
+                    </label>
+                    <label className="executor-select-label" onClick={(e) => e.stopPropagation()}>
+                      <span>Python runtime</span>
+                      <select
+                        value={selectedPythonRuntime ?? "__global__"}
+                        onChange={(e) => onSelectPythonRuntime?.(card, e.target.value === "__global__" ? undefined : e.target.value)}
+                        disabled={!pythonRuntimes.length}
+                      >
+                        <option value="__global__">跟随全局 ({globalRuntimeLabel})</option>
+                        {pythonRuntimes.map((item) => (
+                          <option key={`${item.manager}:${item.name}`} value={item.name}>
+                            {item.label}
+                          </option>
+                        ))}
                       </select>
                     </label>
                     <button className="btn primary" style={{ width: "100%" }} onClick={(e) => { e.stopPropagation(); onStartRun(card); }}>

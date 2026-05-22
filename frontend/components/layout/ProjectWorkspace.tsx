@@ -363,6 +363,13 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             setSelectedWorker(projectId, card.card_id, workerType);
             setNotice(projectId, `Card ${card.card_id} 将使用 ${workerType} 执行。`);
           }}
+          pythonRuntimes={snapshot.python_runtimes ?? []}
+          globalPythonRuntime={globalPythonRuntime}
+          selectedPythonRuntimeByCard={selectedPythonRuntimeByProject}
+          onSelectPythonRuntime={(card, runtime) => {
+            setSelectedPythonRuntime(projectId, card.card_id, runtime);
+            setNotice(projectId, `Card ${card.card_id} Python runtime: ${runtime ? formatPythonRuntime(runtime) : "follow global"}。`);
+          }}
         />
       </div>
       <CardDetailPanel
@@ -480,6 +487,12 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               <AdvancedPanels
                 graph={advancedGraphQuery.data?.graph ?? null}
                 gitItems={advancedGitQuery.data?.items ?? []}
+                pythonRuntimes={snapshot.python_runtimes ?? []}
+                globalPythonRuntime={globalPythonRuntime}
+                onSelectGlobalPythonRuntime={(runtime) => {
+                  setGlobalPythonRuntime(projectId, runtime);
+                  setNotice(projectId, `全局 Python runtime: ${formatPythonRuntime(runtime)}。`);
+                }}
               />
               <CardDetailPanel
                 card={selectedCard}
@@ -589,6 +602,12 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   <AdvancedPanels
                     graph={advancedGraphQuery.data?.graph ?? null}
                     gitItems={advancedGitQuery.data?.items ?? []}
+                    pythonRuntimes={snapshot.python_runtimes ?? []}
+                    globalPythonRuntime={globalPythonRuntime}
+                    onSelectGlobalPythonRuntime={(runtime) => {
+                      setGlobalPythonRuntime(projectId, runtime);
+                      setNotice(projectId, `全局 Python runtime: ${formatPythonRuntime(runtime)}。`);
+                    }}
                   />
                   <CardDetailPanel
                     card={selectedCard}
