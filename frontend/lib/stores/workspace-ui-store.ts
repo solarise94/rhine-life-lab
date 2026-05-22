@@ -9,11 +9,14 @@ export type Attachment = { type: "card" | "asset"; id: string; label: string };
 export const EMPTY_CARD_PAGE_BY_ID: Record<string, CardPage> = {};
 export const EMPTY_ATTACHMENTS: Attachment[] = [];
 export const EMPTY_SELECTED_WORKER_BY_CARD: Record<string, string | undefined> = {};
+export const EMPTY_SELECTED_RUNTIME_BY_CARD: Record<string, string | undefined> = {};
 
 interface WorkspaceUiState {
   currentChatSessionIdByProject: Record<string, string | null | undefined>;
   selectedCardByProject: Record<string, string | null | undefined>;
   selectedWorkerByProject: Record<string, Record<string, string | undefined>>;
+  globalPythonRuntimeByProject: Record<string, string | undefined>;
+  selectedPythonRuntimeByProject: Record<string, Record<string, string | undefined>>;
   noticesByProject: Record<string, string | null>;
   expandedCardByProject: Record<string, string | undefined>;
   cardPageByProject: Record<string, Record<string, CardPage>>;
@@ -23,6 +26,8 @@ interface WorkspaceUiState {
   setCurrentChatSessionId: (projectId: string, sessionId?: string | null) => void;
   setSelectedCard: (projectId: string, cardId?: string | null) => void;
   setSelectedWorker: (projectId: string, cardId: string, workerType?: string) => void;
+  setGlobalPythonRuntime: (projectId: string, runtime?: string) => void;
+  setSelectedPythonRuntime: (projectId: string, cardId: string, runtime?: string) => void;
   setNotice: (projectId: string, message: string | null) => void;
   setExpandedCard: (projectId: string, cardId?: string) => void;
   setCardPage: (projectId: string, cardId: string, page: CardPage) => void;
@@ -40,6 +45,8 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
       currentChatSessionIdByProject: {},
       selectedCardByProject: {},
       selectedWorkerByProject: {},
+      globalPythonRuntimeByProject: {},
+      selectedPythonRuntimeByProject: {},
       noticesByProject: {},
       expandedCardByProject: {},
       cardPageByProject: {},
@@ -75,6 +82,29 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
               [projectId]: {
                 ...(state.selectedWorkerByProject[projectId] ?? {}),
                 [cardId]: workerType,
+              },
+            },
+          };
+        }),
+      setGlobalPythonRuntime: (projectId, runtime) =>
+        set((state) => {
+          if (state.globalPythonRuntimeByProject[projectId] === runtime) return state;
+          return {
+            globalPythonRuntimeByProject: {
+              ...state.globalPythonRuntimeByProject,
+              [projectId]: runtime,
+            },
+          };
+        }),
+      setSelectedPythonRuntime: (projectId, cardId, runtime) =>
+        set((state) => {
+          if (state.selectedPythonRuntimeByProject[projectId]?.[cardId] === runtime) return state;
+          return {
+            selectedPythonRuntimeByProject: {
+              ...state.selectedPythonRuntimeByProject,
+              [projectId]: {
+                ...(state.selectedPythonRuntimeByProject[projectId] ?? {}),
+                [cardId]: runtime,
               },
             },
           };
@@ -169,6 +199,8 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
         currentChatSessionIdByProject: state.currentChatSessionIdByProject,
         selectedCardByProject: state.selectedCardByProject,
         selectedWorkerByProject: state.selectedWorkerByProject,
+        globalPythonRuntimeByProject: state.globalPythonRuntimeByProject,
+        selectedPythonRuntimeByProject: state.selectedPythonRuntimeByProject,
         expandedCardByProject: state.expandedCardByProject,
         cardPageByProject: state.cardPageByProject,
         attachmentsByProject: state.attachmentsByProject,

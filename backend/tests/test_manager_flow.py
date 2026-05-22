@@ -2,10 +2,12 @@ import copy
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from fastapi import HTTPException
 from pydantic import SecretStr
@@ -18,6 +20,7 @@ from app.models.graph import Asset, Claim, GraphState, Module, ModuleRef
 from app.models.patches import GraphPatch, ValidationResult
 from app.models.runs import CreatedAsset, ExpectedOutput, Manifest, TaskPacket
 from app.services.chat_session_service import ChatSessionService
+from app.services.chat_job_service import ChatJobService
 from app.services.executor_reviewer_worker import ExecutorReviewerWorker
 from app.services.executor_validation_service import ExecutorValidationService
 from app.services.flow_service import FlowService
@@ -31,7 +34,7 @@ from app.services.project_service import ProjectService
 from app.services.result_asset_service import ResultAssetService
 from app.services.runtime_approval_service import RuntimeApprovalService
 from app.services.utils import atomic_write_json
-from app.services.worker_service import WorkerService
+from app.services.worker_service import WorkerService, _redact_command_for_log
 from app.workers.base import PermissionRequest, WorkerAdapter, WorkerLaunchSpec
 from app.workers.shell_worker import ShellWorkerAdapter
 
@@ -81,6 +84,11 @@ class RaisingValidationService:
         raise RuntimeError("validator exploded")
 
 
+class RaisingReviewerWorker:
+    def review(self, **_kwargs) -> dict:
+        raise RuntimeError("reviewer api unavailable")
+
+
 class InlineCommandWorkerAdapter(WorkerAdapter):
     def __init__(self, name: str, script: str) -> None:
         self.name = name
@@ -95,6 +103,16 @@ class InlineCommandWorkerAdapter(WorkerAdapter):
         )
 
 
+class StartupInitializationTest(unittest.TestCase):
+    def test_main_startup_initializes_worker_service_for_reconcile(self) -> None:
+        import app.main as main
+
+        with patch("app.main.get_worker_service") as get_worker_service:
+            main.initialize_runtime_services()
+
+        get_worker_service.assert_called_once_with()
+
+
 class ManagerFlowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="blueprint-re-test-")
@@ -102,8 +120,12 @@ class ManagerFlowTest(unittest.TestCase):
         self._original_deepseek_api_key = settings.deepseek_api_key
         self._original_pi_command = settings.pi_command
         self._original_default_worker_type = settings.default_worker_type
+        self._original_executor_sandbox_mode = settings.executor_sandbox_mode
+        self._original_executor_extra_ro_binds = settings.executor_extra_ro_binds
         settings.deepseek_api_key = None
         settings.default_worker_type = "pi"
+        settings.executor_sandbox_mode = "none"
+        settings.executor_extra_ro_binds = ""
         settings.pi_command = (
             "{python} -m app.workers.demo_executor --task-packet {task_packet_path} --run-dir {run_dir} --project-root {project_root}"
         )
@@ -132,6 +154,8 @@ class ManagerFlowTest(unittest.TestCase):
         settings.deepseek_api_key = self._original_deepseek_api_key
         settings.pi_command = self._original_pi_command
         settings.default_worker_type = self._original_default_worker_type
+        settings.executor_sandbox_mode = self._original_executor_sandbox_mode
+        settings.executor_extra_ro_binds = self._original_executor_extra_ro_binds
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _add_single_submodule_group_fixture(self) -> tuple[str, str, str, str]:
@@ -219,6 +243,12 @@ class ManagerFlowTest(unittest.TestCase):
         preview_asset = next(asset for asset in snapshot["graph"].assets if asset.created_by_run == run["run_id"] and asset.asset_type == "figure")
         detail = self.result_asset_service.get_asset_detail("test-project", preview_asset.asset_id)
         self.assertEqual(detail["preview"]["kind"], "image")
+
+    def test_project_snapshot_includes_system_python_runtime(self) -> None:
+        snapshot = self.project_service.get_project_snapshot("test-project")
+        runtimes = snapshot["python_runtimes"]
+
+        self.assertTrue(any(item["name"] == "__system__" and item["label"] == "System Python" for item in runtimes))
 
     def test_review_replaces_planned_output_asset_ids_with_materialized_assets(self) -> None:
         card = Card.model_validate(
@@ -388,6 +418,10 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue(any(item["category"] == "filesystem_audit" for item in files["execution_files"]))
         self.assertTrue(any(item["category"] == "manifest" for item in files["execution_files"]))
         self.assertTrue(any(item["category"] == "transcript" for item in files["execution_files"]))
+        agent_trace = self.project_service.project_path("test-project") / "runs" / run["run_id"] / "agent_trace.json"
+        agent_trace.write_text('{"status":"success"}\n', encoding="utf-8")
+        files = self.project_file_service.list_files("test-project")
+        self.assertTrue(any(item["category"] == "agent_trace" for item in files["execution_files"]))
 
     def test_project_files_delete_session_upload_only(self) -> None:
         project_root = self.project_service.project_path("test-project")
@@ -482,6 +516,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "card_id": "card_go_bp",
                 "title": "GO BP 富集分析",
                 "summary": "基于 DEG 结果进行 GO BP 富集。",
+                "step": 2,
                 "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
                 "outputs": [{"label": "GO BP enrichment", "asset_id": "go_bp_result"}],
             },
@@ -495,13 +530,14 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertEqual(["deg_table_v1", "ranked_gene_list_v1"], enrichment["required_asset_ids"])
         self.assertEqual({"audit_card_tools": False}, listing["tool_policy"])
 
-    def test_create_card_assigns_step_and_output_asset_ids(self) -> None:
+    def test_create_card_requires_explicit_step_and_assigns_output_asset_ids(self) -> None:
         result = self.manager.blueprint_tools.create_card(
             "test-project",
             {
                 "card_id": "card_go_bp",
                 "title": "GO BP 富集分析",
                 "summary": "基于 DEG 结果进行 GO BP 富集。",
+                "step": 2,
                 "why": "解释差异基因的生物过程。",
                 "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
                 "outputs": [{"label": "GO BP enrichment"}],
@@ -517,6 +553,19 @@ class ManagerFlowTest(unittest.TestCase):
         snapshot = self.project_service.get_project_snapshot("test-project")
         self.assertTrue(any(item.card_id == "card_go_bp" for item in snapshot["cards"]))
 
+    def test_create_card_rejects_missing_step(self) -> None:
+        with self.assertRaisesRegex(ManagerPlanningError, "Card step is required"):
+            self.manager.blueprint_tools.create_card(
+                "test-project",
+                {
+                    "card_id": "card_no_step",
+                    "title": "No Step",
+                    "summary": "Should fail because step is explicit metadata now.",
+                    "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
+                    "outputs": [{"label": "result", "asset_id": "no_step_result"}],
+                },
+            )
+
     def test_create_card_rejects_missing_input_with_retryable_error(self) -> None:
         with self.assertRaisesRegex(ManagerPlanningError, "Input asset missing_deg is missing"):
             self.manager.blueprint_tools.create_card(
@@ -525,6 +574,7 @@ class ManagerFlowTest(unittest.TestCase):
                     "card_id": "card_missing_input",
                     "title": "Missing Input",
                     "summary": "Should fail because input is unknown.",
+                    "step": 1,
                     "inputs": [{"label": "missing", "asset_id": "missing_deg"}],
                     "outputs": [{"label": "result", "asset_id": "missing_input_result"}],
                 },
@@ -537,6 +587,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "card_id": "card_qc",
                 "title": "QC",
                 "summary": "Produce filtered counts.",
+                "step": 1,
                 "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
                 "outputs": [{"label": "filtered counts", "asset_id": "filtered_counts"}],
             },
@@ -562,6 +613,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "card_id": "card_qc",
                 "title": "QC",
                 "summary": "Produce filtered counts.",
+                "step": 1,
                 "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
                 "outputs": [{"label": "filtered counts", "asset_id": "filtered_counts"}],
             },
@@ -606,6 +658,7 @@ class ManagerFlowTest(unittest.TestCase):
                     "card_id": "card_de_analysis",
                     "title": "Duplicate",
                     "summary": "Duplicate card id.",
+                    "step": 1,
                     "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
                     "outputs": [{"label": "duplicate", "asset_id": "duplicate_output"}],
                 },
@@ -618,6 +671,7 @@ class ManagerFlowTest(unittest.TestCase):
                     "card_id": "card_duplicate_deg",
                     "title": "Duplicate DEG",
                     "summary": "Duplicate a planned or materialized output.",
+                    "step": 1,
                     "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
                     "outputs": [{"label": "DEG", "asset_id": "deg_table_v1"}],
                 },
@@ -629,6 +683,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "card_id": "card_first_planned_output",
                 "title": "First planned output",
                 "summary": "Creates a planned output asset.",
+                "step": 1,
                 "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
                 "outputs": [{"label": "planned result", "asset_id": "planned_duplicate_result"}],
             },
@@ -640,6 +695,7 @@ class ManagerFlowTest(unittest.TestCase):
                     "card_id": "card_second_planned_output",
                     "title": "Second planned output",
                     "summary": "Tries to create the same planned output asset.",
+                    "step": 1,
                     "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
                     "outputs": [{"label": "planned result", "asset_id": "planned_duplicate_result"}],
                 },
@@ -675,6 +731,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "card_id": "card_qc",
                 "title": "数据校验与过滤",
                 "summary": "过滤低质量样本并输出 filtered counts。",
+                "step": 1,
                 "inputs": [{"label": "Raw counts", "asset_id": "raw_counts"}],
                 "outputs": [{"label": "Filtered counts", "asset_id": "filtered_counts"}],
             },
@@ -685,6 +742,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "card_id": "card_deseq2",
                 "title": "DESeq2 差异分析",
                 "summary": "基于 filtered counts 输出 DEG 结果。",
+                "step": 2,
                 "inputs": [{"label": "Filtered counts", "asset_id": "filtered_counts"}],
                 "outputs": [{"label": "DEG results", "asset_id": "deseq2_results"}],
             },
@@ -695,6 +753,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "card_id": "card_kegg",
                 "title": "KEGG 通路富集",
                 "summary": "基于 DEG results 做 KEGG 富集。",
+                "step": 3,
                 "inputs": [{"label": "DEG results", "asset_id": "deseq2_results"}],
                 "outputs": [{"label": "KEGG results", "asset_id": "kegg_results"}],
             },
@@ -725,6 +784,8 @@ class ManagerFlowTest(unittest.TestCase):
         work_order = FlowService(self.project_service).get_work_order("timeline-project")
         deseq2 = next(item for item in work_order["work_items"] if item["card_id"] == "card_deseq2")
         kegg = next(item for item in work_order["work_items"] if item["card_id"] == "card_kegg")
+        self.assertEqual(2, deseq2["step"])
+        self.assertEqual(3, kegg["step"])
         self.assertEqual(["card_qc"], deseq2["depends_on_card_ids"])
         self.assertEqual(["card_deseq2"], kegg["depends_on_card_ids"])
         self.assertFalse(deseq2["can_start"])
@@ -792,6 +853,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "card_id": "card_qc",
                 "title": "QC",
                 "summary": "Produce filtered counts.",
+                "step": 1,
                 "inputs": [{"label": "Raw counts", "asset_id": "raw_counts"}],
                 "outputs": [{"label": "Filtered counts", "asset_id": "filtered_counts"}],
             },
@@ -802,6 +864,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "card_id": "card_deseq2",
                 "title": "DESeq2",
                 "summary": "Produce DEG results.",
+                "step": 2,
                 "inputs": [{"label": "Filtered counts", "asset_id": "filtered_counts"}],
                 "outputs": [{"label": "DEG results", "asset_id": "deseq2_results"}],
             },
@@ -825,6 +888,22 @@ class ManagerFlowTest(unittest.TestCase):
 
         self.assertEqual(["deg_table_v1"], [item.asset_id for item in packet.input_assets])
         self.assertEqual("deg_table_v1", packet.card_inputs[0].asset_id)
+        self._wait_for_run("test-project", run["run_id"])
+
+    def test_start_run_can_override_python_runtime_for_task_packet(self) -> None:
+        run = self.worker.start_run("test-project", "card_enrichment_group", python_runtime="omicverse")
+        packet = self.manifest_service.load_task_packet("test-project", run["run_id"])
+
+        self.assertEqual("omicverse", packet.executor_context.runtime_bindings.conda_env)
+        self.assertEqual("omicverse", packet.executor_context.runtime_bindings.env["BLUEPRINT_PYTHON_RUNTIME"])
+        self._wait_for_run("test-project", run["run_id"])
+
+    def test_start_run_system_python_runtime_does_not_set_conda_env(self) -> None:
+        run = self.worker.start_run("test-project", "card_enrichment_group", python_runtime="__system__")
+        packet = self.manifest_service.load_task_packet("test-project", run["run_id"])
+
+        self.assertIsNone(packet.executor_context.runtime_bindings.conda_env)
+        self.assertNotIn("BLUEPRINT_PYTHON_RUNTIME", packet.executor_context.runtime_bindings.env)
         self._wait_for_run("test-project", run["run_id"])
 
     def test_start_run_returns_404_for_missing_card(self) -> None:
@@ -921,18 +1000,186 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertIn("BLUEPRINT_EXECUTOR_BRIEF", spec.environment)
         self.assertIn("BLUEPRINT_EXECUTOR_PROMPT", spec.environment)
         self.assertIn("BLUEPRINT_ADAPTER_CONTRACT", spec.environment)
+        self.assertIn("BLUEPRINT_DEPENDENCY_REPORT_TOOL", spec.environment)
         self.assertIn("BLUEPRINT_ALLOWED_PATHS", spec.environment)
         self.assertTrue(any(request.target == "scripts/generated/" for request in spec.permission_requests))
+        self.assertTrue((run_dir / "report_dependency_issue.py").exists())
 
         contract = json.loads((run_dir / "adapter_contract.json").read_text(encoding="utf-8"))
         self.assertEqual("shell", contract["worker_type"])
         self.assertEqual("BP_EVENT ", contract["stdout_prefix"])
         self.assertEqual("executor_prompt.md", contract["executor_prompt_path"])
+        self.assertEqual("manifest.candidate.json", contract["manifest_candidate_path"])
+        self.assertEqual(["success", "failed", "partial"], contract["manifest_status_values"])
+        self.assertEqual("dependency_issue.json", contract["dependency_issue_path"])
+        self.assertEqual("report_dependency_issue.py", contract["dependency_report_tool_path"])
+        self.assertEqual("report_dependency_issue", contract["executor_tools"][0]["name"])
+        prompt = (run_dir / "executor_prompt.md").read_text(encoding="utf-8")
+        self.assertIn("Runtime dependency policy", prompt)
+        self.assertIn("report_dependency_issue.py", prompt)
+
+    def test_dependency_report_tool_marks_run_failed_with_attention(self) -> None:
+        adapter = ShellWorkerAdapter()
+        adapter.command_template = (
+            "{python} {run_dir}/report_dependency_issue.py "
+            "--ecosystem R --package clusterProfiler --package enrichplot --manager Bioconductor"
+        )
+        self.worker.registry["shell"] = adapter
+
+        run = self.worker.start_run("test-project", "card_enrichment_group", worker_type="shell")
+        self._wait_for_run("test-project", run["run_id"])
+
+        snapshot = self.project_service.get_project_snapshot("test-project")
+        run_record = next(item for item in snapshot["graph"].runs if item.run_id == run["run_id"])
+        card = next(item for item in snapshot["cards"] if item.card_id == "card_enrichment_group")
+        self.assertEqual("failed", run_record.status)
+        self.assertTrue(run_record.needs_manager_attention)
+        self.assertIn("clusterProfiler", run_record.summary)
+        self.assertIn("clusterProfiler", card.progress_note)
+        events = self.project_service.graph_store("test-project").load_run_events(run["run_id"])
+        self.assertTrue(any(event.event_type == "runtime_dependency_missing" for event in events))
+        run_dir = self.project_service.project_path("test-project") / "runs" / run["run_id"]
+        issue = json.loads((run_dir / "dependency_issue.json").read_text(encoding="utf-8"))
+        self.assertTrue(issue["blocking"])
+        self.assertEqual("runtime_dependency_missing", issue["issues"][0]["metadata"]["issue_kind"])
+        brief = json.loads((run_dir / "manager_brief.json").read_text(encoding="utf-8"))
+        self.assertEqual("runtime_dependency_missing", brief["dependency_issues"][0]["metadata"]["issue_kind"])
+
+    def test_command_adapter_wraps_with_bwrap_when_available(self) -> None:
+        project_root = self.project_service.project_path("test-project")
+        run_id = "run_bwrap_check"
+        run_dir = project_root / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store = self.project_service.graph_store("test-project")
+        card = next(item for item in store.load_cards() if item.card_id == "card_enrichment_group")
+        packet = self.worker._task_packet("test-project", run_id, card, store.load_graph().assets, "shell")
+        packet.executor_context.runtime_bindings.env["CUSTOM_RUNTIME_ENV"] = "custom-value"
+        packet_path = run_dir / "task_packet.json"
+        packet_path.write_text(json.dumps(packet.model_dump(), ensure_ascii=True), encoding="utf-8")
+
+        adapter = ShellWorkerAdapter()
+        self.project_service.settings.executor_sandbox_mode = "bwrap"
+        self.project_service.settings.executor_extra_ro_binds = str(run_dir / "extra-ro")
+        (run_dir / "extra-ro").mkdir()
+        with patch("app.workers.command_worker._ensure_bwrap_runtime", return_value="/usr/bin/bwrap"):
+            spec = adapter.build_launch_spec(
+                packet=packet,
+                packet_path=packet_path,
+                run_dir=run_dir,
+                project_root=project_root,
+                settings=self.project_service.settings,
+            )
+
+        self.assertTrue(spec.sandboxed)
+        self.assertEqual("/usr/bin/bwrap", spec.command[0])
+        self.assertIn("--ro-bind", spec.command)
+        self.assertIn("/", spec.command)
+        self.assertIn("--tmpfs", spec.command)
+        self.assertIn(str(project_root / "graph"), spec.command)
+        self.assertIn("--bind", spec.command)
+        self.assertIn(str(run_dir), spec.command)
+        self.assertIn(str(project_root / packet.run_context.result_dir), spec.command)
+        self.assertIn("CUSTOM_RUNTIME_ENV", spec.command)
+        self.assertIn("custom-value", spec.command)
+        self.assertIn("--clearenv", spec.command)
+        self.assertIn("HOME", spec.command)
+        self.assertIn(str(run_dir / "home"), spec.command)
+        self.assertIn("PI_CODING_AGENT_DIR", spec.command)
+        self.assertIn(str(run_dir / "state" / "pi-agent"), spec.command)
+        self.assertIn("PI_CODING_AGENT_SESSION_DIR", spec.command)
+        self.assertIn(str(run_dir / "state" / "pi-sessions"), spec.command)
+        self.assertIn("XDG_CACHE_HOME", spec.command)
+        self.assertIn(str(run_dir / "cache"), spec.command)
+        self.assertNotIn("--unshare-net", spec.command)
+        self.assertEqual(str(run_dir / "sandbox_plan.json"), spec.environment["BLUEPRINT_SANDBOX_PLAN"])
+        sandbox_plan = json.loads((run_dir / "sandbox_plan.json").read_text(encoding="utf-8"))
+        self.assertEqual("bwrap", sandbox_plan["mode"])
+        self.assertEqual("host", sandbox_plan["network"])
+        self.assertFalse(sandbox_plan["network_isolation"])
+        self.assertTrue(sandbox_plan["host_root_readonly"])
+        self.assertTrue(sandbox_plan["clearenv"])
+        self.assertEqual(["/"], sandbox_plan["readonly_binds"])
+        self.assertIn(str(project_root / "graph"), sandbox_plan["masked_paths"])
+        self.assertEqual(str(run_dir / "home"), sandbox_plan["home_dir"])
+        self.assertEqual(str(run_dir / "state" / "pi-agent"), sandbox_plan["pi_agent_dir"])
+        self.assertEqual(str(run_dir / "state" / "pi-sessions"), sandbox_plan["pi_session_dir"])
+        self.assertIn("HOME", sandbox_plan["env_keys"])
+        self.assertIn("PI_CODING_AGENT_DIR", sandbox_plan["env_keys"])
+        self.assertIn("CUSTOM_RUNTIME_ENV", sandbox_plan["runtime_env_keys"])
+
+    def test_command_log_redacts_secret_arguments(self) -> None:
+        command = [
+            "bwrap",
+            "--setenv",
+            "BLUEPRINT_DEEPSEEK_API_KEY",
+            "sk-secret",
+            "--setenv",
+            "PATH",
+            "/usr/bin",
+            "pi",
+            "--api-key",
+            "sk-runtime",
+            "TOKEN=value",
+            "--password=hidden",
+        ]
+
+        redacted = _redact_command_for_log(command)
+
+        self.assertNotIn("sk-secret", redacted)
+        self.assertNotIn("sk-runtime", redacted)
+        self.assertNotIn("TOKEN=value", redacted)
+        self.assertNotIn("--password=hidden", redacted)
+        self.assertIn("BLUEPRINT_DEEPSEEK_API_KEY", redacted)
+        self.assertIn("/usr/bin", redacted)
+        self.assertEqual("[REDACTED]", redacted[3])
+        self.assertEqual("[REDACTED]", redacted[9])
+
+    def test_command_adapter_requires_bwrap_when_sandbox_enabled(self) -> None:
+        project_root = self.project_service.project_path("test-project")
+        run_id = "run_bwrap_required_check"
+        run_dir = project_root / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store = self.project_service.graph_store("test-project")
+        card = next(item for item in store.load_cards() if item.card_id == "card_enrichment_group")
+        packet = self.worker._task_packet("test-project", run_id, card, store.load_graph().assets, "shell")
+        packet_path = run_dir / "task_packet.json"
+        packet_path.write_text(json.dumps(packet.model_dump(), ensure_ascii=True), encoding="utf-8")
+
+        adapter = ShellWorkerAdapter()
+        self.project_service.settings.executor_sandbox_mode = "bwrap"
+        with patch("app.workers.command_worker._ensure_bwrap_runtime", side_effect=RuntimeError("bwrap required")):
+            with self.assertRaises(RuntimeError) as context:
+                adapter.build_launch_spec(
+                    packet=packet,
+                    packet_path=packet_path,
+                    run_dir=run_dir,
+                    project_root=project_root,
+                    settings=self.project_service.settings,
+                )
+        self.assertIn("bwrap required", str(context.exception))
+
+    def test_sandboxed_execution_guard_allows_different_cards_in_parallel(self) -> None:
+        first_guard, first_kind = self.worker._acquire_execution_guard("test-project", "card_one", sandboxed=True)
+        second_guard, second_kind = self.worker._acquire_execution_guard("test-project", "card_two", sandboxed=True)
+        duplicate_guard, _duplicate_kind = self.worker._acquire_execution_guard("test-project", "card_one", sandboxed=True)
+        try:
+            self.assertIsNotNone(first_guard)
+            self.assertIsNotNone(second_guard)
+            self.assertEqual("composite", first_kind)
+            self.assertEqual("composite", second_kind)
+            self.assertIsNone(duplicate_guard)
+        finally:
+            if first_guard is not None:
+                self.worker._release_execution_guard(first_guard, first_kind)
+            if second_guard is not None:
+                self.worker._release_execution_guard(second_guard, second_kind)
 
     def test_real_agent_adapter_launches_via_wrapper(self) -> None:
         settings = self.project_service.settings
         original_command = settings.opencode_command
+        original_sandbox_mode = settings.executor_sandbox_mode
         settings.opencode_command = "opencode run {executor_prompt_path}"
+        settings.executor_sandbox_mode = "bwrap"
         project_root = self.project_service.project_path("test-project")
         run_id = "run_wrapper_check"
         run_dir = project_root / "runs" / run_id
@@ -943,6 +1190,87 @@ class ManagerFlowTest(unittest.TestCase):
         packet_path = run_dir / "task_packet.json"
         packet_path.write_text(json.dumps(packet.model_dump(), ensure_ascii=True), encoding="utf-8")
         try:
+            with patch("app.workers.command_worker._ensure_bwrap_runtime", return_value="/usr/bin/bwrap"):
+                spec = self.worker.registry["opencode"].build_launch_spec(
+                    packet=packet,
+                    packet_path=packet_path,
+                    run_dir=run_dir,
+                    project_root=project_root,
+                    settings=settings,
+                )
+            self.assertIn("app.workers.agent_cli_executor", " ".join(spec.command))
+            self.assertEqual("opencode", spec.environment["BLUEPRINT_AGENT_PROVIDER"])
+            self.assertEqual("opencode run {executor_prompt_path}", spec.environment["BLUEPRINT_AGENT_LAUNCH_TEMPLATE"])
+            self.assertIn("BLUEPRINT_AGENT_PROVIDER", spec.command)
+            self.assertIn("BLUEPRINT_AGENT_LAUNCH_TEMPLATE", spec.command)
+        finally:
+            settings.opencode_command = original_command
+            settings.executor_sandbox_mode = original_sandbox_mode
+
+    def test_agent_cli_wrapper_repairs_invalid_manifest_candidate(self) -> None:
+        settings = self.project_service.settings
+        original_command = settings.opencode_command
+        project_root = self.project_service.project_path("test-project")
+        run_id = "run_wrapper_repair_check"
+        run_dir = project_root / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store = self.project_service.graph_store("test-project")
+        card = next(item for item in store.load_cards() if item.card_id == "card_enrichment_group")
+        packet = self.worker._task_packet("test-project", run_id, card, store.load_graph().assets, "opencode")
+        packet_path = run_dir / "task_packet.json"
+        packet_path.write_text(json.dumps(packet.model_dump(), ensure_ascii=True), encoding="utf-8")
+        stub_path = Path(self.tmpdir) / "agent_manifest_stub.py"
+        stub_path.write_text(
+            """
+import json
+import os
+import sys
+from pathlib import Path
+
+packet = json.loads(Path(os.environ["BLUEPRINT_TASK_PACKET"]).read_text(encoding="utf-8"))
+run_dir = Path(os.environ["BLUEPRINT_RUN_DIR"])
+project_root = Path(os.environ["BLUEPRINT_PROJECT_ROOT"])
+candidate = Path(os.environ["BLUEPRINT_MANIFEST_CANDIDATE_PATH"])
+repair_prompt = os.environ.get("BLUEPRINT_MANIFEST_REPAIR_PROMPT")
+(run_dir / "seen_prompts.log").open("a", encoding="utf-8").write(Path(sys.argv[1]).name + "\\n")
+created_assets = []
+for item in packet["expected_outputs"]:
+    output_path = project_root / item["path_hint"]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(f"generated:{item['role']}\\n", encoding="utf-8")
+    created_assets.append({"role": item["role"], "type": item["type"], "path": item["path_hint"]})
+code_path = project_root / "scripts" / "generated" / packet["task_id"] / "analysis.py"
+code_path.parent.mkdir(parents=True, exist_ok=True)
+code_path.write_text("print('repair test')\\n", encoding="utf-8")
+if repair_prompt:
+    manifest = {
+        "run_id": packet["task_id"],
+        "status": "success",
+        "summary": "Repaired manifest is valid.",
+        "inputs_used": packet["input_assets"],
+        "created_assets": created_assets,
+        "code_artifacts": [{"path": str(code_path.relative_to(project_root)), "language": "python"}],
+        "commands_executed": ["agent-manifest-stub"],
+        "metrics": {},
+        "key_findings": [],
+        "recommended_graph_updates": [],
+        "warnings": [],
+    }
+else:
+    manifest = {
+        "run_id": packet["task_id"],
+        "status": "completed",
+        "inputs_used": packet["input_assets"],
+        "outputs": created_assets,
+        "code_artifacts": [{"path": str(code_path.relative_to(project_root)), "language": "python"}],
+    }
+candidate.write_text(json.dumps(manifest), encoding="utf-8")
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        settings.opencode_command = f"{sys.executable} {stub_path} {{executor_prompt_path}}"
+        try:
             spec = self.worker.registry["opencode"].build_launch_spec(
                 packet=packet,
                 packet_path=packet_path,
@@ -950,9 +1278,39 @@ class ManagerFlowTest(unittest.TestCase):
                 project_root=project_root,
                 settings=settings,
             )
-            self.assertIn("app.workers.agent_cli_executor", " ".join(spec.command))
-            self.assertEqual("opencode", spec.environment["BLUEPRINT_AGENT_PROVIDER"])
-            self.assertEqual("opencode run {executor_prompt_path}", spec.environment["BLUEPRINT_AGENT_LAUNCH_TEMPLATE"])
+            env = {
+                **spec.environment,
+                "BLUEPRINT_TASK_PACKET": str(packet_path),
+                "BLUEPRINT_RUN_DIR": str(run_dir),
+                "BLUEPRINT_PROJECT_ROOT": str(project_root),
+                "BLUEPRINT_MANIFEST_CANDIDATE_PATH": str(run_dir / "manifest.candidate.json"),
+            }
+            result = subprocess.run(spec.command, cwd=spec.cwd, env=env, text=True, capture_output=True, check=False)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            manifest = Manifest.model_validate(json.loads((run_dir / "manifest.json").read_text(encoding="utf-8")))
+            trace = json.loads((run_dir / "agent_trace.json").read_text(encoding="utf-8"))
+            self.assertEqual("success", manifest.status)
+            self.assertEqual("Repaired manifest is valid.", manifest.summary)
+            self.assertEqual("success", trace["status"])
+            self.assertEqual("opencode", trace["provider"])
+            self.assertGreaterEqual(len(trace["provider_attempts"]), 2)
+            self.assertTrue((run_dir / "agent_output_timeline.jsonl").exists())
+            timeline_events = [
+                json.loads(line)
+                for line in (run_dir / "agent_output_timeline.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertTrue(any(item["event_type"] == "process_start" for item in timeline_events))
+            self.assertTrue(any(item["event_type"] == "process_exit" for item in timeline_events))
+            self.assertTrue(any(item["phase"] == "manifest_repair" for item in trace["provider_attempts"]))
+            self.assertTrue(any(item["status"] == "failed" for item in trace["manifest_validation"]))
+            self.assertTrue(any(item["path"].endswith("manifest.json") for item in trace["file_timeline"]))
+            self.assertTrue((run_dir / "manifest_repair_prompt.md").exists())
+            self.assertIn("status must be exactly one of", (run_dir / "manifest_repair_prompt.md").read_text(encoding="utf-8"))
+            self.assertEqual(
+                ["executor_prompt.md", "manifest_repair_prompt.md"],
+                (run_dir / "seen_prompts.log").read_text(encoding="utf-8").splitlines(),
+            )
         finally:
             settings.opencode_command = original_command
 
@@ -1099,6 +1457,13 @@ manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             events = self.project_service.graph_store("test-project").load_run_events(run["run_id"])
             self.assertTrue(any(event.event_type == "executor_progress" and event.message == "provider stub running" for event in events))
             self.assertTrue(any(event.event_type == "executor_final_report" and event.message == "Provider wrapper completed." for event in events))
+            trace_path = self.project_service.project_path("test-project") / "runs" / run["run_id"] / "agent_trace.json"
+            trace = json.loads(trace_path.read_text(encoding="utf-8"))
+            self.assertEqual("success", trace["status"])
+            self.assertEqual("initial_provider", trace["provider_attempts"][0]["phase"])
+            self.assertEqual(0, trace["provider_attempts"][0]["exit_code"])
+            self.assertGreater(trace["provider_attempts"][0]["stdout_line_count"], 0)
+            self.assertTrue(any(item["path"].endswith("manifest.json") for item in trace["file_timeline"]))
             snapshot = self.project_service.get_project_snapshot("test-project")
             run_record = next(item for item in snapshot["graph"].runs if item.run_id == run["run_id"])
             self.assertEqual("reviewed", run_record.status)
@@ -1264,7 +1629,7 @@ print('BP_EVENT {"type":"progress_update","stage":"provider","progress":10,"mess
         self.assertEqual([], violations)
         self.assertTrue(any(item["path"] == "chat/sessions.json" for item in changes))
 
-    def test_project_runs_execute_serially_to_keep_filesystem_audit_scoped(self) -> None:
+    def test_project_rejects_parallel_run_start_to_keep_filesystem_audit_scoped(self) -> None:
         script = """
 import json
 import sys
@@ -1287,7 +1652,7 @@ for item in packet["expected_outputs"]:
             "description": f"generated {item['role']}",
         }
     )
-time.sleep(0.2)
+time.sleep(0.5)
 manifest = {
     "run_id": packet["task_id"],
     "status": "success",
@@ -1305,10 +1670,19 @@ manifest = {
 """
         self.worker.registry["serial_audit_stub"] = InlineCommandWorkerAdapter("serial_audit_stub", script)
         _group_module_id, _child_module_id, _group_card_id, child_card_id = self._add_single_submodule_group_fixture()
-        first = self.worker.start_run("test-project", "card_enrichment_group", worker_type="serial_audit_stub")
-        second = self.worker.start_run("test-project", child_card_id, worker_type="serial_audit_stub")
-        self._wait_for_run("test-project", first["run_id"])
-        self._wait_for_run("test-project", second["run_id"])
+        original_sandbox_mode = self.project_service.settings.executor_sandbox_mode
+        self.project_service.settings.executor_sandbox_mode = "none"
+        try:
+            first = self.worker.start_run("test-project", "card_enrichment_group", worker_type="serial_audit_stub")
+            with self.assertRaises(HTTPException) as context:
+                self.worker.start_run("test-project", child_card_id, worker_type="serial_audit_stub")
+            self.assertEqual(409, context.exception.status_code)
+
+            self._wait_for_run("test-project", first["run_id"])
+            second = self.worker.start_run("test-project", child_card_id, worker_type="serial_audit_stub")
+            self._wait_for_run("test-project", second["run_id"])
+        finally:
+            self.project_service.settings.executor_sandbox_mode = original_sandbox_mode
 
         project_root = self.project_service.project_path("test-project")
         for run in [first, second]:
@@ -1509,6 +1883,7 @@ manifest = {
                 "card_id": "card_audited",
                 "title": "Audited Card",
                 "summary": "Audit should be recorded when enabled.",
+                "step": 1,
                 "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
                 "outputs": [{"label": "result", "asset_id": "audited_result"}],
             },
@@ -1655,6 +2030,62 @@ manifest = {
         self.assertIsNone(result.commit_hash)
         self.assertTrue(any("git commit failed" in warning for warning in result.warnings))
         self.assertTrue(any(card.card_id == "card_direct_patch" for card in snapshot["cards"]))
+        self.assertIn("needs_git_repair", snapshot["graph"].metadata)
+
+    def test_project_list_exposes_corrupted_project(self) -> None:
+        corrupt_root = Path(self.tmpdir) / "corrupt-project"
+        (corrupt_root / "graph").mkdir(parents=True)
+        (corrupt_root / "project.json").write_text("{not json", encoding="utf-8")
+
+        projects = self.project_service.list_projects()
+
+        corrupt = next(item for item in projects if item.project_id == "corrupt-project")
+        self.assertEqual("error", corrupt.status)
+        self.assertTrue((corrupt_root / "project_recovery_required.json").exists())
+
+    def test_manifest_review_context_surfaces_invalid_paths(self) -> None:
+        root = Path(self.tmpdir) / "test-project"
+        run_id = "run_invalid_review_context"
+        run_dir = root / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(
+            run_dir / "task_packet.json",
+            TaskPacket(
+                task_id=run_id,
+                project_id="test-project",
+                card_id="card_de_analysis",
+                goal="test",
+                worker_instructions="test",
+            ).model_dump(),
+        )
+        atomic_write_json(
+            run_dir / "manifest.json",
+            Manifest(
+                run_id=run_id,
+                status="success",
+                summary="bad path",
+                created_assets=[CreatedAsset(role="bad", type="table", path="../outside.tsv")],
+            ).model_dump(),
+        )
+
+        context = self.manifest_service.manifest_to_review_context("test-project", run_id)
+
+        self.assertTrue(any("Invalid created asset path" in item for item in context.validation_errors))
+
+    def test_chat_job_failure_stores_traceback(self) -> None:
+        service = ChatJobService(max_workers=1)
+
+        def boom(_project_id: str, _request: ChatRequest) -> object:
+            raise RuntimeError("chat exploded")
+
+        job = service.submit("test-project", ChatRequest(message="hello"), boom)
+        job.future.result(timeout=2)
+
+        failed = service.get(job.job_id)
+        self.assertIsNotNone(failed)
+        self.assertEqual("failed", failed.status)
+        self.assertIn("Traceback", failed.error or "")
+        self.assertIn("chat exploded", failed.error or "")
 
     def test_go_spec_does_not_match_good_or_going(self) -> None:
         self.assertIsNone(self.manager.tool_layer._resolve_spec("please create a good module"))
@@ -1687,6 +2118,50 @@ class ManagerPlannerCompatibilityTest(unittest.TestCase):
 
 
 class ExecutorReviewerWorkerTest(unittest.TestCase):
+    def test_reviewer_infrastructure_error_is_warning_not_fail(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="validator-reviewer-infra-") as tmpdir:
+            root = Path(tmpdir)
+            run_id = "run_reviewer_infra"
+            run_dir = root / "runs" / run_id
+            run_dir.mkdir(parents=True)
+            (root / "results").mkdir()
+            (root / "results" / "output.tsv").write_text("gene\tvalue\nA\t1\n", encoding="utf-8")
+            script = root / "scripts" / "generated" / run_id / "analyze.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("print('analysis')\n", encoding="utf-8")
+            atomic_write_json(
+                run_dir / "task_packet.json",
+                TaskPacket(
+                    task_id=run_id,
+                    project_id="test-project",
+                    card_id="card_review",
+                    goal="Review executor output.",
+                    worker_instructions="Run analysis.",
+                ).model_dump(),
+            )
+            atomic_write_json(
+                run_dir / "manifest.json",
+                Manifest(
+                    run_id=run_id,
+                    status="success",
+                    summary="done",
+                    created_assets=[CreatedAsset(role="output", type="table", path="results/output.tsv")],
+                    code_artifacts=[{"path": f"scripts/generated/{run_id}/analyze.py", "language": "python"}],
+                ).model_dump(),
+            )
+
+            project_service = object.__new__(ProjectService)
+            project_service.settings = get_settings()
+            project_service.project_path = lambda _project_id: root
+            service = ExecutorValidationService(project_service)
+            service.reviewer_worker = RaisingReviewerWorker()
+
+            report = service.validate_run("test-project", run_id)
+
+        self.assertEqual("warn", report.status)
+        self.assertEqual("reviewer_infrastructure_error", report.reviewer["mode"])
+        self.assertTrue(any(issue.code == "reviewer_infrastructure_error" for issue in report.issues))
+
     def test_validation_reports_directory_code_artifact_without_crashing(self) -> None:
         with tempfile.TemporaryDirectory(prefix="validator-dir-artifact-") as tmpdir:
             root = Path(tmpdir)
@@ -1763,6 +2238,112 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
         self.assertTrue(result["syntax"]["ok"])
         self.assertEqual(["data/input.tsv", "results/output.tsv"], result["referenced_declared_paths"])
         self.assertEqual(["placeholder"], result["suspicious_markers"])
+
+    def test_reviewer_allowed_files_are_limited_to_run_delivery_bundle(self) -> None:
+        run_id = "run_review_scope"
+        packet = TaskPacket.model_validate(
+            {
+                "task_id": run_id,
+                "project_id": "test-project",
+                "card_id": "card_review",
+                "goal": "Review executor output.",
+                "input_assets": [{"asset_id": "input", "path": "data/input.tsv", "type": "table"}],
+                "expected_outputs": [
+                    {
+                        "role": "output",
+                        "type": "table",
+                        "path_hint": f"results/card_review/{run_id}/output.tsv",
+                    }
+                ],
+                "allowed_paths": [
+                    f"runs/{run_id}/",
+                    f"results/card_review/{run_id}/",
+                    "scripts/generated/",
+                ],
+                "worker_instructions": "Run analysis.",
+            }
+        )
+        manifest = Manifest.model_validate(
+            {
+                "run_id": run_id,
+                "status": "success",
+                "summary": "done",
+                "created_assets": [
+                    {
+                        "role": "output",
+                        "type": "table",
+                        "path": f"results/card_review/{run_id}/output.tsv",
+                    },
+                    {"role": "output", "type": "table", "path": "graph/graph.json"},
+                    {"role": "undeclared", "type": "table", "path": f"results/card_review/{run_id}/extra.tsv"},
+                ],
+                "code_artifacts": [
+                    {"path": f"scripts/generated/{run_id}/analysis.py", "language": "python"},
+                    {"path": "scripts/generated/other_run/analysis.py", "language": "python"},
+                    {"path": "backend/app/services/worker_service.py", "language": "python"},
+                ],
+            }
+        )
+        worker = ExecutorReviewerWorker(get_settings())
+
+        files = worker._allowed_review_files(packet, manifest)
+
+        self.assertIn("data/input.tsv", files)
+        self.assertIn(f"results/card_review/{run_id}/output.tsv", files)
+        self.assertIn(f"scripts/generated/{run_id}/analysis.py", files)
+        self.assertIn(f"runs/{run_id}/manifest.json", files)
+        self.assertIn(f"runs/{run_id}/sandbox_plan.json", files)
+        self.assertNotIn("graph/graph.json", files)
+        self.assertNotIn(f"results/card_review/{run_id}/extra.tsv", files)
+        self.assertNotIn("scripts/generated/other_run/analysis.py", files)
+        self.assertNotIn("backend/app/services/worker_service.py", files)
+        self.assertNotIn(f"runs/{run_id}/executor_prompt.md", files)
+
+    def test_read_review_file_rejects_manifest_path_outside_delivery_bundle(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reviewer-scope-") as tmpdir:
+            root = Path(tmpdir)
+            (root / "graph").mkdir()
+            (root / "graph" / "graph.json").write_text('{"secret": true}\n', encoding="utf-8")
+            run_id = "run_review_scope_read"
+            packet = TaskPacket.model_validate(
+                {
+                    "task_id": run_id,
+                    "project_id": "test-project",
+                    "card_id": "card_review",
+                    "goal": "Review executor output.",
+                    "expected_outputs": [
+                        {
+                            "role": "output",
+                            "type": "table",
+                            "path_hint": f"results/card_review/{run_id}/output.tsv",
+                        }
+                    ],
+                    "allowed_paths": [f"runs/{run_id}/", f"results/card_review/{run_id}/"],
+                    "worker_instructions": "Run analysis.",
+                }
+            )
+            manifest = Manifest.model_validate(
+                {
+                    "run_id": run_id,
+                    "status": "success",
+                    "summary": "done",
+                    "created_assets": [{"role": "output", "type": "table", "path": "graph/graph.json"}],
+                }
+            )
+            worker = ExecutorReviewerWorker(get_settings())
+
+            result = worker._handle_tool(
+                root,
+                packet,
+                manifest,
+                {
+                    "name": "read_review_file",
+                    "input": {"path": "graph/graph.json"},
+                },
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("not allowed", result["error"])
 
     def test_invalid_final_tool_call_returns_protocol_error_then_accepts_retry(self) -> None:
         worker = ExecutorReviewerWorker(get_settings())
@@ -1901,6 +2482,8 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
                     "project_id": "test-project",
                     "card_id": "card_review",
                     "goal": "Review executor output.",
+                    "expected_outputs": [{"role": "plot", "type": "figure", "path_hint": "results/plot.png"}],
+                    "allowed_paths": ["results/"],
                     "worker_instructions": "Run analysis.",
                 }
             )

@@ -36,7 +36,7 @@ class AssetTimelineService:
         dependency_map = self.card_dependency_map(cards, required_uses_by_card, producer_by_asset)
         parallel_batches, cycle_card_ids = self.parallel_batches({card.card_id for card in cards}, dependency_map)
 
-        card_steps = self.card_steps(cards, required_uses_by_card, dependency_map, asset_map, producer_by_asset)
+        card_steps = self.card_steps(cards)
         asset_steps = self.asset_steps(graph.assets, cards, card_steps, producer_by_asset)
         consumers_by_asset: dict[str, list[str]] = defaultdict(list)
         for card_id, uses in required_uses_by_card.items():
@@ -155,6 +155,8 @@ class AssetTimelineService:
                 continue
             min_step = max(min_step, int(asset["step"]) + 1)
         min_step = max(min_step, 1)
+        if candidate.step is None:
+            errors.append(f"Card step is required for {candidate.card_id}. Set step explicitly instead of relying on automatic ordering.")
         if candidate.step is not None and candidate.step < min_step:
             errors.append(
                 f"Card step too early: card {candidate.card_id} is step {candidate.step}, "
@@ -164,8 +166,6 @@ class AssetTimelineService:
             errors.append(f"Dependency cycle detected around card {candidate.card_id}. Check card.inputs and card.outputs asset_ids.")
         if errors:
             return candidate, errors
-        if candidate.step is None:
-            candidate = candidate.model_copy(update={"step": min_step})
         return candidate, []
 
     @classmethod
@@ -247,34 +247,8 @@ class AssetTimelineService:
     def card_steps(
         cls,
         cards: list[Card],
-        required_uses_by_card: dict[str, list[CardAssetUse]],
-        dependency_map: dict[str, set[str]],
-        asset_map: dict[str, Asset],
-        producer_by_asset: dict[str, str],
     ) -> dict[str, int]:
-        active_card_ids = {card.card_id for card in cards}
-        batches, cycle_card_ids = cls.parallel_batches(active_card_ids, dependency_map)
-        card_by_id = {card.card_id: card for card in cards}
-        card_steps: dict[str, int] = {}
-        asset_steps: dict[str, int] = {asset_id: 0 for asset_id in asset_map}
-        for batch in batches:
-            for card_id in batch["card_ids"]:
-                card = card_by_id[card_id]
-                minimum = 1
-                for use in required_uses_by_card.get(card_id, []):
-                    producer_card_id = producer_by_asset.get(use.asset_id)
-                    if producer_card_id and producer_card_id != card_id:
-                        minimum = max(minimum, card_steps.get(producer_card_id, 0) + 1)
-                    else:
-                        minimum = max(minimum, asset_steps.get(use.asset_id, 0) + 1)
-                card_steps[card_id] = max(card.step or minimum, minimum)
-                for output in card.outputs:
-                    if output.asset_id:
-                        asset_steps[output.asset_id] = card_steps[card_id]
-        for card_id in cycle_card_ids:
-            card = card_by_id[card_id]
-            card_steps[card_id] = card.step or 1
-        return card_steps
+        return {card.card_id: card.step or 1 for card in cards}
 
     @classmethod
     def asset_steps(

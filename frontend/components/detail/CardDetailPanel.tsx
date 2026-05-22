@@ -1,6 +1,6 @@
 "use client";
 
-import { Card, ProjectSummary, RunEvent, RunRecord, WorkItem, WorkerCapability } from "@/lib/types";
+import { Card, ProjectSummary, PythonRuntime, RunEvent, RunRecord, WorkItem, WorkerCapability } from "@/lib/types";
 import { CardStatusBadge } from "@/components/cards/CardStatusBadge";
 import { SpecialistAvatar } from "@/components/cards/SpecialistAvatar";
 
@@ -13,6 +13,11 @@ export function CardDetailPanel({
   workerCapabilities,
   selectedWorkerType,
   onSelectWorker,
+  pythonRuntimes = [],
+  globalPythonRuntime,
+  selectedPythonRuntime,
+  onSelectGlobalPythonRuntime,
+  onSelectPythonRuntime,
 }: {
   card?: Card;
   summary: ProjectSummary;
@@ -22,6 +27,11 @@ export function CardDetailPanel({
   workerCapabilities?: WorkerCapability[];
   selectedWorkerType?: string;
   onSelectWorker?: (workerType: string) => void;
+  pythonRuntimes?: PythonRuntime[];
+  globalPythonRuntime?: string;
+  selectedPythonRuntime?: string;
+  onSelectGlobalPythonRuntime?: (runtime?: string) => void;
+  onSelectPythonRuntime?: (runtime?: string) => void;
 }) {
   if (!card) {
     return (
@@ -154,8 +164,51 @@ export function CardDetailPanel({
           </div>
         </div>
         <div className="meta-block">
-          <h4>Worker Adapters</h4>
+          <h4>Worker & Runtime</h4>
           <div className="kv">
+            <label style={{ display: "grid", gap: 6, marginBottom: 8 }}>
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>Global Python runtime</span>
+              <select
+                value={globalPythonRuntime ?? "__system__"}
+                onChange={(event) => onSelectGlobalPythonRuntime?.(event.target.value)}
+                style={{
+                  fontSize: 13,
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  border: "1px solid var(--line)",
+                  background: "var(--panel)",
+                  color: "var(--text)",
+                }}
+              >
+                {pythonRuntimes.map((item) => (
+                  <option key={`${item.manager}:${item.name}`} value={item.name}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label style={{ display: "grid", gap: 6, marginBottom: 8 }}>
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>Card Python runtime</span>
+              <select
+                value={selectedPythonRuntime ?? "__global__"}
+                onChange={(event) => onSelectPythonRuntime?.(event.target.value === "__global__" ? undefined : event.target.value)}
+                style={{
+                  fontSize: 13,
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  border: "1px solid var(--line)",
+                  background: "var(--panel)",
+                  color: "var(--text)",
+                }}
+              >
+                <option value="__global__">Follow global ({globalPythonRuntime && globalPythonRuntime !== "__system__" ? globalPythonRuntime : "system"})</option>
+                {pythonRuntimes.map((item) => (
+                  <option key={`${item.manager}:${item.name}`} value={item.name}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             {configuredWorkers.length ? (
               <label style={{ display: "grid", gap: 6, marginBottom: 8 }}>
                 <span style={{ fontSize: 12, color: "var(--muted)" }}>Selected executor</span>

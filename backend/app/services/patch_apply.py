@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import logging
 from pathlib import Path
 
 from app.models.cards import Card, CardAssetRef
@@ -10,6 +11,9 @@ from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.patch_validator import PatchValidator
 from app.services.project_service import ProjectService
 from app.services.utils import atomic_write_json, read_json, utc_now
+
+
+logger = logging.getLogger(__name__)
 
 
 class PatchApplyService:
@@ -181,8 +185,31 @@ class PatchApplyService:
             try:
                 commit_hash = self.project_service.git_service(project_id).commit(f"Apply patch {patch.patch_id}")
             except Exception as exc:
+                logger.exception("Patch was applied but git commit failed for project=%s patch=%s", project_id, patch.patch_id)
                 warnings.append(f"Patch was applied but git commit failed: {exc}")
+                self._mark_project_needs_git_repair(store.root, graph, store, f"Patch {patch.patch_id} applied but git commit failed: {exc}")
             return ApplyResult(project_id=project_id, patch_id=patch.patch_id, commit_hash=commit_hash, warnings=warnings)
+
+    @staticmethod
+    def _mark_project_needs_git_repair(root: Path, graph: GraphState, store, reason: str) -> None:
+        try:
+            graph.metadata["needs_git_repair"] = {
+                "reason": reason,
+                "updated_at": utc_now(),
+            }
+            store.save_graph(graph)
+        except Exception:
+            logger.exception("Failed to mark project as needing git repair after patch commit failure: %s", root)
+            try:
+                atomic_write_json(
+                    root / "project_recovery_required.json",
+                    {
+                        "reason": f"{reason}; failed to update graph metadata",
+                        "created_at": utc_now(),
+                    },
+                )
+            except Exception:
+                logger.exception("Failed to write project recovery marker after patch commit failure: %s", root)
 
     @staticmethod
     def _mark_assets_stale(graph: GraphState, asset_ids: list[str]) -> None:

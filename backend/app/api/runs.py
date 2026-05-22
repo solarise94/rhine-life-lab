@@ -23,6 +23,7 @@ class ReviewRunRequest(BaseModel):
 
 class StartRunRequest(BaseModel):
     worker_type: str | None = None
+    python_runtime: str | None = None
 
 
 class RuntimeApprovalDecisionRequest(BaseModel):
@@ -39,6 +40,7 @@ class CleanupRunRequest(BaseModel):
 
 class RerunCardRequest(BaseModel):
     worker_type: str | None = None
+    python_runtime: str | None = None
 
 
 @router.post("/cards/{card_id}/start-run")
@@ -48,7 +50,12 @@ def start_run(
     request: StartRunRequest | None = None,
     worker_service: WorkerService = Depends(get_worker_service),
 ) -> dict:
-    return worker_service.start_run(project_id, card_id, worker_type=request.worker_type if request else None)
+    return worker_service.start_run(
+        project_id,
+        card_id,
+        worker_type=request.worker_type if request else None,
+        python_runtime=request.python_runtime if request else None,
+    )
 
 
 @router.post("/cards/{card_id}/reset-run-state")
@@ -67,7 +74,12 @@ def rerun_card(
     request: RerunCardRequest | None = None,
     worker_service: WorkerService = Depends(get_worker_service),
 ) -> dict:
-    return worker_service.rerun_card(project_id, card_id, worker_type=request.worker_type if request else None)
+    return worker_service.rerun_card(
+        project_id,
+        card_id,
+        worker_type=request.worker_type if request else None,
+        python_runtime=request.python_runtime if request else None,
+    )
 
 
 @router.get("/runs/{run_id}")

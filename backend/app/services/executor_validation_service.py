@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,9 @@ from app.models.runs import ExecutorValidationReport, Manifest, TaskPacket, Vali
 from app.services.executor_reviewer_worker import ExecutorReviewerWorker
 from app.services.project_service import ProjectService
 from app.services.utils import atomic_write_json, resolve_within, sha256_file
+
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutorValidationService:
@@ -32,18 +36,19 @@ class ExecutorValidationService:
                 deterministic_issues=issues,
             )
         except Exception as exc:
+            logger.exception("Executor reviewer infrastructure failed for project=%s run=%s", project_id, run_id)
             reviewer_payload = {
-                "verdict": "fail",
+                "verdict": "warn",
                 "summary": f"Executor reviewer failed before producing a verdict: {exc}",
                 "issues": [
                     {
-                        "severity": "error",
-                        "code": "reviewer_worker_failed",
+                        "severity": "warning",
+                        "code": "reviewer_infrastructure_error",
                         "message": str(exc),
                         "repair_hint": "Check Manager AI DeepSeek configuration and reviewer tool-use compatibility, then rerun validation.",
                     }
                 ],
-                "mode": "reviewer_worker_exception",
+                "mode": "reviewer_infrastructure_error",
             }
         reviewer_status = str(reviewer_payload.get("verdict") or "warn")
         if reviewer_status not in {"pass", "warn", "fail"}:
@@ -63,7 +68,12 @@ class ExecutorValidationService:
                     )
                 )
 
-        status = self._combine_status(deterministic_status, reviewer_status)
+        manager_brief_parse_issue = self._manager_brief_parse_issue(root / "runs" / run_id / "manager_brief.json")
+        if manager_brief_parse_issue is not None:
+            issues.append(manager_brief_parse_issue)
+
+        issue_status = "fail" if any(issue.severity == "error" for issue in issues) else "warn" if issues else deterministic_status
+        status = self._combine_status(issue_status, reviewer_status)
         report = ExecutorValidationReport(
             status=status,
             summary=self._summary_for(status, issues, reviewer_payload),
@@ -212,12 +222,29 @@ class ExecutorValidationService:
         return reviewer_payload.get("summary") or f"Executor validation failed with {len(issues)} issue(s)."
 
     @staticmethod
+    def _manager_brief_parse_issue(path: Path) -> ValidationIssue | None:
+        if not path.exists():
+            return None
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return ValidationIssue(
+                severity="warning",
+                code="manager_brief_json_invalid",
+                message=f"manager_brief.json could not be parsed: {exc}",
+                path=str(path.name),
+                repair_hint="Rewrite manager_brief.json as valid JSON so the Manager can read the executor final report.",
+            )
+        return None
+
+    @staticmethod
     def _merge_manager_brief(path: Path, report: ExecutorValidationReport) -> None:
         brief: dict[str, Any] = {}
         if path.exists():
             try:
                 brief = json.loads(path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                brief = {}
+            except json.JSONDecodeError as exc:
+                logger.exception("Failed to parse manager_brief before merging executor validation: %s", path)
+                brief = {"manager_brief_parse_error": str(exc)}
         brief["executor_validation"] = report.model_dump()
         atomic_write_json(path, brief)

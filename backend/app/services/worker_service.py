@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 import shutil
-from threading import Lock, Thread
+from threading import Lock, Semaphore, Thread
 from typing import Any
 from uuid import uuid4
 import re
 import subprocess
+import traceback
 
 from fastapi import HTTPException
 
@@ -40,6 +42,74 @@ from app.services.utils import atomic_write_json, utc_now
 from app.workers import build_worker_registry
 
 
+logger = logging.getLogger(__name__)
+
+
+_SENSITIVE_COMMAND_KEYS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+
+
+def _is_sensitive_command_key(value: str) -> bool:
+    upper = value.upper()
+    return any(marker in upper for marker in _SENSITIVE_COMMAND_KEYS)
+
+
+def _redact_command_for_log(command: list[str]) -> list[str]:
+    redacted: list[str] = []
+    redact_next_setenv_value = False
+    redact_next_option_value = False
+    previous_token = ""
+    for token in command:
+        if redact_next_setenv_value:
+            redacted.append("[REDACTED]")
+            redact_next_setenv_value = False
+            previous_token = token
+            continue
+        if redact_next_option_value:
+            redacted.append("[REDACTED]")
+            redact_next_option_value = False
+            previous_token = token
+            continue
+
+        if previous_token == "--setenv":
+            redacted.append(token)
+            redact_next_setenv_value = _is_sensitive_command_key(token)
+            previous_token = token
+            continue
+
+        if token in {"--api-key", "--token", "--password"}:
+            redacted.append(token)
+            redact_next_option_value = True
+            previous_token = token
+            continue
+
+        if token.startswith("--api-key=") or token.startswith("--token=") or token.startswith("--password="):
+            option, _value = token.split("=", 1)
+            redacted.append(f"{option}=[REDACTED]")
+            previous_token = token
+            continue
+
+        if "=" in token:
+            key, _value = token.split("=", 1)
+            if _is_sensitive_command_key(key):
+                redacted.append(f"{key}=[REDACTED]")
+                previous_token = token
+                continue
+
+        redacted.append(token)
+        previous_token = token
+    return redacted
+
+
+class _CompositeExecutionGuard:
+    def __init__(self, card_lock: Lock, semaphore: Semaphore) -> None:
+        self.card_lock = card_lock
+        self.semaphore = semaphore
+
+    def release(self) -> None:
+        self.semaphore.release()
+        self.card_lock.release()
+
+
 class WorkerService:
     def __init__(
         self,
@@ -56,15 +126,48 @@ class WorkerService:
         self._threads: dict[str, Thread] = {}
         self._processes: dict[str, subprocess.Popen[str]] = {}
         self._execution_locks: dict[str, Lock] = {}
+        self._execution_semaphores: dict[str, Semaphore] = {}
+        self._card_locks: dict[tuple[str, str], Lock] = {}
         self._execution_locks_guard = Lock()
         self._reconcile_active_runs()
 
-    def start_run(self, project_id: str, card_id: str, worker_type: str | None = None) -> dict:
+    def start_run(self, project_id: str, card_id: str, worker_type: str | None = None, python_runtime: str | None = None) -> dict:
+        python_runtime = self._normalize_python_runtime(python_runtime)
         resolved_worker_type = self._resolve_worker_type(worker_type)
         adapter = self.registry.get(resolved_worker_type)
         if adapter is None:
             raise HTTPException(status_code=400, detail=f"Unknown worker_type: {resolved_worker_type}")
 
+        execution_guard, guard_kind = self._acquire_execution_guard(project_id, card_id, sandboxed=adapter.uses_sandbox(self.project_service.settings))
+        if execution_guard is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Project already has an executor run in progress. Start another run after the current run finishes review.",
+            )
+        try:
+            return self._start_run_with_execution_guard(
+                project_id,
+                card_id,
+                resolved_worker_type,
+                adapter,
+                execution_guard,
+                guard_kind,
+                python_runtime=python_runtime,
+            )
+        except Exception:
+            self._release_execution_guard(execution_guard, guard_kind)
+            raise
+
+    def _start_run_with_execution_guard(
+        self,
+        project_id: str,
+        card_id: str,
+        resolved_worker_type: str,
+        adapter: Any,
+        execution_guard: Lock | Semaphore,
+        guard_kind: str,
+        python_runtime: str | None = None,
+    ) -> dict:
         lock = self.project_service.lock_for(project_id)
         with lock:
             store = self.project_service.graph_store(project_id)
@@ -86,7 +189,7 @@ class WorkerService:
             run_id = self._new_run_id(graph.runs)
             run_dir = self.project_service.project_path(project_id) / "runs" / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
-            packet = self._task_packet(project_id, run_id, card, graph.assets, resolved_worker_type)
+            packet = self._task_packet(project_id, run_id, card, graph.assets, resolved_worker_type, python_runtime=python_runtime)
             atomic_write_json(run_dir / "task_packet.json", packet.model_dump())
             try:
                 launch_spec = adapter.build_launch_spec(
@@ -115,7 +218,8 @@ class WorkerService:
             unresolved = [item for item in approvals if item["decision"] == "needs_user_confirmation"]
             rejected = [item for item in approvals if item["decision"] in {"rejected", "user_rejected"}]
             (run_dir / "transcript.md").write_text(f"# {run_id}\n\nRun created.\n", encoding="utf-8")
-            (run_dir / "commands.log").write_text(" ".join(launch_spec.command) + "\n", encoding="utf-8")
+            redacted_command = _redact_command_for_log(launch_spec.command)
+            (run_dir / "commands.log").write_text(" ".join(redacted_command) + "\n", encoding="utf-8")
 
             initial_status = "needs_approval" if unresolved else "cancelled" if rejected else "queued"
             summary = "等待用户确认运行期权限请求。" if unresolved else "启动前权限校验失败。" if rejected else "等待执行器启动。"
@@ -175,13 +279,15 @@ class WorkerService:
         }
         if unresolved:
             response["pending_approvals"] = unresolved
+            self._release_execution_guard(execution_guard, guard_kind)
             return response
         if rejected:
             response["rejected_approvals"] = rejected
+            self._release_execution_guard(execution_guard, guard_kind)
             return response
 
         thread = Thread(
-            target=self._execute_run_locked,
+            target=self._execute_run_guarded,
             kwargs={
                 "project_id": project_id,
                 "run_id": run_id,
@@ -190,8 +296,9 @@ class WorkerService:
                 "command": launch_spec.command,
                 "cwd": launch_spec.cwd,
                 "environment": launch_spec.environment,
-                "execution_lock": self._execution_lock_for(project_id),
-                "execution_lock_acquired": False,
+                "execution_guard": execution_guard,
+                "guard_kind": guard_kind,
+                "sandboxed": launch_spec.sandboxed,
             },
             daemon=True,
         )
@@ -230,14 +337,18 @@ class WorkerService:
         if run.status != "needs_approval":
             return {"run_id": run_id, "status": run.status}
 
-        execution_lock = self._execution_lock_for(project_id)
-        execution_lock.acquire()
+        adapter = self.registry.get(run.worker_type)
+        if adapter is None:
+            raise HTTPException(status_code=400, detail=f"Unknown worker_type: {run.worker_type}")
+        execution_guard, guard_kind = self._acquire_execution_guard(project_id, run.card_id, sandboxed=adapter.uses_sandbox(self.project_service.settings))
+        if execution_guard is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Project already has an executor run in progress. Continue this run after the current run finishes review.",
+            )
         lock_transferred_to_thread = False
         try:
             packet = self.manifest_service.load_task_packet(project_id, run_id)
-            adapter = self.registry.get(run.worker_type)
-            if adapter is None:
-                raise HTTPException(status_code=400, detail=f"Unknown worker_type: {run.worker_type}")
             run_dir = self.project_service.project_path(project_id) / "runs" / run_id
             try:
                 launch_spec = adapter.build_launch_spec(
@@ -251,7 +362,7 @@ class WorkerService:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
 
             thread = Thread(
-                target=self._execute_run_locked,
+                target=self._execute_run_guarded,
                 kwargs={
                     "project_id": project_id,
                     "run_id": run_id,
@@ -260,8 +371,9 @@ class WorkerService:
                     "command": launch_spec.command,
                     "cwd": launch_spec.cwd,
                     "environment": launch_spec.environment,
-                    "execution_lock": execution_lock,
-                    "execution_lock_acquired": True,
+                    "execution_guard": execution_guard,
+                    "guard_kind": guard_kind,
+                    "sandboxed": launch_spec.sandboxed,
                 },
                 daemon=True,
             )
@@ -271,7 +383,7 @@ class WorkerService:
             return {"run_id": run_id, "status": "queued"}
         finally:
             if not lock_transferred_to_thread:
-                execution_lock.release()
+                self._release_execution_guard(execution_guard, guard_kind)
 
     def cancel_run(self, project_id: str, run_id: str, reason: str | None = None) -> dict:
         lock = self.project_service.lock_for(project_id)
@@ -391,7 +503,8 @@ class WorkerService:
             store.save_cards(cards)
         return {"card_id": card_id, "status": "planned"}
 
-    def rerun_card(self, project_id: str, card_id: str, worker_type: str | None = None) -> dict:
+    def rerun_card(self, project_id: str, card_id: str, worker_type: str | None = None, python_runtime: str | None = None) -> dict:
+        python_runtime = self._normalize_python_runtime(python_runtime)
         lock = self.project_service.lock_for(project_id)
         with lock:
             store = self.project_service.graph_store(project_id)
@@ -413,7 +526,7 @@ class WorkerService:
                 ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
                 store.save_graph(graph)
                 store.save_cards(cards)
-        return self.start_run(project_id, card_id, worker_type=worker_type)
+        return self.start_run(project_id, card_id, worker_type=worker_type, python_runtime=python_runtime)
 
     def review_run(self, project_id: str, run_id: str, accept: bool = True) -> dict:
         valid, errors = self.manifest_service.validate_manifest(project_id, run_id)
@@ -524,6 +637,7 @@ class WorkerService:
         command: list[str],
         cwd: Path,
         environment: dict[str, str],
+        sandboxed: bool = False,
     ) -> None:
         if self._run_status(project_id, run_id) == "cancelled":
             self._threads.pop(run_id, None)
@@ -575,25 +689,45 @@ class WorkerService:
             if self._run_status(project_id, run_id) == "cancelled":
                 return
 
-            audit_ok, audit_errors, _changes = self.manifest_service.audit_run_filesystem(project_id, run_id, before_snapshot)
+            audit_ok, audit_errors, _changes = self.manifest_service.audit_run_filesystem(
+                project_id,
+                run_id,
+                before_snapshot,
+                sandboxed=sandboxed,
+            )
+            dependency_issue_message, dependency_issue_payload = self._blocking_dependency_issue(project_id, run_id)
+            if dependency_issue_message:
+                self._append_event(
+                    project_id,
+                    run_id,
+                    card_id,
+                    event_type="runtime_dependency_missing",
+                    message=dependency_issue_message,
+                    payload=dependency_issue_payload,
+                )
+                self._set_run_attention(project_id, run_id, card_id, dependency_issue_message)
             if timed_out:
-                message = "执行超时，已终止。"
+                message = dependency_issue_message or "执行超时，已终止。"
                 if audit_errors:
                     message = f"{message} {'; '.join(audit_errors)}"
                 self._append_event(project_id, run_id, card_id, event_type="run_failed", message=message)
                 self._set_run_status(project_id, run_id, card_id, status="failed", summary=message, progress_note=None)
+                if dependency_issue_message:
+                    self._set_run_attention(project_id, run_id, card_id, dependency_issue_message)
                 self._commit_run_stage(project_id, run_id, "failed")
                 return
 
             if return_code != 0:
-                message = f"执行器退出码 {return_code}。"
+                message = dependency_issue_message or f"执行器退出码 {return_code}。"
                 if audit_errors:
                     message = f"{message} {'; '.join(audit_errors)}"
                 transcript_tail = self._transcript_tail(transcript_path)
-                if transcript_tail:
+                if transcript_tail and not dependency_issue_message:
                     message = f"{message} 最近输出：{transcript_tail}"
                 self._append_event(project_id, run_id, card_id, event_type="run_failed", message=message)
                 self._set_run_status(project_id, run_id, card_id, status="failed", summary=message, progress_note=None)
+                if dependency_issue_message:
+                    self._set_run_attention(project_id, run_id, card_id, dependency_issue_message)
                 self._commit_run_stage(project_id, run_id, "failed")
                 return
 
@@ -601,6 +735,13 @@ class WorkerService:
                 message = "执行后文件系统审计失败：" + "; ".join(audit_errors)
                 self._append_event(project_id, run_id, card_id, event_type="run_failed", message=message)
                 self._set_run_status(project_id, run_id, card_id, status="failed", summary=message, progress_note=None)
+                self._commit_run_stage(project_id, run_id, "failed")
+                return
+
+            if dependency_issue_message:
+                self._append_event(project_id, run_id, card_id, event_type="run_failed", message=dependency_issue_message)
+                self._set_run_status(project_id, run_id, card_id, status="failed", summary=dependency_issue_message, progress_note=None)
+                self._set_run_attention(project_id, run_id, card_id, dependency_issue_message)
                 self._commit_run_stage(project_id, run_id, "failed")
                 return
 
@@ -639,6 +780,10 @@ class WorkerService:
                 self._set_run_status(project_id, run_id, card_id, status="failed", summary=message, progress_note=None)
                 self._commit_run_stage(project_id, run_id, "failed")
                 return
+            validation_warning_message = None
+            if validation_report.status == "warn":
+                warning_codes = ", ".join(sorted({issue.code for issue in validation_report.issues})) or "validation_warning"
+                validation_warning_message = f"Executor validation warning ({warning_codes}): {validation_report.summary}"
             self._append_event(
                 project_id,
                 run_id,
@@ -650,6 +795,16 @@ class WorkerService:
             manager_brief = self._load_manager_brief(project_id, run_id)
             summary = manager_brief.get("final_report", {}).get("summary") or manifest.summary
             self._finalize_run_review(project_id, run_id, accept=True, source="reviewer")
+            if validation_warning_message:
+                self._set_run_attention(project_id, run_id, card_id, validation_warning_message)
+                self._append_event(
+                    project_id,
+                    run_id,
+                    card_id,
+                    event_type="executor_validation_warning",
+                    message=validation_warning_message,
+                    payload=validation_report.model_dump(),
+                )
             self._append_event(
                 project_id,
                 run_id,
@@ -661,17 +816,25 @@ class WorkerService:
             self._commit_run_stage(project_id, run_id, "reviewed")
         except Exception as exc:
             message = f"执行器运行后处理失败：{exc}"
+            logger.exception("Post-run handling failed for project=%s run=%s", project_id, run_id)
             try:
                 self._append_event(project_id, run_id, card_id, event_type="run_failed", message=message)
                 self._set_run_status(project_id, run_id, card_id, status="failed", summary=message, progress_note=None)
                 self._commit_run_stage(project_id, run_id, "failed")
-            except Exception:
-                pass
+            except Exception as secondary_exc:
+                logger.exception("Failed to persist post-run failure state for project=%s run=%s", project_id, run_id)
+                self._write_run_fatal_error(
+                    project_id,
+                    run_id,
+                    "Failed to persist post-run failure state.",
+                    primary_exception=exc,
+                    secondary_exception=secondary_exc,
+                )
         finally:
             self._processes.pop(run_id, None)
             self._threads.pop(run_id, None)
 
-    def _execute_run_locked(
+    def _execute_run_guarded(
         self,
         *,
         project_id: str,
@@ -681,11 +844,10 @@ class WorkerService:
         command: list[str],
         cwd: Path,
         environment: dict[str, str],
-        execution_lock: Lock,
-        execution_lock_acquired: bool = False,
+        execution_guard: Lock | Semaphore,
+        guard_kind: str,
+        sandboxed: bool = False,
     ) -> None:
-        if not execution_lock_acquired:
-            execution_lock.acquire()
         try:
             self._execute_run(
                 project_id=project_id,
@@ -695,15 +857,51 @@ class WorkerService:
                 command=command,
                 cwd=cwd,
                 environment=environment,
+                sandboxed=sandboxed,
             )
         finally:
-            execution_lock.release()
+            self._release_execution_guard(execution_guard, guard_kind)
+
+    def _acquire_execution_guard(self, project_id: str, card_id: str, *, sandboxed: bool) -> tuple[Lock | Semaphore | None, str]:
+        if not sandboxed:
+            execution_lock = self._execution_lock_for(project_id)
+            if not execution_lock.acquire(blocking=False):
+                return None, "lock"
+            return execution_lock, "lock"
+        card_lock = self._card_lock_for(project_id, card_id)
+        if not card_lock.acquire(blocking=False):
+            return None, "card_lock"
+        semaphore = self._execution_semaphore_for(project_id)
+        if not semaphore.acquire(blocking=False):
+            card_lock.release()
+            return None, "semaphore"
+        return _CompositeExecutionGuard(card_lock, semaphore), "composite"
+
+    @staticmethod
+    def _release_execution_guard(execution_guard: Lock | Semaphore, guard_kind: str) -> None:
+        if guard_kind == "composite" and isinstance(execution_guard, _CompositeExecutionGuard):
+            execution_guard.release()
+            return
+        execution_guard.release()
 
     def _execution_lock_for(self, project_id: str) -> Lock:
         with self._execution_locks_guard:
             if project_id not in self._execution_locks:
                 self._execution_locks[project_id] = Lock()
             return self._execution_locks[project_id]
+
+    def _execution_semaphore_for(self, project_id: str) -> Semaphore:
+        with self._execution_locks_guard:
+            if project_id not in self._execution_semaphores:
+                self._execution_semaphores[project_id] = Semaphore(max(1, int(self.project_service.settings.executor_max_concurrent_runs)))
+            return self._execution_semaphores[project_id]
+
+    def _card_lock_for(self, project_id: str, card_id: str) -> Lock:
+        key = (project_id, card_id)
+        with self._execution_locks_guard:
+            if key not in self._card_locks:
+                self._card_locks[key] = Lock()
+            return self._card_locks[key]
 
     @staticmethod
     def _transcript_tail(transcript_path: Path, *, max_lines: int = 6, max_chars: int = 800) -> str:
@@ -790,6 +988,39 @@ class WorkerService:
             )
             store.save_run_events(run_id, events)
 
+    def _write_run_fatal_error(
+        self,
+        project_id: str,
+        run_id: str,
+        message: str,
+        *,
+        primary_exception: Exception | None = None,
+        secondary_exception: Exception | None = None,
+    ) -> None:
+        try:
+            run_dir = self.project_service.project_path(project_id) / "runs" / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            lines = [message, f"created_at: {utc_now()}"]
+            if primary_exception is not None:
+                lines.extend(
+                    [
+                        "",
+                        "primary_exception:",
+                        "".join(traceback.format_exception(primary_exception)).rstrip(),
+                    ]
+                )
+            if secondary_exception is not None:
+                lines.extend(
+                    [
+                        "",
+                        "secondary_exception:",
+                        "".join(traceback.format_exception(secondary_exception)).rstrip(),
+                    ]
+                )
+            (run_dir / "fatal_error.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception:
+            logger.exception("Failed to write fatal run error log for project=%s run=%s", project_id, run_id)
+
     def _handle_structured_executor_event(self, project_id: str, run_id: str, card_id: str, line: str) -> bool:
         contract = self._build_manager_reporting_contract()
         if not line.startswith(contract.stdout_prefix):
@@ -862,6 +1093,7 @@ class WorkerService:
         card: Card,
         assets: list[Asset],
         worker_type: str,
+        python_runtime: str | None = None,
     ) -> TaskPacket:
         asset_map = {asset.asset_id: asset for asset in assets}
         input_asset_ids = list(dict.fromkeys([item.asset_id for item in card.inputs if item.asset_id]))
@@ -965,6 +1197,7 @@ class WorkerService:
                 f"Write manifest to runs/{run_id}/manifest.json.",
                 "Declare every consumed input in manifest.inputs_used.",
                 "Do not modify graph/, .git/, or upstream input assets.",
+                f"Do not install missing runtime packages. If required packages/tools are unavailable, use runs/{run_id}/report_dependency_issue.py to report them and stop.",
             ],
             worker_instructions=(
                 "You are a bioinformatics worker agent. Read task_packet.json, use the declared inputs, "
@@ -977,14 +1210,28 @@ class WorkerService:
                 run_dir=f"runs/{run_id}",
                 result_dir=result_dir,
             ),
-            executor_context=self._build_executor_context(project_id, card, worker_type),
+            executor_context=self._build_executor_context(project_id, card, worker_type, python_runtime=python_runtime),
             manager_reporting_contract=self._build_manager_reporting_contract(),
         )
 
-    def _build_executor_context(self, project_id: str, card: Card, worker_type: str) -> ExecutorContext:
+    @staticmethod
+    def _normalize_python_runtime(python_runtime: str | None) -> str | None:
+        if python_runtime in {None, "", "__system__"}:
+            return None
+        return python_runtime
+
+    def _build_executor_context(self, project_id: str, card: Card, worker_type: str, python_runtime: str | None = None) -> ExecutorContext:
         if card.executor_context is not None:
-            return card.executor_context
+            context = card.executor_context.model_copy(deep=True)
+            if python_runtime:
+                context.runtime_bindings.conda_env = python_runtime
+                context.runtime_bindings.env["BLUEPRINT_PYTHON_RUNTIME"] = python_runtime
+            return context
         graph = self.project_service.graph_store(project_id).load_graph()
+        conda_env = python_runtime or graph.metadata.get("default_conda_env")
+        runtime_env = {}
+        if python_runtime:
+            runtime_env["BLUEPRINT_PYTHON_RUNTIME"] = python_runtime
         network_policy = "allow" if worker_type in {"opencode", "codex", "pi", "claude_code"} else "prompt"
         return ExecutorContext(
             executor_profile=f"{worker_type}_worker",
@@ -998,8 +1245,9 @@ class WorkerService:
             ],
             tool_policy=ExecutorToolPolicy(network=network_policy, python=True, rscript=worker_type in {"pi", "opencode"}),
             runtime_bindings=RuntimeBindings(
-                conda_env=graph.metadata.get("default_conda_env"),
+                conda_env=conda_env,
                 working_dir=".",
+                env=runtime_env,
             ),
         )
 
@@ -1031,6 +1279,49 @@ class WorkerService:
         if not path.exists():
             return {}
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def _blocking_dependency_issue(self, project_id: str, run_id: str) -> tuple[str | None, dict[str, Any]]:
+        issue_path = self.project_service.project_path(project_id) / "runs" / run_id / "dependency_issue.json"
+        file_payload: dict[str, Any] = {}
+        if issue_path.exists():
+            try:
+                file_payload = json.loads(issue_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                file_payload = {}
+        brief = self._load_manager_brief(project_id, run_id)
+        issues = list(file_payload.get("issues") or [])
+        if not issues:
+            issues = list(brief.get("dependency_issues") or [])
+        if not issues:
+            issues = [
+                issue
+                for issue in list(brief.get("issues") or [])
+                if isinstance(issue, dict) and issue.get("metadata", {}).get("issue_kind") == "runtime_dependency_missing"
+            ]
+        blocking = [
+            issue
+            for issue in issues
+            if isinstance(issue, dict) and issue.get("metadata", {}).get("blocking", True)
+        ]
+        if not blocking:
+            return None, {"issues": issues}
+        missing: list[str] = []
+        ecosystems: list[str] = []
+        for issue in blocking:
+            metadata = issue.get("metadata") or {}
+            ecosystem = metadata.get("ecosystem")
+            if isinstance(ecosystem, str) and ecosystem and ecosystem not in ecosystems:
+                ecosystems.append(ecosystem)
+            for package in metadata.get("missing_packages") or []:
+                if isinstance(package, str) and package and package not in missing:
+                    missing.append(package)
+        if missing:
+            ecosystem_text = "/".join(ecosystems) if ecosystems else "runtime"
+            message = f"执行器报告运行环境依赖不足：缺乏 {ecosystem_text} 包/工具 {', '.join(missing)}。"
+        else:
+            first_message = next((issue.get("message") for issue in blocking if isinstance(issue.get("message"), str)), None)
+            message = first_message or "执行器报告运行环境依赖不足。"
+        return message, {"issues": blocking}
 
     def _set_run_progress_note(self, project_id: str, run_id: str, card_id: str, progress_note: str) -> None:
         lock = self.project_service.lock_for(project_id)
@@ -1339,19 +1630,45 @@ class WorkerService:
         try:
             self.project_service.git_service(project_id).commit(message)
         except Exception as exc:
-            if stage == "cleanup":
-                return
-            graph = self.project_service.graph_store(project_id).load_graph()
-            run = next((item for item in graph.runs if item.run_id == run_id), None)
-            if run is None:
-                return
-            self._append_event(
-                project_id,
-                run_id,
-                run.card_id,
-                event_type="git_commit_failed",
-                message=f"Git commit failed for {stage}: {exc}",
-            )
+            logger.exception("Git commit failed for project=%s run=%s stage=%s", project_id, run_id, stage)
+            self._mark_project_needs_git_repair(project_id, f"Git commit failed for {stage} on {run_id}: {exc}")
+            try:
+                graph = self.project_service.graph_store(project_id).load_graph()
+                run = next((item for item in graph.runs if item.run_id == run_id), None)
+                if run is None:
+                    return
+                self._append_event(
+                    project_id,
+                    run_id,
+                    run.card_id,
+                    event_type="git_commit_failed",
+                    message=f"Git commit failed for {stage}: {exc}",
+                )
+            except Exception:
+                logger.exception("Failed to persist git commit failure event for project=%s run=%s", project_id, run_id)
+
+    def _mark_project_needs_git_repair(self, project_id: str, reason: str) -> None:
+        root = self.project_service.project_path(project_id)
+        try:
+            store = self.project_service.graph_store(project_id)
+            graph = store.load_graph()
+            graph.metadata["needs_git_repair"] = {
+                "reason": reason,
+                "updated_at": utc_now(),
+            }
+            store.save_graph(graph)
+        except Exception:
+            logger.exception("Failed to mark project %s as needing git repair", project_id)
+            try:
+                atomic_write_json(
+                    root / "project_recovery_required.json",
+                    {
+                        "reason": f"{reason}; failed to update graph metadata",
+                        "created_at": utc_now(),
+                    },
+                )
+            except Exception:
+                logger.exception("Failed to write recovery marker for project=%s", project_id)
 
     def _reconcile_active_runs(self) -> None:
         for child in sorted(self.project_service.settings.data_root.iterdir()):
@@ -1364,7 +1681,18 @@ class WorkerService:
                 try:
                     cards = store.load_cards()
                     graph = store.load_graph()
-                except Exception:
+                except Exception as exc:
+                    logger.exception("Failed to reconcile project %s", project_id)
+                    try:
+                        atomic_write_json(
+                            child / "project_recovery_required.json",
+                            {
+                                "reason": f"Project failed to load during active-run reconcile: {exc}",
+                                "created_at": utc_now(),
+                            },
+                        )
+                    except Exception:
+                        logger.exception("Failed to write reconcile recovery marker for project=%s", project_id)
                     continue
                 card_map = {card.card_id: card for card in cards}
                 changed = False

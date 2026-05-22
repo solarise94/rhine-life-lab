@@ -1,0 +1,34 @@
+system_packages:
+  apt:
+    - bubblewrap
+    - python3-venv
+    - nodejs
+    - npm
+runtime_checks:
+  required_commands:
+    - bwrap
+    - python3
+    - npm
+  bubblewrap_smoke_test:
+    - bwrap
+    - --die-with-parent
+    - --ro-bind
+    - /usr
+    - /usr
+    - --ro-bind
+    - /bin
+    - /bin
+    - --ro-bind-try
+    - /lib
+    - /lib
+    - --ro-bind-try
+    - /lib64
+    - /lib64
+    - --proc
+    - /proc
+    - --dev
+    - /dev
+    - --tmpfs
+    - /tmp
+    - --
+    - /bin/true

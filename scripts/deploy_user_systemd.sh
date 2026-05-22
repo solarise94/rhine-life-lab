@@ -7,6 +7,59 @@ APP_ENV_DIR="${HOME}/.config/blueprint-re"
 
 mkdir -p "${SYSTEMD_USER_DIR}" "${APP_ENV_DIR}"
 
+install_runtime_dependencies() {
+  local missing_runtime=0
+  for command_name in bwrap python3 npm; do
+    if ! command -v "${command_name}" >/dev/null 2>&1; then
+      missing_runtime=1
+    fi
+  done
+  if ! python3 -m venv "${ROOT_DIR}/.venv/deploy-smoke" >/dev/null 2>&1; then
+    missing_runtime=1
+  fi
+  rm -rf "${ROOT_DIR}/.venv/deploy-smoke"
+  if [[ "${missing_runtime}" -eq 0 ]]; then
+    return
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    if [[ "$(id -u)" -eq 0 ]]; then
+      apt-get update
+      apt-get install -y bubblewrap python3-venv nodejs npm
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo apt-get update
+      sudo apt-get install -y bubblewrap python3-venv nodejs npm
+    else
+      echo "Missing runtime dependencies from deploy/runtime-dependencies.yml and sudo is unavailable." >&2
+      exit 1
+    fi
+  fi
+}
+
+check_runtime_dependencies() {
+  for command_name in bwrap python3 npm; do
+    if ! command -v "${command_name}" >/dev/null 2>&1; then
+      echo "Missing required runtime command: ${command_name}. See deploy/runtime-dependencies.yml." >&2
+      exit 1
+    fi
+  done
+  if ! bwrap \
+    --die-with-parent \
+    --ro-bind /usr /usr \
+    --ro-bind /bin /bin \
+    --ro-bind-try /lib /lib \
+    --ro-bind-try /lib64 /lib64 \
+    --proc /proc \
+    --dev /dev \
+    --tmpfs /tmp \
+    -- /bin/true; then
+    echo "bubblewrap smoke test failed. Fix host namespace/setuid support before deploying Blueprint executors." >&2
+    exit 1
+  fi
+}
+
+install_runtime_dependencies
+check_runtime_dependencies
+
 if [[ -f "${ROOT_DIR}/.env" ]]; then
   set -a
   # shellcheck disable=SC1091

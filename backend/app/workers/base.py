@@ -21,6 +21,7 @@ class WorkerLaunchSpec:
     cwd: Path
     environment: dict[str, str]
     permission_requests: list[PermissionRequest]
+    sandboxed: bool = False
 
 
 class WorkerAdapter:
@@ -54,3 +55,6 @@ class WorkerAdapter:
             "recommended_launch_examples": [],
             "notes": [],
         }
+
+    def uses_sandbox(self, settings: Any) -> bool:
+        return False

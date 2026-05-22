@@ -46,12 +46,17 @@ class PiWorkerAdapter(AgentCliWorkerAdapter):
             project_root=project_root,
             settings=settings,
         )
+        return spec
+
+    def extra_environment(self, *, packet: TaskPacket, settings: object) -> dict[str, str]:
+        environment = super().extra_environment(packet=packet, settings=settings)
         api_key = getattr(settings, "deepseek_api_key", None)
         if api_key:
-            spec.environment["BLUEPRINT_DEEPSEEK_API_KEY"] = api_key.get_secret_value()
-        spec.environment["BLUEPRINT_DEEPSEEK_API_BASE_URL"] = str(getattr(settings, "deepseek_api_base_url", ""))
-        spec.environment["BLUEPRINT_MANAGER_MODEL"] = str(getattr(settings, "manager_model", "deepseek-v4-pro"))
-        spec.environment["BLUEPRINT_MANAGER_TEMPERATURE"] = str(getattr(settings, "manager_temperature", 0.2))
-        spec.environment["BLUEPRINT_MANAGER_MAX_TOKENS"] = str(getattr(settings, "manager_max_tokens", 2400))
-        spec.environment["BLUEPRINT_MANAGER_TIMEOUT_SECONDS"] = str(getattr(settings, "manager_timeout_seconds", 600))
-        return spec
+            environment["BLUEPRINT_DEEPSEEK_API_KEY"] = api_key.get_secret_value()
+        environment["BLUEPRINT_DEEPSEEK_API_BASE_URL"] = str(getattr(settings, "deepseek_api_base_url", ""))
+        environment["BLUEPRINT_PI_DEEPSEEK_BASE_URL"] = str(getattr(settings, "pi_deepseek_base_url", "https://api.deepseek.com"))
+        environment["BLUEPRINT_MANAGER_MODEL"] = str(getattr(settings, "manager_model", "deepseek-v4-pro"))
+        environment["BLUEPRINT_MANAGER_TEMPERATURE"] = str(getattr(settings, "manager_temperature", 0.2))
+        environment["BLUEPRINT_MANAGER_MAX_TOKENS"] = str(getattr(settings, "manager_max_tokens", 2400))
+        environment["BLUEPRINT_MANAGER_TIMEOUT_SECONDS"] = str(getattr(settings, "manager_timeout_seconds", 600))
+        return environment

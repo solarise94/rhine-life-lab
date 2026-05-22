@@ -105,6 +105,8 @@ class ManifestService:
         project_id: str,
         run_id: str,
         before_snapshot: dict[str, dict[str, int]],
+        *,
+        sandboxed: bool = False,
     ) -> tuple[bool, list[str], list[dict[str, str]]]:
         packet = self.load_task_packet(project_id, run_id)
         after_snapshot = self.capture_filesystem_snapshot(project_id)
@@ -128,6 +130,8 @@ class ManifestService:
                 continue
             if self._is_backend_managed_run_file(relative, run_id):
                 continue
+            if sandboxed:
+                continue
             if not relative.startswith(allowed_prefixes):
                 violations.append(f"Worker {change_type} path outside allowed_paths: {relative}")
 
@@ -140,9 +144,17 @@ class ManifestService:
     @staticmethod
     def _is_backend_managed_run_file(relative: str, run_id: str) -> bool:
         return relative in {
+            f"runs/{run_id}/.Rprofile",
+            f"runs/{run_id}/adapter_contract.json",
+            f"runs/{run_id}/commands.log",
             f"runs/{run_id}/events.json",
+            f"runs/{run_id}/executor_brief.md",
+            f"runs/{run_id}/executor_prompt.md",
             f"runs/{run_id}/filesystem_audit.json",
+            f"runs/{run_id}/manager_brief.json",
             f"runs/{run_id}/runtime_approvals.json",
+            f"runs/{run_id}/task_packet.json",
+            f"runs/{run_id}/transcript.md",
             f"runs/{run_id}/review_context.json",
             f"runs/{run_id}/executor_validation.json",
         }
@@ -151,36 +163,45 @@ class ManifestService:
         manifest = self.load_manifest(project_id, run_id)
         valid, errors = self.validate_manifest(project_id, run_id)
         root = self.project_service.project_path(project_id)
+        validation_errors = list(errors)
         created_assets = []
         for asset in manifest.created_assets:
             try:
                 path = resolve_within(root, asset.path)
-            except ValueError:
+            except ValueError as exc:
+                validation_errors.append(f"Invalid created asset path in review context: {asset.path}: {exc}")
                 continue
+            exists = path.exists()
+            is_file = path.is_file()
             created_assets.append(
                 {
                     "role": asset.role,
                     "type": asset.type,
                     "path": asset.path,
                     "description": asset.description,
-                    "exists": path.exists(),
-                    "sha256": sha256_file(path) if path.exists() else None,
-                    "size_bytes": path.stat().st_size if path.exists() else None,
+                    "exists": exists,
+                    "sha256": sha256_file(path) if exists and is_file else None,
+                    "size_bytes": path.stat().st_size if exists and is_file else None,
+                    "is_file": is_file,
                 }
             )
         code_artifacts = []
         for artifact in manifest.code_artifacts:
             try:
                 path = resolve_within(root, artifact.path)
-            except ValueError:
+            except ValueError as exc:
+                validation_errors.append(f"Invalid code artifact path in review context: {artifact.path}: {exc}")
                 continue
+            exists = path.exists()
+            is_file = path.is_file()
             code_artifacts.append(
                 {
                     "path": artifact.path,
                     "language": artifact.language,
                     "purpose": artifact.purpose,
-                    "exists": path.exists(),
-                    "sha256": sha256_file(path) if path.exists() else None,
+                    "exists": exists,
+                    "sha256": sha256_file(path) if exists and is_file else None,
+                    "is_file": is_file,
                 }
             )
         validation_payload = read_json(root / "runs" / run_id / "executor_validation.json", None)
@@ -200,7 +221,7 @@ class ManifestService:
             metrics=manifest.metrics,
             key_findings=manifest.key_findings,
             warnings=manifest.warnings,
-            validation_errors=[] if valid else errors,
+            validation_errors=[] if valid and not validation_errors else validation_errors,
             executor_validation=executor_validation,
         )
         atomic_write_json(root / "runs" / run_id / "review_context.json", context.model_dump())

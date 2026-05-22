@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -31,6 +32,7 @@ from app.workers.registry import build_worker_registry
 
 
 PROJECT_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+logger = logging.getLogger(__name__)
 
 
 class ProjectService:
@@ -72,9 +74,37 @@ class ProjectService:
             try:
                 snapshot = self.get_project_snapshot(child.name)
                 projects.append(snapshot["summary"])
-            except Exception:
-                continue
+            except Exception as exc:
+                logger.exception("Failed to load project summary for %s", child.name)
+                self._write_project_recovery_marker(child, f"Project failed to load during list_projects: {exc}")
+                now = utc_now()
+                projects.append(
+                    ProjectSummary(
+                        project_id=child.name,
+                        name=f"{child.name} (corrupted)",
+                        status="error",
+                        schema_version=self.settings.schema_version,
+                        current_goal=f"Project failed to load: {exc}",
+                        created_at=now,
+                        updated_at=now,
+                        card_counts={"corrupted": 1},
+                        result_counts={},
+                    )
+                )
         return projects
+
+    @staticmethod
+    def _write_project_recovery_marker(root: Path, reason: str) -> None:
+        try:
+            atomic_write_json(
+                root / "project_recovery_required.json",
+                {
+                    "reason": reason,
+                    "created_at": utc_now(),
+                },
+            )
+        except Exception:
+            logger.exception("Failed to write project recovery marker for %s", root)
 
     def create_project(
         self,
@@ -212,6 +242,7 @@ class ProjectService:
                 card_type="module",
                 title="差异表达分析",
                 status="accepted",
+                step=1,
                 summary="已完成 Treatment vs Control 的差异表达分析。",
                 why="用于识别主要差异基因并作为下游分析输入。",
                 inputs=[
@@ -234,6 +265,7 @@ class ProjectService:
                 card_type="module_group",
                 title="功能富集分析",
                 status="planned",
+                step=2,
                 aggregate_status="partially_planned",
                 summary="基于差异表达结果进行 GSEA 和 KEGG 分析。",
                 why="用于解释差异基因涉及的生物学通路。",
@@ -252,6 +284,7 @@ class ProjectService:
                 card_type="module",
                 title="免疫浸润分析",
                 status="proposed",
+                step=2,
                 summary="客户提出增加免疫浸润分析模块。",
                 why="用于解释免疫相关微环境变化。",
                 inputs=[CardAssetRef(label="差异表达结果", asset_id="deg_table_v1")],
@@ -365,6 +398,7 @@ class ProjectService:
             "proposals": store.load_proposals(),
             "git_log": self.git_service(project_id).log(),
             "worker_capabilities": self._worker_capabilities(),
+            "python_runtimes": self._python_runtimes(),
         }
 
     @staticmethod
@@ -378,6 +412,46 @@ class ProjectService:
     def _worker_capabilities(self) -> list[dict]:
         registry = build_worker_registry()
         return [adapter.capability_metadata(self.settings) for adapter in registry.values()]
+
+    def _python_runtimes(self) -> list[dict]:
+        runtimes: list[dict] = [{"name": "__system__", "label": "System Python", "path": None, "manager": "system", "exists": True}]
+        seen = {"__system__"}
+        for manager, base in (
+            ("miniforge", Path("/home/solarise/miniforge3")),
+            ("miniconda", Path("/home/solarise/miniconda3")),
+        ):
+            if not base.exists():
+                continue
+            base_python = base / "bin" / "python"
+            if base_python.exists() and f"{manager}:base" not in seen:
+                runtimes.append(
+                    {
+                        "name": "base",
+                        "label": f"{manager}: base",
+                        "path": str(base),
+                        "manager": manager,
+                        "exists": True,
+                    }
+                )
+                seen.add(f"{manager}:base")
+            envs_root = base / "envs"
+            if not envs_root.exists():
+                continue
+            for env_dir in sorted(path for path in envs_root.iterdir() if path.is_dir()):
+                python_bin = env_dir / "bin" / "python"
+                if not python_bin.exists() or env_dir.name in seen:
+                    continue
+                runtimes.append(
+                    {
+                        "name": env_dir.name,
+                        "label": f"{env_dir.name} ({manager})",
+                        "path": str(env_dir),
+                        "manager": manager,
+                        "exists": True,
+                    }
+                )
+                seen.add(env_dir.name)
+        return runtimes
 
     @staticmethod
     def _validate_project_id(project_id: str) -> None:

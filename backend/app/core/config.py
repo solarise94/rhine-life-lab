@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     artifact_size_threshold_mb: int = 50
     deepseek_api_base_url: str = "https://api.deepseek.com/anthropic"
     deepseek_api_key: SecretStr | None = None
+    pi_deepseek_base_url: str = "https://api.deepseek.com"
     manager_model: str = "deepseek-v4-pro"
     manager_backend: str = "pi"
     manager_temperature: float = 0.2
@@ -27,6 +28,11 @@ class Settings(BaseSettings):
     internal_tool_token: SecretStr | None = None
     default_worker_type: str = "pi"
     worker_timeout_seconds: int = 900
+    executor_sandbox_mode: str = "bwrap"
+    executor_max_concurrent_runs: int = 3
+    executor_conda_base: Path = Path("/home/solarise/miniconda3")
+    executor_host_root_readonly: bool = True
+    executor_extra_ro_binds: str = Field(default_factory=lambda: f"{Path.home()}/.nvm,{Path.home()}/.local")
     opencode_command: str | None = None
     pi_command: str | None = None
     claude_code_command: str | None = None

@@ -105,17 +105,30 @@ def _run_rna_prep(packet: TaskPacket, project_root: Path, run_dir: Path) -> int:
         rows = list(reader)
 
     filtered_rows = []
+    invalid_count_values: list[tuple[str, str, str]] = []
     for row in rows:
         passing_samples = 0
         for sample in sample_columns:
+            raw_value = row.get(sample, "0")
             try:
-                value = float(row.get(sample, "0") or "0")
+                value = float(raw_value or "0")
             except ValueError:
-                value = 0
+                gene_id = row.get("Geneid") or row.get("gene_name") or "<unknown>"
+                invalid_count_values.append((gene_id, sample, str(raw_value)))
+                continue
             if value >= 10:
                 passing_samples += 1
         if passing_samples >= 3:
             filtered_rows.append(row)
+
+    if invalid_count_values:
+        preview = "; ".join(
+            f"{gene}/{sample}={value}" for gene, sample, value in invalid_count_values[:10]
+        )
+        suffix = "" if len(invalid_count_values) <= 10 else f"; ... {len(invalid_count_values) - 10} more"
+        raise ValueError(
+            f"Count matrix contains non-numeric count values: {preview}{suffix}"
+        )
 
     filtered_counts_rel = _expected_path(packet, "rna_prep_filtered_counts", "rna_prep_filtered_counts.tsv")
     sample_meta_rel = _expected_path(packet, "rna_prep_sample_meta", "rna_prep_sample_meta.tsv")

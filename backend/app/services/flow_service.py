@@ -63,7 +63,7 @@ class FlowService:
                     "title": card.title,
                     "status": card.status,
                     "card_type": card.card_type,
-                    "step": timeline["card_steps"].get(card.card_id, card.step or 1),
+                    "step": card.step or 1,
                     "required_asset_ids": required_asset_ids,
                     "produced_asset_ids": timeline["produced_assets_by_card"].get(card.card_id, []),
                     "depends_on_card_ids": dependency_ids,

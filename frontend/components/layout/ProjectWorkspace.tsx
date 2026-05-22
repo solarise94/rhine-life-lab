@@ -30,7 +30,7 @@ import {
 import { queryKeys } from "@/lib/query-keys";
 import { useReportViewStore } from "@/lib/stores/report-view-store";
 import { useResultsViewStore } from "@/lib/stores/results-view-store";
-import { EMPTY_SELECTED_WORKER_BY_CARD, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
+import { EMPTY_SELECTED_RUNTIME_BY_CARD, EMPTY_SELECTED_WORKER_BY_CARD, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 import { Card, RunEvent } from "@/lib/types";
 import { SideNav } from "./SideNav";
 import { ProjectHeader } from "./ProjectHeader";
@@ -61,14 +61,23 @@ const AdvancedPanels = dynamic(
 
 type View = "tasks" | "results" | "files" | "report" | "advanced";
 
+function formatPythonRuntime(runtime?: string) {
+  if (!runtime || runtime === "__system__") return "system";
+  return runtime;
+}
+
 export function ProjectWorkspace({ projectId, view }: { projectId: string; view: View }) {
   const queryClient = useQueryClient();
   const selectedCardId = useWorkspaceUiStore((s) => s.selectedCardByProject[projectId]);
   const selectedWorkerByProject = useWorkspaceUiStore((s) => s.selectedWorkerByProject[projectId] ?? EMPTY_SELECTED_WORKER_BY_CARD);
+  const globalPythonRuntime = useWorkspaceUiStore((s) => s.globalPythonRuntimeByProject[projectId]);
+  const selectedPythonRuntimeByProject = useWorkspaceUiStore((s) => s.selectedPythonRuntimeByProject[projectId] ?? EMPTY_SELECTED_RUNTIME_BY_CARD);
   const currentChatSessionId = useWorkspaceUiStore((s) => s.currentChatSessionIdByProject[projectId] ?? null);
   const notice = useWorkspaceUiStore((s) => s.noticesByProject[projectId] ?? null);
   const setSelectedCard = useWorkspaceUiStore((s) => s.setSelectedCard);
   const setSelectedWorker = useWorkspaceUiStore((s) => s.setSelectedWorker);
+  const setGlobalPythonRuntime = useWorkspaceUiStore((s) => s.setGlobalPythonRuntime);
+  const setSelectedPythonRuntime = useWorkspaceUiStore((s) => s.setSelectedPythonRuntime);
   const setNotice = useWorkspaceUiStore((s) => s.setNotice);
   const mobileTab = useWorkspaceUiStore((s) => s.mobileTabByProject[projectId] ?? "chat");
   const setMobileTab = useWorkspaceUiStore((s) => s.setMobileTab);
@@ -120,6 +129,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const selectedWorkerType = selectedCard
     ? selectedWorkerByProject[selectedCard.card_id] ?? selectedRun?.worker_type ?? configuredWorkers[0]?.worker_type
     : configuredWorkers[0]?.worker_type;
+  const selectedPythonRuntime = selectedCard ? selectedPythonRuntimeByProject[selectedCard.card_id] : undefined;
   const allResultAssets = useMemo(
     () => (resultsQuery.data ? [...resultsQuery.data.accepted, ...resultsQuery.data.candidate, ...resultsQuery.data.other] : []),
     [resultsQuery.data],
@@ -195,8 +205,9 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     setNotice(projectId, null);
     setSelectedCard(projectId, card.card_id);
     const workerType = selectedWorkerByProject[card.card_id] ?? configuredWorkers[0]?.worker_type;
+    const pythonRuntime = selectedPythonRuntimeByProject[card.card_id] ?? globalPythonRuntime ?? "__system__";
     try {
-      const response = await startRunMutation.mutateAsync({ cardId: card.card_id, workerType });
+      const response = await startRunMutation.mutateAsync({ cardId: card.card_id, workerType, pythonRuntime });
       if (response.latest_event) {
         queryClient.setQueryData(queryKeys.runEvents(projectId, response.run_id), { items: [response.latest_event] });
       }
@@ -268,8 +279,9 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     if (!selectedCard) return;
     setNotice(projectId, null);
     const workerType = selectedWorkerByProject[selectedCard.card_id] ?? configuredWorkers[0]?.worker_type;
+    const pythonRuntime = selectedPythonRuntimeByProject[selectedCard.card_id] ?? globalPythonRuntime ?? "__system__";
     try {
-      const response = await rerunCardMutation.mutateAsync({ cardId: selectedCard.card_id, workerType });
+      const response = await rerunCardMutation.mutateAsync({ cardId: selectedCard.card_id, workerType, pythonRuntime });
       if (response.latest_event) {
         queryClient.setQueryData(queryKeys.runEvents(projectId, response.run_id), { items: [response.latest_event] });
       }
@@ -361,6 +373,18 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
         latestEvent={runEventsQuery.data?.items?.at(-1)}
         workerCapabilities={snapshot.worker_capabilities}
         selectedWorkerType={selectedWorkerType}
+        pythonRuntimes={snapshot.python_runtimes ?? []}
+        globalPythonRuntime={globalPythonRuntime}
+        selectedPythonRuntime={selectedPythonRuntime}
+        onSelectGlobalPythonRuntime={(runtime) => {
+          setGlobalPythonRuntime(projectId, runtime);
+          setNotice(projectId, `全局 Python runtime: ${formatPythonRuntime(runtime)}。`);
+        }}
+        onSelectPythonRuntime={(runtime) => {
+          if (!selectedCard) return;
+          setSelectedPythonRuntime(projectId, selectedCard.card_id, runtime);
+          setNotice(projectId, `Card ${selectedCard.card_id} Python runtime: ${runtime ? formatPythonRuntime(runtime) : "follow global"}。`);
+        }}
         onSelectWorker={(workerType) => {
           if (!selectedCard) return;
           setSelectedWorker(projectId, selectedCard.card_id, workerType);
@@ -462,6 +486,18 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 summary={snapshot.summary}
                 workerCapabilities={snapshot.worker_capabilities}
                 selectedWorkerType={selectedWorkerType}
+                pythonRuntimes={snapshot.python_runtimes ?? []}
+                globalPythonRuntime={globalPythonRuntime}
+                selectedPythonRuntime={selectedPythonRuntime}
+                onSelectGlobalPythonRuntime={(runtime) => {
+                  setGlobalPythonRuntime(projectId, runtime);
+                  setNotice(projectId, `全局 Python runtime: ${formatPythonRuntime(runtime)}。`);
+                }}
+                onSelectPythonRuntime={(runtime) => {
+                  if (!selectedCard) return;
+                  setSelectedPythonRuntime(projectId, selectedCard.card_id, runtime);
+                  setNotice(projectId, `Card ${selectedCard.card_id} Python runtime: ${runtime ? formatPythonRuntime(runtime) : "follow global"}。`);
+                }}
                 onSelectWorker={(workerType) => {
                   if (!selectedCard) return;
                   setSelectedWorker(projectId, selectedCard.card_id, workerType);
@@ -559,6 +595,18 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     summary={snapshot.summary}
                     workerCapabilities={snapshot.worker_capabilities}
                     selectedWorkerType={selectedWorkerType}
+                    pythonRuntimes={snapshot.python_runtimes ?? []}
+                    globalPythonRuntime={globalPythonRuntime}
+                    selectedPythonRuntime={selectedPythonRuntime}
+                    onSelectGlobalPythonRuntime={(runtime) => {
+                      setGlobalPythonRuntime(projectId, runtime);
+                      setNotice(projectId, `全局 Python runtime: ${formatPythonRuntime(runtime)}。`);
+                    }}
+                    onSelectPythonRuntime={(runtime) => {
+                      if (!selectedCard) return;
+                      setSelectedPythonRuntime(projectId, selectedCard.card_id, runtime);
+                      setNotice(projectId, `Card ${selectedCard.card_id} Python runtime: ${runtime ? formatPythonRuntime(runtime) : "follow global"}。`);
+                    }}
                     onSelectWorker={(workerType) => {
                       if (!selectedCard) return;
                       setSelectedWorker(projectId, selectedCard.card_id, workerType);

@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
+import logging
 from threading import Lock
+import traceback
 from uuid import uuid4
 
 from app.models.chat import ChatRequest, ChatResponse
 
 
 ChatJobStatus = str
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,9 +51,10 @@ class ChatJobService:
         try:
             response = handler(job.project_id, job.request)
         except Exception as exc:
+            logger.exception("Chat job failed: %s", job_id)
             with self.lock:
                 job.status = "failed"
-                job.error = str(exc)
+                job.error = "".join(traceback.format_exception(exc))
             return
         with self.lock:
             job.status = "succeeded"

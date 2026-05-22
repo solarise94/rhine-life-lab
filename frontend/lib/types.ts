@@ -22,6 +22,7 @@ export interface Card {
   card_type: string;
   title: string;
   status: CardStatus;
+  step?: number | null;
   aggregate_status?: string | null;
   summary: string;
   why: string;
@@ -188,6 +189,8 @@ export interface ExecutionFileEntry {
     | "manager_brief"
     | "review_context"
     | "transcript"
+    | "agent_trace"
+    | "agent_output_timeline"
     | "generated_script"
     | string;
   run_id?: string | null;
@@ -242,6 +245,14 @@ export interface WorkerCapability {
   notes: string[];
 }
 
+export interface PythonRuntime {
+  name: string;
+  label: string;
+  path?: string | null;
+  manager: string;
+  exists: boolean;
+}
+
 export interface CreateProjectPayload {
   project_id: string;
   name: string;
@@ -263,6 +274,7 @@ export interface ProjectSnapshot {
   proposals: Proposal[];
   git_log: Array<{ hash: string; date: string; subject: string }>;
   worker_capabilities?: WorkerCapability[];
+  python_runtimes?: PythonRuntime[];
 }
 
 export interface RunRecord {

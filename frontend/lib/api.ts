@@ -287,10 +287,10 @@ export const api = {
   rejectProposal(projectId: string, proposalId: string) {
     return request<{ proposal: Proposal }>(`/projects/${projectId}/proposals/${proposalId}/reject`, { method: "POST" });
   },
-  startRun(projectId: string, cardId: string, workerType?: string) {
+  startRun(projectId: string, cardId: string, workerType?: string, pythonRuntime?: string) {
     return request<StartRunResponse>(`/projects/${projectId}/cards/${cardId}/start-run`, {
       method: "POST",
-      body: JSON.stringify({ worker_type: workerType ?? null }),
+      body: JSON.stringify({ worker_type: workerType ?? null, python_runtime: pythonRuntime ?? null }),
     });
   },
   resetCardRunState(projectId: string, cardId: string) {
@@ -298,10 +298,10 @@ export const api = {
       method: "POST",
     });
   },
-  rerunCard(projectId: string, cardId: string, workerType?: string) {
+  rerunCard(projectId: string, cardId: string, workerType?: string, pythonRuntime?: string) {
     return request<StartRunResponse>(`/projects/${projectId}/cards/${cardId}/rerun`, {
       method: "POST",
-      body: JSON.stringify({ worker_type: workerType ?? null }),
+      body: JSON.stringify({ worker_type: workerType ?? null, python_runtime: pythonRuntime ?? null }),
     });
   },
   getRunEvents(projectId: string, runId: string) {

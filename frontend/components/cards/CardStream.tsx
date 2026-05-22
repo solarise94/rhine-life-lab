@@ -42,38 +42,29 @@ export function CardStream({
     () => moduleCards.filter((card) => card.status !== "cancelled" && card.status !== "rejected"),
     [moduleCards],
   );
-  const cardById = useMemo(() => new Map(activeCards.map((card) => [card.card_id, card])), [activeCards]);
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [rowWidths, setRowWidths] = useState<Record<string, number>>({});
   const [archiveOpen, setArchiveOpen] = useState(true);
 
   const orderedRows = useMemo(() => {
-    const seen = new Set<string>();
-    const rows =
-      workOrder?.parallel_batches
-        .map((batch) => {
-          const rowCards = batch.card_ids
-            .map((cardId) => cardById.get(cardId))
-            .filter((card): card is Card => Boolean(card));
-          rowCards.forEach((card) => seen.add(card.card_id));
-          return {
-            id: `batch-${batch.batch_index}`,
-            label: `Step ${batch.batch_index + 1}`,
-            cards: rowCards,
-          };
-        })
-        .filter((row) => row.cards.length) ?? [];
-
-    const unscheduled = activeCards.filter((card) => !seen.has(card.card_id));
-    if (unscheduled.length) {
-      rows.push({
-        id: "unscheduled",
-        label: rows.length ? "Pending / detached" : "Step 1",
-        cards: unscheduled,
-      });
+    const workItemStepByCard = new Map(
+      workOrder?.work_items.map((item) => [item.card_id, item.step ?? 1]) ?? [],
+    );
+    const rowsByStep = new Map<number, Card[]>();
+    for (const card of activeCards) {
+      const step = card.step ?? workItemStepByCard.get(card.card_id) ?? 1;
+      const row = rowsByStep.get(step) ?? [];
+      row.push(card);
+      rowsByStep.set(step, row);
     }
-    return rows;
-  }, [activeCards, cardById, workOrder]);
+    return Array.from(rowsByStep.entries())
+      .sort(([leftStep], [rightStep]) => leftStep - rightStep)
+      .map(([step, rowCards]) => ({
+        id: `step-${step}`,
+        label: `Step ${step}`,
+        cards: rowCards,
+      }));
+  }, [activeCards, workOrder]);
 
   useEffect(() => {
     const observers: ResizeObserver[] = [];

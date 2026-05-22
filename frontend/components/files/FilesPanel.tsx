@@ -14,6 +14,8 @@ const EXECUTION_CATEGORY_LABELS: Record<string, string> = {
   manifest: "Manifest",
   review_context: "Review Context",
   transcript: "Transcript",
+  agent_trace: "Agent Trace",
+  agent_output_timeline: "Agent Output Timeline",
   generated_script: "Generated Script",
 };
 

@@ -63,6 +63,13 @@ class AgentCliWorkerAdapter(CommandTemplateWorkerAdapter):
             project_root=project_root,
             settings=settings,
         )
-        spec.environment["BLUEPRINT_AGENT_PROVIDER"] = self.provider
-        spec.environment["BLUEPRINT_AGENT_LAUNCH_TEMPLATE"] = launch_template
         return spec
+
+    def extra_environment(self, *, packet: TaskPacket, settings: object) -> dict[str, str]:
+        launch_template = self.resolve_launch_template(settings)
+        if not launch_template:
+            return {}
+        return {
+            "BLUEPRINT_AGENT_PROVIDER": self.provider,
+            "BLUEPRINT_AGENT_LAUNCH_TEMPLATE": launch_template,
+        }

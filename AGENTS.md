@@ -46,6 +46,15 @@ PYTHONPATH=backend .venv/backend/bin/python -m unittest discover -s backend/test
 
 There is no frontend test suite configured yet; after UI changes, run `cd frontend && npm run build` to catch type and build regressions.
 
+## Executor Runtime Notes
+Executor soft sandboxing is a required deployment dependency when `BLUEPRINT_EXECUTOR_SANDBOX_MODE=bwrap`.
+
+`bwrap` is available in the real host environment for this project. A direct smoke test from Codex's default tool sandbox can incorrectly fail with `No permissions to create new namespace`; that indicates the outer Codex tool sandbox blocked namespace creation, not that the host lacks bubblewrap support. When validating bubblewrap behavior, run the actual `bwrap` smoke test in the approved real execution context. Do not change the implementation to silently fall back to unsandboxed execution, and do not run `sudo codex`.
+
+The executor bwrap profile intentionally keeps host networking enabled but uses `--clearenv`; required runtime env must be added explicitly to `command_worker.py` so it appears in `sandbox_plan.json`. Keep tool state such as `HOME`, `XDG_*`, and `PI_CODING_AGENT_*` inside the current `runs/<run_id>/` directory. Do not write new secrets into `commands.log`; command logging must redact key/token/password style arguments.
+
+Runtime dependencies are declared in `deploy/runtime-dependencies.yml`, and `scripts/deploy_user_systemd.sh` must fail deployment if the bubblewrap smoke test fails in the real deployment environment.
+
 ## Commit & Pull Request Guidelines
 Recent commits use short, imperative subjects such as `Add runtime approval flow for executors` and `Clarify module group aggregate status`. Keep commit titles concise, capitalized, and focused on one change.
 

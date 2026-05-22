@@ -71,6 +71,8 @@ class ProjectFileService:
                     ("manager_brief.json", "manager_brief"),
                     ("review_context.json", "review_context"),
                     ("transcript.md", "transcript"),
+                    ("agent_trace.json", "agent_trace"),
+                    ("agent_output_timeline.jsonl", "agent_output_timeline"),
                 ):
                     path = run_dir / filename
                     if path.exists():

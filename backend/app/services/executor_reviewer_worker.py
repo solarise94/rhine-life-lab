@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from http import client
 from pathlib import Path
+from posixpath import normpath
 import py_compile
 import re
 from typing import Any
@@ -411,21 +412,72 @@ class ExecutorReviewerWorker:
             raise ValueError(f"Reviewer is not allowed to inspect path: {relative_path}")
         return resolve_within(root, relative_path)
 
-    @staticmethod
-    def _allowed_review_files(packet: TaskPacket, manifest: Manifest) -> list[str]:
+    @classmethod
+    def _allowed_review_files(cls, packet: TaskPacket, manifest: Manifest) -> list[str]:
         files = {
             f"runs/{packet.task_id}/task_packet.json",
             f"runs/{packet.task_id}/manifest.json",
             f"runs/{packet.task_id}/adapter_contract.json",
-            f"runs/{packet.task_id}/executor_brief.md",
-            f"runs/{packet.task_id}/executor_prompt.md",
             f"runs/{packet.task_id}/manager_brief.json",
             f"runs/{packet.task_id}/commands.log",
+            f"runs/{packet.task_id}/transcript.md",
+            f"runs/{packet.task_id}/filesystem_audit.json",
+            f"runs/{packet.task_id}/sandbox_plan.json",
         }
-        files.update(item.path for item in packet.input_assets)
-        files.update(item.path for item in manifest.created_assets)
-        files.update(item.path for item in manifest.code_artifacts)
+        files.update(path for path in (cls._clean_relative_path(item.path) for item in packet.input_assets) if path)
+        files.update(
+            path
+            for path in (cls._allowed_created_asset_path(packet, item.role, item.type, item.path) for item in manifest.created_assets)
+            if path
+        )
+        files.update(
+            path
+            for path in (cls._allowed_code_artifact_path(packet, item.path) for item in manifest.code_artifacts)
+            if path
+        )
         return sorted(files)
+
+    @staticmethod
+    def _clean_relative_path(path: str) -> str | None:
+        value = path.strip().replace("\\", "/")
+        if not value or value.startswith("/"):
+            return None
+        normalized = normpath(value)
+        if normalized in {"", "."} or normalized.startswith("../") or normalized == "..":
+            return None
+        return normalized
+
+    @classmethod
+    def _allowed_created_asset_path(cls, packet: TaskPacket, role: str, asset_type: str, path: str) -> str | None:
+        normalized = cls._clean_relative_path(path)
+        if normalized is None:
+            return None
+        expected = next((item for item in packet.expected_outputs if item.role == role), None)
+        if expected is None or expected.type != asset_type:
+            return None
+        expected_path = cls._clean_relative_path(expected.path_hint)
+        if expected_path and normalized == expected_path:
+            return normalized
+        allowed_prefixes = tuple(prefix for prefix in (cls._clean_allowed_prefix(item) for item in packet.allowed_paths) if prefix)
+        if allowed_prefixes and normalized.startswith(allowed_prefixes):
+            return normalized
+        return None
+
+    @classmethod
+    def _allowed_code_artifact_path(cls, packet: TaskPacket, path: str) -> str | None:
+        normalized = cls._clean_relative_path(path)
+        if normalized is None:
+            return None
+        if normalized.startswith((f"scripts/generated/{packet.task_id}/", f"runs/{packet.task_id}/")):
+            return normalized
+        return None
+
+    @classmethod
+    def _clean_allowed_prefix(cls, path: str) -> str | None:
+        normalized = cls._clean_relative_path(path)
+        if normalized is None:
+            return None
+        return normalized if normalized.endswith("/") else f"{normalized}/"
 
     def _initial_context(
         self,

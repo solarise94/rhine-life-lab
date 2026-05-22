@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import json
+import logging
 import socket
 from collections.abc import Iterator
 from collections import deque
@@ -19,6 +20,9 @@ from app.services.manager_tools import ManagerToolLayer
 from app.services.patch_validator import PatchValidator
 from app.services.project_service import ProjectService
 from app.services.utils import utc_now
+
+
+logger = logging.getLogger(__name__)
 
 
 class ManagerService:
@@ -278,7 +282,7 @@ class ManagerService:
             try:
                 upstream.fp.raw._fp.fp.raw._sock.settimeout(timeout_seconds)
             except AttributeError:
-                return
+                logger.warning("Unable to set upstream read timeout on manager streaming response.")
 
     @staticmethod
     def _materialize_proposal(draft: ManagerPlanDraft, proposal_id: str | None = None) -> tuple[Proposal, GraphPatch]:
