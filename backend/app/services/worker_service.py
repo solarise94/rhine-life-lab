@@ -131,8 +131,16 @@ class WorkerService:
         self._execution_locks_guard = Lock()
         self._reconcile_active_runs()
 
-    def start_run(self, project_id: str, card_id: str, worker_type: str | None = None, python_runtime: str | None = None) -> dict:
+    def start_run(
+        self,
+        project_id: str,
+        card_id: str,
+        worker_type: str | None = None,
+        python_runtime: str | None = None,
+        r_runtime: str | None = None,
+    ) -> dict:
         python_runtime = self._normalize_python_runtime(python_runtime)
+        r_runtime = self._normalize_r_runtime(r_runtime)
         resolved_worker_type = self._resolve_worker_type(worker_type)
         adapter = self.registry.get(resolved_worker_type)
         if adapter is None:
@@ -153,6 +161,7 @@ class WorkerService:
                 execution_guard,
                 guard_kind,
                 python_runtime=python_runtime,
+                r_runtime=r_runtime,
             )
         except Exception:
             self._release_execution_guard(execution_guard, guard_kind)
@@ -167,6 +176,7 @@ class WorkerService:
         execution_guard: Lock | Semaphore,
         guard_kind: str,
         python_runtime: str | None = None,
+        r_runtime: str | None = None,
     ) -> dict:
         lock = self.project_service.lock_for(project_id)
         with lock:
@@ -189,7 +199,15 @@ class WorkerService:
             run_id = self._new_run_id(graph.runs)
             run_dir = self.project_service.project_path(project_id) / "runs" / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
-            packet = self._task_packet(project_id, run_id, card, graph.assets, resolved_worker_type, python_runtime=python_runtime)
+            packet = self._task_packet(
+                project_id,
+                run_id,
+                card,
+                graph.assets,
+                resolved_worker_type,
+                python_runtime=python_runtime,
+                r_runtime=r_runtime,
+            )
             atomic_write_json(run_dir / "task_packet.json", packet.model_dump())
             try:
                 launch_spec = adapter.build_launch_spec(
@@ -503,8 +521,16 @@ class WorkerService:
             store.save_cards(cards)
         return {"card_id": card_id, "status": "planned"}
 
-    def rerun_card(self, project_id: str, card_id: str, worker_type: str | None = None, python_runtime: str | None = None) -> dict:
+    def rerun_card(
+        self,
+        project_id: str,
+        card_id: str,
+        worker_type: str | None = None,
+        python_runtime: str | None = None,
+        r_runtime: str | None = None,
+    ) -> dict:
         python_runtime = self._normalize_python_runtime(python_runtime)
+        r_runtime = self._normalize_r_runtime(r_runtime)
         old_execution_run_ids: list[str] = []
         lock = self.project_service.lock_for(project_id)
         with lock:
@@ -535,7 +561,7 @@ class WorkerService:
                 store.save_graph(graph)
                 store.save_cards(cards)
         self._cleanup_execution_files_for_runs(project_id, old_execution_run_ids)
-        return self.start_run(project_id, card_id, worker_type=worker_type, python_runtime=python_runtime)
+        return self.start_run(project_id, card_id, worker_type=worker_type, python_runtime=python_runtime, r_runtime=r_runtime)
 
     def review_run(self, project_id: str, run_id: str, accept: bool = True) -> dict:
         valid, errors = self.manifest_service.validate_manifest(project_id, run_id)
@@ -1111,6 +1137,7 @@ class WorkerService:
         assets: list[Asset],
         worker_type: str,
         python_runtime: str | None = None,
+        r_runtime: str | None = None,
     ) -> TaskPacket:
         asset_map = {asset.asset_id: asset for asset in assets}
         input_asset_ids = list(dict.fromkeys([item.asset_id for item in card.inputs if item.asset_id]))
@@ -1227,7 +1254,7 @@ class WorkerService:
                 run_dir=f"runs/{run_id}",
                 result_dir=result_dir,
             ),
-            executor_context=self._build_executor_context(project_id, card, worker_type, python_runtime=python_runtime),
+            executor_context=self._build_executor_context(project_id, card, worker_type, python_runtime=python_runtime, r_runtime=r_runtime),
             manager_reporting_contract=self._build_manager_reporting_contract(),
         )
 
@@ -1237,18 +1264,37 @@ class WorkerService:
             return None
         return python_runtime
 
-    def _build_executor_context(self, project_id: str, card: Card, worker_type: str, python_runtime: str | None = None) -> ExecutorContext:
+    @staticmethod
+    def _normalize_r_runtime(r_runtime: str | None) -> str | None:
+        if r_runtime in {None, "", "__system__"}:
+            return None
+        return r_runtime
+
+    def _build_executor_context(
+        self,
+        project_id: str,
+        card: Card,
+        worker_type: str,
+        python_runtime: str | None = None,
+        r_runtime: str | None = None,
+    ) -> ExecutorContext:
         if card.executor_context is not None:
             context = card.executor_context.model_copy(deep=True)
             if python_runtime:
                 context.runtime_bindings.conda_env = python_runtime
                 context.runtime_bindings.env["BLUEPRINT_PYTHON_RUNTIME"] = python_runtime
+            if r_runtime:
+                context.runtime_bindings.r_env = r_runtime
+                context.runtime_bindings.env["BLUEPRINT_R_RUNTIME"] = r_runtime
             return context
         graph = self.project_service.graph_store(project_id).load_graph()
         conda_env = python_runtime or graph.metadata.get("default_conda_env")
+        r_env = r_runtime or graph.metadata.get("default_r_env")
         runtime_env = {}
         if python_runtime:
             runtime_env["BLUEPRINT_PYTHON_RUNTIME"] = python_runtime
+        if r_runtime:
+            runtime_env["BLUEPRINT_R_RUNTIME"] = r_runtime
         network_policy = "allow" if worker_type in {"opencode", "codex", "pi", "claude_code"} else "prompt"
         return ExecutorContext(
             executor_profile=f"{worker_type}_worker",
@@ -1263,6 +1309,7 @@ class WorkerService:
             tool_policy=ExecutorToolPolicy(network=network_policy, python=True, rscript=worker_type in {"pi", "opencode"}),
             runtime_bindings=RuntimeBindings(
                 conda_env=conda_env,
+                r_env=r_env,
                 working_dir=".",
                 env=runtime_env,
             ),

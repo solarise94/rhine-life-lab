@@ -399,6 +399,7 @@ class ProjectService:
             "git_log": self.git_service(project_id).log(),
             "worker_capabilities": self._worker_capabilities(),
             "python_runtimes": self._python_runtimes(),
+            "r_runtimes": self._r_runtimes(),
         }
 
     @staticmethod
@@ -446,6 +447,55 @@ class ProjectService:
                         "name": env_dir.name,
                         "label": f"{env_dir.name} ({manager})",
                         "path": str(env_dir),
+                        "manager": manager,
+                        "exists": True,
+                    }
+                )
+                seen.add(env_dir.name)
+        return runtimes
+
+    def _r_runtimes(self) -> list[dict]:
+        system_rscript = shutil.which("Rscript")
+        runtimes: list[dict] = [
+            {
+                "name": "__system__",
+                "label": "System R",
+                "path": system_rscript,
+                "manager": "system",
+                "exists": bool(system_rscript),
+            }
+        ]
+        seen = {"__system__"}
+        for manager, base in (
+            ("miniforge", Path("/home/solarise/miniforge3")),
+            ("miniconda", Path("/home/solarise/miniconda3")),
+        ):
+            if not base.exists():
+                continue
+            base_rscript = base / "bin" / "Rscript"
+            if base_rscript.exists() and f"{manager}:base" not in seen:
+                runtimes.append(
+                    {
+                        "name": "base",
+                        "label": f"{manager}: base R",
+                        "path": str(base_rscript),
+                        "manager": manager,
+                        "exists": True,
+                    }
+                )
+                seen.add(f"{manager}:base")
+            envs_root = base / "envs"
+            if not envs_root.exists():
+                continue
+            for env_dir in sorted(path for path in envs_root.iterdir() if path.is_dir()):
+                rscript_bin = env_dir / "bin" / "Rscript"
+                if not rscript_bin.exists() or env_dir.name in seen:
+                    continue
+                runtimes.append(
+                    {
+                        "name": env_dir.name,
+                        "label": f"{env_dir.name} R ({manager})",
+                        "path": str(rscript_bin),
                         "manager": manager,
                         "exists": True,
                     }

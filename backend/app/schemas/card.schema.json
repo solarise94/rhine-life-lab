@@ -163,6 +163,18 @@
           "default": null,
           "title": "Conda Env"
         },
+        "r_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "R Env"
+        },
         "container_image": {
           "anyOf": [
             {

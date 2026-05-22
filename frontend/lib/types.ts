@@ -256,6 +256,8 @@ export interface PythonRuntime {
   exists: boolean;
 }
 
+export type RRuntime = PythonRuntime;
+
 export interface CreateProjectPayload {
   project_id: string;
   name: string;
@@ -278,6 +280,7 @@ export interface ProjectSnapshot {
   git_log: Array<{ hash: string; date: string; subject: string }>;
   worker_capabilities?: WorkerCapability[];
   python_runtimes?: PythonRuntime[];
+  r_runtimes?: RRuntime[];
 }
 
 export interface RunRecord {

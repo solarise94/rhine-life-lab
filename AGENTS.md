@@ -30,6 +30,7 @@ Manager agent:
 cd manager-agent
 npm install
 npm start
+node --check src/server.js
 ```
 
 ## Coding Style & Naming Conventions
@@ -46,12 +47,27 @@ PYTHONPATH=backend .venv/backend/bin/python -m unittest discover -s backend/test
 
 There is no frontend test suite configured yet; after UI changes, run `cd frontend && npm run build` to catch type and build regressions.
 
+After changes that touch manager prompts/tool schemas, also run:
+
+```bash
+cd manager-agent
+node --check src/server.js
+```
+
 ## Executor Runtime Notes
 Executor soft sandboxing is a required deployment dependency when `BLUEPRINT_EXECUTOR_SANDBOX_MODE=bwrap`.
 
 `bwrap` is available in the real host environment for this project. A direct smoke test from Codex's default tool sandbox can incorrectly fail with `No permissions to create new namespace`; that indicates the outer Codex tool sandbox blocked namespace creation, not that the host lacks bubblewrap support. When validating bubblewrap behavior, run the actual `bwrap` smoke test in the approved real execution context. Do not change the implementation to silently fall back to unsandboxed execution, and do not run `sudo codex`.
 
 The executor bwrap profile intentionally keeps host networking enabled but uses `--clearenv`; required runtime env must be added explicitly to `command_worker.py` so it appears in `sandbox_plan.json`. Keep tool state such as `HOME`, `XDG_*`, and `PI_CODING_AGENT_*` inside the current `runs/<run_id>/` directory. Do not write new secrets into `commands.log`; command logging must redact key/token/password style arguments.
+
+Python and R runtimes are now separate execution bindings. When adding run-launch or rerun fields, keep `python_runtime` and `r_runtime` wired consistently from frontend API calls through `backend/app/api/runs.py`, `WorkerService`, `task_packet.json`, and `ExecutorContext.runtime_bindings`. Treat `__system__` as "no explicit runtime binding" rather than a named environment.
+
+For R-capable runs, prefer the resolved `BLUEPRINT_RSCRIPT` path when present. Do not assume the selected Python conda environment also provides `Rscript`, and keep any R library path handling explicit in the sandbox/environment plan.
+
+Project snapshots may expose both `python_runtimes` and `r_runtimes`; frontend runtime selectors and persisted workspace UI state should stay in sync with both lists.
+
+Script-language preference is a soft planning hint, not an executor hard constraint. Pass `script_preference` through chat context, and when Manager creates or updates analysis cards, store the resulting guidance in `card.executor_context.instruction_blocks` instead of introducing special-case execution logic.
 
 Runtime dependencies are declared in `deploy/runtime-dependencies.yml`, and `scripts/deploy_user_systemd.sh` must fail deployment if the bubblewrap smoke test fails in the real deployment environment.
 

@@ -11,6 +11,7 @@ from app.models.patches import Proposal
 class ChatContext(BaseModel):
     selected_card_id: str | None = None
     selected_result_id: str | None = None
+    script_preference: Literal["auto", "prefer_python", "prefer_r", "prefer_mixed"] = "auto"
 
 
 class ChatHistoryMessage(BaseModel):

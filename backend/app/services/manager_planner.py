@@ -56,6 +56,9 @@ You must follow the patch contract strictly:
 - Do not invent fields that are not listed in the op contract.
 - Do not use `update_card` to modify a module. Cards and modules are different objects.
 - Do not use module ids where a card id is required, or card ids where a module id is required.
+- Respect `selected_context.script_preference` when creating analysis cards. Treat it as a soft user preference, not a hard constraint.
+- If `script_preference` is `auto` and a new bioinformatics card could reasonably be implemented in either Python or R, ask the user for a preference before creating cards when that choice materially affects the workflow.
+- When a concrete preference is known, add it to each new or updated analysis card through `executor_context.instruction_blocks`, e.g. "Soft script preference: prefer R scripts when practical; use Python if it is more reliable for this task."
 
 Before you return the tool call, do an internal self-check:
 1. Verify every op uses the correct target object type.
@@ -68,8 +71,8 @@ Use these op contracts:
 - `create_module`: requires `module_id`, `title`. Optional: `status`, `summary`, `depends_on_assets`, `expected_outputs`, `linked_cards`.
 - `create_module_group`: requires `module_id`, `title`. Optional: `status`, `summary`, `depends_on_assets`, `expected_outputs`, `linked_cards`.
 - `add_submodule`: requires `parent_module_id`, `module_id`, `title`. `parent_module_id` must be an existing module group. `module_id` should usually refer to a module created in the same change or an existing module.
-- `create_card`: must create a valid card object. Required fields include `card_id`, `card_type`, `title`, `status`, `summary`. Prefer also setting `step`, `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_runs`, `linked_assets`.
-- `update_card`: requires `card_id` of an existing card. Only use card fields such as `step`, `title`, `status`, `summary`, `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_assets`, `progress_note`. Never use it for modules. To delete a card, set `status` to `cancelled` and keep the card metadata intact for auditability.
+- `create_card`: must create a valid card object. Required fields include `card_id`, `card_type`, `title`, `status`, `summary`. Prefer also setting `step`, `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_runs`, `linked_assets`, `executor_context`.
+- `update_card`: requires `card_id` of an existing card. Only use card fields such as `step`, `title`, `status`, `summary`, `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_assets`, `progress_note`, `executor_context`. Never use it for modules. To delete a card, set `status` to `cancelled` and keep the card metadata intact for auditability.
 - `update_module`: requires `module_id` of an existing module. Only use module fields such as `title`, `status`, `summary`, `depends_on_assets`, `expected_outputs`, `linked_cards`.
 - `set_card_status`: requires `card_id`, `status`.
 - `set_module_status`: requires `module_id`, `status`.
@@ -361,6 +364,7 @@ class DeepSeekManagerPlanner:
                         "linked_runs",
                         "linked_assets",
                         "progress_note",
+                        "executor_context",
                     ],
                 },
                 "update_card": {
@@ -379,6 +383,7 @@ class DeepSeekManagerPlanner:
                         "linked_modules",
                         "linked_assets",
                         "progress_note",
+                        "executor_context",
                     ],
                 },
                 "update_module": {
@@ -424,6 +429,7 @@ class DeepSeekManagerPlanner:
                     "linked_runs": card.linked_runs,
                     "linked_assets": card.linked_assets,
                     "progress_note": card.progress_note,
+                    "executor_context": card.executor_context.model_dump() if card.executor_context else None,
                 }
                 for card in cards
             ],
@@ -484,6 +490,34 @@ class DeepSeekManagerPlanner:
                 if proposal.status == "proposed"
             ],
         }
+        context["script_preference_guidance"] = self._script_preference_guidance(chat_request.context.script_preference)
         if extra_context:
             context["extra_context"] = extra_context
         return context
+
+    @staticmethod
+    def _script_preference_guidance(script_preference: str) -> dict:
+        normalized = script_preference if script_preference in {"auto", "prefer_python", "prefer_r", "prefer_mixed"} else "auto"
+        instructions = {
+            "auto": (
+                "No script language preference is set. If creating new bioinformatics analysis cards and Python vs R materially "
+                "changes implementation quality or runtime dependency choices, ask the user which script style they prefer."
+            ),
+            "prefer_python": (
+                "Soft script preference: prefer Python scripts when practical. This is not a hard constraint; use R when it is "
+                "more reliable or better supported for this task."
+            ),
+            "prefer_r": (
+                "Soft script preference: prefer R scripts when practical. This is not a hard constraint; use Python when it is "
+                "more reliable or better supported for this task."
+            ),
+            "prefer_mixed": (
+                "Soft script preference: choose Python or R per task based on reliability, available runtime dependencies, and "
+                "clearer reproducible code."
+            ),
+        }
+        return {
+            "value": normalized,
+            "card_instruction_block": instructions[normalized],
+            "hard_constraint": False,
+        }

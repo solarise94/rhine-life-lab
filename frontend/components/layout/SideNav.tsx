@@ -19,8 +19,8 @@ import {
 import { api } from "@/lib/api";
 import { useChatSessions, useProjects } from "@/lib/hooks";
 import { queryKeys } from "@/lib/query-keys";
-import { useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
-import { ChatSessionSummary } from "@/lib/types";
+import { ScriptPreference, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
+import { ChatSessionSummary, PythonRuntime, RRuntime } from "@/lib/types";
 
 const primary = [
   { href: "results", label: "结果库", icon: BarChart3 },
@@ -34,7 +34,29 @@ function sortSessions(items: ChatSessionSummary[]) {
 
 const EMPTY_SESSIONS: ChatSessionSummary[] = [];
 
-export function SideNav({ projectId, current }: { projectId: string; current: string }) {
+export function SideNav({
+  projectId,
+  current,
+  pythonRuntimes = [],
+  rRuntimes = [],
+  globalPythonRuntime,
+  globalRRuntime,
+  scriptPreference = "auto",
+  onSelectGlobalPythonRuntime,
+  onSelectGlobalRRuntime,
+  onSelectScriptPreference,
+}: {
+  projectId: string;
+  current: string;
+  pythonRuntimes?: PythonRuntime[];
+  rRuntimes?: RRuntime[];
+  globalPythonRuntime?: string;
+  globalRRuntime?: string;
+  scriptPreference?: ScriptPreference;
+  onSelectGlobalPythonRuntime?: (runtime: string) => void;
+  onSelectGlobalRRuntime?: (runtime: string) => void;
+  onSelectScriptPreference?: (preference: ScriptPreference) => void;
+}) {
   const router = useRouter();
   const queryClient = useQueryClient();
   const sessionsQuery = useChatSessions(projectId);
@@ -204,6 +226,50 @@ export function SideNav({ projectId, current }: { projectId: string; current: st
             </Link>
           </div>
         ) : null}
+      </div>
+
+      <div className="nav-section-label">Runtime</div>
+      <div className="nav-runtime-panel">
+        <label className="nav-runtime-field">
+          <span>Python</span>
+          <select
+            value={globalPythonRuntime ?? "__system__"}
+            onChange={(event) => onSelectGlobalPythonRuntime?.(event.target.value)}
+            disabled={!pythonRuntimes.length}
+          >
+            {pythonRuntimes.map((item) => (
+              <option key={`${item.manager}:${item.name}`} value={item.name}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="nav-runtime-field">
+          <span>R</span>
+          <select
+            value={globalRRuntime ?? "__system__"}
+            onChange={(event) => onSelectGlobalRRuntime?.(event.target.value)}
+            disabled={!rRuntimes.length}
+          >
+            {rRuntimes.map((item) => (
+              <option key={`${item.manager}:${item.name}`} value={item.name}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="nav-runtime-field">
+          <span>脚本偏好</span>
+          <select
+            value={scriptPreference}
+            onChange={(event) => onSelectScriptPreference?.(event.target.value as ScriptPreference)}
+          >
+            <option value="auto">让 Manager 询问</option>
+            <option value="prefer_python">偏好 Python</option>
+            <option value="prefer_r">偏好 R</option>
+            <option value="prefer_mixed">按任务选择</option>
+          </select>
+        </label>
       </div>
 
       <div className="nav-section-label nav-session-label">

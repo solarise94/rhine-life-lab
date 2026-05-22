@@ -102,7 +102,10 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         merged_pythonpath = str(backend_root) if not pythonpath else f"{backend_root}{os.pathsep}{pythonpath}"
         runtime_env = packet.executor_context.runtime_bindings.env if packet.executor_context else {}
         conda_env = packet.executor_context.runtime_bindings.conda_env if packet.executor_context else None
-        command, extra_env = self._apply_conda_runtime(command, conda_env=conda_env, settings=settings)
+        r_env = packet.executor_context.runtime_bindings.r_env if packet.executor_context else None
+        command, python_extra_env = self._apply_conda_runtime(command, conda_env=conda_env, settings=settings)
+        r_extra_env = self._apply_r_runtime(r_env, settings=settings, base_path=python_extra_env.get("PATH"))
+        extra_env = {**python_extra_env, **r_extra_env}
         adapter_extra_env = self.extra_environment(packet=packet, settings=settings)
         environment = {
             **os.environ,
@@ -202,6 +205,49 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         return configured_base, configured_base / "envs" / conda_env
 
     @staticmethod
+    def _apply_r_runtime(r_env: str | None, *, settings: object, base_path: str | None = None) -> dict[str, str]:
+        rscript_path = CommandTemplateWorkerAdapter._resolve_rscript_runtime(r_env, settings)
+        if rscript_path is None:
+            return {}
+        env: dict[str, str] = {
+            "BLUEPRINT_RSCRIPT": str(rscript_path),
+        }
+        if r_env:
+            env["BLUEPRINT_R_RUNTIME"] = r_env
+            env["PATH"] = f"{rscript_path.parent}{os.pathsep}{base_path or os.environ.get('PATH', '')}"
+        r_user_libs = CommandTemplateWorkerAdapter._r_user_library_paths(rscript_path)
+        if r_user_libs:
+            env["R_LIBS_USER"] = os.pathsep.join(str(path) for path in r_user_libs)
+        return env
+
+    @staticmethod
+    def _resolve_rscript_runtime(r_env: str | None, settings: object) -> Path | None:
+        if not r_env:
+            found = shutil.which("Rscript")
+            return Path(found) if found else None
+        if r_env.startswith("/"):
+            runtime_path = Path(r_env)
+            if runtime_path.name == "Rscript" and runtime_path.exists():
+                return runtime_path
+            rscript_path = runtime_path / "bin" / "Rscript"
+            return rscript_path if rscript_path.exists() else None
+        configured_base = Path(getattr(settings, "executor_conda_base", Path("/home/solarise/miniconda3")))
+        candidates = [
+            configured_base,
+            Path("/home/solarise/miniforge3"),
+            Path("/home/solarise/miniconda3"),
+        ]
+        for base in candidates:
+            rscript_path = base / "envs" / r_env / "bin" / "Rscript"
+            if rscript_path.exists():
+                return rscript_path
+            if r_env == "base":
+                base_rscript = base / "bin" / "Rscript"
+                if base_rscript.exists():
+                    return base_rscript
+        return None
+
+    @staticmethod
     def _wrap_with_bwrap(
         command: list[str],
         *,
@@ -247,7 +293,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         current_python = Path(sys.executable)
         python_runtime_paths = CommandTemplateWorkerAdapter._python_runtime_ro_binds(current_python)
         launch_template_paths = CommandTemplateWorkerAdapter._launch_template_ro_binds(adapter_extra_env_keys, environment)
-        r_user_libs = CommandTemplateWorkerAdapter._r_user_library_ro_binds()
+        r_user_libs = CommandTemplateWorkerAdapter._r_user_library_ro_binds(settings)
         bind_args: list[str] = [
             bwrap,
             "--die-with-parent",
@@ -322,6 +368,8 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "BLUEPRINT_EXECUTOR_SKILLS",
             "BLUEPRINT_RUNTIME_WORKING_DIR",
             "BLUEPRINT_MANAGER_REPORT_STDOUT_PREFIX",
+            "BLUEPRINT_RSCRIPT",
+            "BLUEPRINT_R_RUNTIME",
             "R_PROFILE_USER",
             "R_DEFAULT_DEVICE",
             "R_LIBS_USER",
@@ -376,8 +424,8 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
                 "PI_SKIP_VERSION_CHECK": environment.get("PI_SKIP_VERSION_CHECK", "1"),
             }
         )
-        if r_user_libs:
-            environment["R_LIBS_USER"] = os.pathsep.join(r_user_libs)
+        if r_user_libs and "R_LIBS_USER" not in environment:
+            environment["R_LIBS_USER"] = os.pathsep.join(str(path) for path in r_user_libs)
         env_keys.add("BLUEPRINT_SANDBOX_PLAN")
         if "LANG" not in environment and os.environ.get("LANG"):
             environment["LANG"] = os.environ["LANG"]
@@ -397,6 +445,8 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "pi_session_dir": str(pi_session_dir),
             "conda_base": str(conda_base) if conda_base.exists() else None,
             "conda_env": packet.executor_context.runtime_bindings.conda_env if packet.executor_context else None,
+            "r_env": packet.executor_context.runtime_bindings.r_env if packet.executor_context else None,
+            "rscript": environment.get("BLUEPRINT_RSCRIPT"),
             "backend_root": str(backend_root),
             "python_executable": str(current_python),
             "clearenv": True,
@@ -485,17 +535,54 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         return CommandTemplateWorkerAdapter._dedupe_paths(paths)
 
     @staticmethod
-    def _r_user_library_ro_binds() -> list[str]:
+    def _r_user_library_ro_binds(settings: object) -> list[Path]:
+        return CommandTemplateWorkerAdapter._r_user_library_paths(
+            CommandTemplateWorkerAdapter._resolve_rscript_runtime(None, settings)
+        )
+
+    @staticmethod
+    def _r_user_library_paths(rscript_path: Path | None = None) -> list[Path]:
         paths: list[Path] = []
-        r_home = Path.home() / "R"
-        if r_home.exists():
-            paths.append(r_home)
         raw = os.environ.get("R_LIBS_USER", "")
         for item in raw.split(os.pathsep):
             value = os.path.expanduser(os.path.expandvars(item.strip()))
             if value and Path(value).exists():
                 paths.append(Path(value))
-        return CommandTemplateWorkerAdapter._dedupe_paths(paths)
+        if rscript_path and rscript_path.exists():
+            try:
+                result = subprocess.run(
+                    [
+                        str(rscript_path),
+                        "--no-init-file",
+                        "--no-site-file",
+                        "-e",
+                        "cat(Sys.getenv('R_LIBS_USER'))",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    check=False,
+                    timeout=5,
+                )
+            except (OSError, subprocess.SubprocessError):
+                result = None
+            if result and result.returncode == 0:
+                for item in result.stdout.split(os.pathsep):
+                    value = os.path.expanduser(os.path.expandvars(item.strip()))
+                    if value and Path(value).exists():
+                        paths.append(Path(value))
+        r_home = Path.home() / "R"
+        if r_home.exists():
+            paths.append(r_home)
+        seen: set[str] = set()
+        result_paths: list[Path] = []
+        for path in paths:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            result_paths.append(path)
+        return result_paths
 
     def resolve_command_template(self, settings: object) -> str | None:
         if self.command_template:
@@ -547,7 +634,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
     def _write_runtime_r_profile(run_dir: Path) -> Path:
         path = run_dir / ".Rprofile"
         path.write_text(
-            "pdf(file = file.path(Sys.getenv('BLUEPRINT_RUN_DIR', '.'), 'Rplots.pdf'))\n",
+            "options(device = function(...) grDevices::pdf(file = file.path(Sys.getenv('BLUEPRINT_RUN_DIR', '.'), 'Rplots.pdf'), ...))\n",
             encoding="utf-8",
         )
         return path
@@ -687,12 +774,15 @@ def main() -> int:
     parser.add_argument("--ecosystem", default="other", choices=["python", "R", "conda", "system", "other"])
     parser.add_argument("--package", action="append", dest="packages", required=True)
     parser.add_argument("--manager", default="")
-    parser.add_argument("--runtime", default=os.environ.get("BLUEPRINT_PYTHON_RUNTIME", ""))
+    parser.add_argument("--runtime", default="")
     parser.add_argument("--message", default="")
     parser.add_argument("--non-blocking", action="store_true")
     args = parser.parse_args()
 
     packages = [item for item in (args.packages or []) if item]
+    runtime = args.runtime or (
+        os.environ.get("BLUEPRINT_R_RUNTIME", "") if args.ecosystem == "R" else os.environ.get("BLUEPRINT_PYTHON_RUNTIME", "")
+    )
     blocking = not args.non_blocking
     package_text = ", ".join(packages)
     message = args.message or f"Missing required {args.ecosystem} runtime dependencies: {package_text}."
@@ -712,7 +802,7 @@ def main() -> int:
             "ecosystem": args.ecosystem,
             "missing_packages": packages,
             "package_manager": args.manager,
-            "runtime": args.runtime,
+            "runtime": runtime,
             "blocking": blocking,
         },
     }
@@ -785,12 +875,16 @@ if __name__ == "__main__":
             ]
         )
         if packet.executor_context:
+            python_runtime = packet.executor_context.runtime_bindings.conda_env or "system"
+            r_runtime = packet.executor_context.runtime_bindings.r_env or "system"
             lines.extend(
                 [
                     "",
                     "## Executor Context",
                     f"- Profile: {packet.executor_context.executor_profile or 'none'}",
                     f"- Skills: {', '.join(packet.executor_context.skills) if packet.executor_context.skills else 'none'}",
+                    f"- Python runtime: {python_runtime}",
+                    f"- R runtime: {r_runtime}",
                 ]
             )
             lines.extend(f"- Instruction: {item}" for item in packet.executor_context.instruction_blocks)
@@ -832,6 +926,9 @@ if __name__ == "__main__":
             f"- Project root: {packet.run_context.project_root if packet.run_context else '.'}",
             f"- Run dir: {packet.run_context.run_dir if packet.run_context else 'runs/current'}",
             f"- Result dir: {packet.run_context.result_dir if packet.run_context else 'results/current'}",
+            f"- Python runtime: {packet.executor_context.runtime_bindings.conda_env if packet.executor_context and packet.executor_context.runtime_bindings.conda_env else 'system'}",
+            f"- R runtime: {packet.executor_context.runtime_bindings.r_env if packet.executor_context and packet.executor_context.runtime_bindings.r_env else 'system'}",
+            "- For R work, prefer BLUEPRINT_RSCRIPT when set; do not assume the Python conda environment also contains R.",
             "",
             "Input assets:",
         ]

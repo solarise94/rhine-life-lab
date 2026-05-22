@@ -166,8 +166,17 @@ export function useWorkspaceRefresh(projectId: string) {
 export function useStartRunMutation(projectId: string) {
   const refresh = useWorkspaceRefresh(projectId);
   return useMutation({
-    mutationFn: ({ cardId, workerType, pythonRuntime }: { cardId: string; workerType?: string; pythonRuntime?: string }) =>
-      api.startRun(projectId, cardId, workerType, pythonRuntime),
+    mutationFn: ({
+      cardId,
+      workerType,
+      pythonRuntime,
+      rRuntime,
+    }: {
+      cardId: string;
+      workerType?: string;
+      pythonRuntime?: string;
+      rRuntime?: string;
+    }) => api.startRun(projectId, cardId, workerType, pythonRuntime, rRuntime),
     onSuccess: async () => {
       await refresh();
     },
@@ -207,8 +216,17 @@ export function useResetCardRunStateMutation(projectId: string) {
 export function useRerunCardMutation(projectId: string) {
   const refresh = useWorkspaceRefresh(projectId);
   return useMutation({
-    mutationFn: ({ cardId, workerType, pythonRuntime }: { cardId: string; workerType?: string; pythonRuntime?: string }) =>
-      api.rerunCard(projectId, cardId, workerType, pythonRuntime),
+    mutationFn: ({
+      cardId,
+      workerType,
+      pythonRuntime,
+      rRuntime,
+    }: {
+      cardId: string;
+      workerType?: string;
+      pythonRuntime?: string;
+      rRuntime?: string;
+    }) => api.rerunCard(projectId, cardId, workerType, pythonRuntime, rRuntime),
     onSuccess: async () => {
       await refresh();
     },

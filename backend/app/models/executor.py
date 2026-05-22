@@ -21,6 +21,7 @@ class ExecutorToolPolicy(BaseModel):
 
 class RuntimeBindings(BaseModel):
     conda_env: str | None = None
+    r_env: str | None = None
     container_image: str | None = None
     working_dir: str = "."
     env: dict[str, str] = Field(default_factory=dict)

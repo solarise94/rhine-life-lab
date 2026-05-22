@@ -24,6 +24,7 @@ class ReviewRunRequest(BaseModel):
 class StartRunRequest(BaseModel):
     worker_type: str | None = None
     python_runtime: str | None = None
+    r_runtime: str | None = None
 
 
 class RuntimeApprovalDecisionRequest(BaseModel):
@@ -41,6 +42,7 @@ class CleanupRunRequest(BaseModel):
 class RerunCardRequest(BaseModel):
     worker_type: str | None = None
     python_runtime: str | None = None
+    r_runtime: str | None = None
 
 
 @router.post("/cards/{card_id}/start-run")
@@ -55,6 +57,7 @@ def start_run(
         card_id,
         worker_type=request.worker_type if request else None,
         python_runtime=request.python_runtime if request else None,
+        r_runtime=request.r_runtime if request else None,
     )
 
 
@@ -79,6 +82,7 @@ def rerun_card(
         card_id,
         worker_type=request.worker_type if request else None,
         python_runtime=request.python_runtime if request else None,
+        r_runtime=request.r_runtime if request else None,
     )
 
 

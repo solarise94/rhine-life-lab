@@ -250,6 +250,12 @@ class ManagerFlowTest(unittest.TestCase):
 
         self.assertTrue(any(item["name"] == "__system__" and item["label"] == "System Python" for item in runtimes))
 
+    def test_project_snapshot_includes_system_r_runtime(self) -> None:
+        snapshot = self.project_service.get_project_snapshot("test-project")
+        runtimes = snapshot["r_runtimes"]
+
+        self.assertTrue(any(item["name"] == "__system__" and item["label"] == "System R" for item in runtimes))
+
     def test_review_replaces_planned_output_asset_ids_with_materialized_assets(self) -> None:
         card = Card.model_validate(
             {
@@ -967,13 +973,57 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertEqual("omicverse", packet.executor_context.runtime_bindings.env["BLUEPRINT_PYTHON_RUNTIME"])
         self._wait_for_run("test-project", run["run_id"])
 
+    def test_start_run_can_override_r_runtime_for_task_packet(self) -> None:
+        run = self.worker.start_run("test-project", "card_enrichment_group", r_runtime="bioconductor")
+        packet = self.manifest_service.load_task_packet("test-project", run["run_id"])
+
+        self.assertEqual("bioconductor", packet.executor_context.runtime_bindings.r_env)
+        self.assertEqual("bioconductor", packet.executor_context.runtime_bindings.env["BLUEPRINT_R_RUNTIME"])
+        self._wait_for_run("test-project", run["run_id"])
+
     def test_start_run_system_python_runtime_does_not_set_conda_env(self) -> None:
-        run = self.worker.start_run("test-project", "card_enrichment_group", python_runtime="__system__")
+        run = self.worker.start_run("test-project", "card_enrichment_group", python_runtime="__system__", r_runtime="__system__")
         packet = self.manifest_service.load_task_packet("test-project", run["run_id"])
 
         self.assertIsNone(packet.executor_context.runtime_bindings.conda_env)
+        self.assertIsNone(packet.executor_context.runtime_bindings.r_env)
         self.assertNotIn("BLUEPRINT_PYTHON_RUNTIME", packet.executor_context.runtime_bindings.env)
+        self.assertNotIn("BLUEPRINT_R_RUNTIME", packet.executor_context.runtime_bindings.env)
         self._wait_for_run("test-project", run["run_id"])
+
+    def test_manager_context_surfaces_script_preference_guidance(self) -> None:
+        snapshot = self.project_service.get_project_snapshot("test-project")
+        planner = DeepSeekManagerPlanner()
+        context = planner._build_context(
+            snapshot,
+            ChatRequest(message="增加一个 PCA 分析卡", context={"script_preference": "prefer_r"}),
+        )
+
+        self.assertEqual("prefer_r", context["selected_context"]["script_preference"])
+        self.assertFalse(context["script_preference_guidance"]["hard_constraint"])
+        self.assertIn("prefer R scripts", context["script_preference_guidance"]["card_instruction_block"])
+        self.assertIn("executor_context", context["op_contracts"]["create_card"]["optional_fields"])
+        self.assertIn("executor_context", context["op_contracts"]["update_card"]["optional_fields"])
+
+    def test_create_card_persists_soft_script_preference_instruction(self) -> None:
+        result = self.manager.blueprint_tools.create_card(
+            "test-project",
+            {
+                "card_id": "card_soft_script_preference",
+                "title": "Soft script preference",
+                "summary": "Exercise executor context persistence.",
+                "step": 1,
+                "executor_context": {
+                    "instruction_blocks": [
+                        "Soft script preference: prefer R scripts when practical; use Python if it is more reliable."
+                    ]
+                },
+            },
+        )
+
+        instruction_blocks = result["card"]["executor_context"]["instruction_blocks"]
+        self.assertEqual(1, len(instruction_blocks))
+        self.assertIn("prefer R scripts", instruction_blocks[0])
 
     def test_start_run_returns_404_for_missing_card(self) -> None:
         with self.assertRaises(HTTPException) as ctx:

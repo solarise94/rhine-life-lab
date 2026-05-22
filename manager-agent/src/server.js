@@ -36,6 +36,9 @@ Judgment:
 - For multi-step workflow creation, you may create multiple cards in one conversation. Re-check the timeline when useful.
 - Reuse existing card ids when updating existing work. Create new ids only for genuinely new cards.
 - Do not use or mention blueprint proposal, blueprint review, or approval flows. Card tools are the source of truth for blueprint edits.
+- Respect selected_context.script_preference when creating analysis cards. It is a soft script-language preference, not a hard constraint.
+- If script_preference is auto and a new bioinformatics card could reasonably be implemented in either Python or R, ask the user which script style they prefer when that choice materially affects the workflow.
+- When a concrete script preference is known, add it to executor_context.instruction_blocks on new or updated analysis cards.
 - Keep final replies concise and user-facing.
 
 Card fields:
@@ -43,6 +46,7 @@ Card fields:
 - Common card_type values: module, module_group.
 - Common status values: planned, proposed, accepted, cancelled, failed, stale, superseded.
 - Useful fields: step, why, inputs, outputs, key_findings, manager_review, next_actions, linked_modules, linked_runs, linked_assets, progress_note.
+- executor_context may include instruction_blocks for soft execution guidance such as script-language preference.
 - Inputs and outputs are arrays shaped like { label, asset_id?, status? }.
 - Prefer status "planned" for future work, "cancelled" for dormant/deleted cards, and "accepted" only for completed accepted work.`;
 
@@ -176,6 +180,25 @@ function retryHintForToolError(message) {
     return "Fill the required card fields and retry.";
   }
   return "Inspect the error and retry with corrected arguments if the correction is clear.";
+}
+
+function scriptPreferenceGuidance(scriptPreference) {
+  const value = ["prefer_python", "prefer_r", "prefer_mixed", "auto"].includes(scriptPreference) ? scriptPreference : "auto";
+  const instructions = {
+    auto:
+      "No script language preference is set. If creating new bioinformatics analysis cards and Python vs R materially changes implementation quality or runtime dependency choices, ask the user which script style they prefer.",
+    prefer_python:
+      "Soft script preference: prefer Python scripts when practical. This is not a hard constraint; use R when it is more reliable or better supported for this task.",
+    prefer_r:
+      "Soft script preference: prefer R scripts when practical. This is not a hard constraint; use Python when it is more reliable or better supported for this task.",
+    prefer_mixed:
+      "Soft script preference: choose Python or R per task based on reliability, available runtime dependencies, and clearer reproducible code.",
+  };
+  return {
+    value,
+    card_instruction_block: instructions[value],
+    hard_constraint: false,
+  };
 }
 
 function logManagerEvent(event, fields = {}) {
@@ -329,6 +352,7 @@ function createTools(request) {
         linked_runs: Type.Optional(Type.Array(Type.String())),
         linked_assets: Type.Optional(Type.Array(Type.String())),
         progress_note: Type.Optional(Type.String()),
+        executor_context: Type.Optional(Type.Record(Type.String(), Type.Any())),
       }),
       execute: async (toolCallId, params, signal) => {
         try {
@@ -372,6 +396,7 @@ function createTools(request) {
         linked_runs: Type.Optional(Type.Array(Type.String())),
         linked_assets: Type.Optional(Type.Array(Type.String())),
         progress_note: Type.Optional(Type.String()),
+        executor_context: Type.Optional(Type.Record(Type.String(), Type.Any())),
       }),
       execute: async (toolCallId, params, signal) => {
         const { card_id: cardId, ...body } = params;
@@ -639,6 +664,7 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
   const userEnvelope = {
     user_request: payload.message,
     selected_context: payload.context || {},
+    script_preference_guidance: scriptPreferenceGuidance(payload.context?.script_preference),
     instruction:
       "Answer naturally. Decide whether project tools are needed. If you change the blueprint, remember that cards are the blueprint units and use create_card, update_card, or delete_card directly. After ok:false tool results, correct and retry when the fix is clear.",
   };

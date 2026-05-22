@@ -284,6 +284,7 @@ class ManagerPatchCompiler:
             "linked_modules": list(existing["linked_modules"]),
             "linked_assets": list(existing["linked_assets"]),
             "progress_note": existing["progress_note"],
+            "executor_context": existing.get("executor_context"),
         }
         merged.update(dict(op.payload))
         return merged

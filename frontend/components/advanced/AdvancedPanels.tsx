@@ -2,22 +2,29 @@
 
 import { GitCommit, ShieldAlert } from "lucide-react";
 import Editor from "@monaco-editor/react";
-import { PythonRuntime } from "@/lib/types";
+import { PythonRuntime, RRuntime } from "@/lib/types";
 
 export function AdvancedPanels({
   graph,
   gitItems,
   pythonRuntimes = [],
+  rRuntimes = [],
   globalPythonRuntime,
+  globalRRuntime,
   onSelectGlobalPythonRuntime,
+  onSelectGlobalRRuntime,
 }: {
   graph: Record<string, unknown> | null;
   gitItems: Array<{ hash: string; date: string; subject: string }>;
   pythonRuntimes?: PythonRuntime[];
+  rRuntimes?: RRuntime[];
   globalPythonRuntime?: string;
+  globalRRuntime?: string;
   onSelectGlobalPythonRuntime?: (runtime: string) => void;
+  onSelectGlobalRRuntime?: (runtime: string) => void;
 }) {
   const runtimeLabel = globalPythonRuntime && globalPythonRuntime !== "__system__" ? globalPythonRuntime : "system";
+  const rRuntimeLabel = globalRRuntime && globalRRuntime !== "__system__" ? globalRRuntime : "system";
   return (
     <section className="panel">
       <div className="panel-header">
@@ -52,8 +59,29 @@ export function AdvancedPanels({
                 ))}
               </select>
             </label>
+            <label style={{ display: "grid", gap: 6 }}>
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>Global R runtime</span>
+              <select
+                value={globalRRuntime ?? "__system__"}
+                onChange={(event) => onSelectGlobalRRuntime?.(event.target.value)}
+                style={{
+                  fontSize: 13,
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  border: "1px solid var(--line)",
+                  background: "var(--panel)",
+                  color: "var(--text)",
+                }}
+              >
+                {rRuntimes.map((item) => (
+                  <option key={`${item.manager}:${item.name}`} value={item.name}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div className="muted" style={{ fontSize: 12 }}>
-              当前默认：{runtimeLabel}。单张 card 仍可在执行前覆盖。
+              当前默认：Python {runtimeLabel} / R {rRuntimeLabel}。单张 card 仍可在执行前覆盖。
             </div>
           </div>
         </div>

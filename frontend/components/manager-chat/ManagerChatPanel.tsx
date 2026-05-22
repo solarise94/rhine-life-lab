@@ -18,7 +18,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { api, ChatHistoryMessage, ChatStreamEvent } from "@/lib/api";
+import { api, ChatHistoryMessage, ChatRequestContext, ChatStreamEvent } from "@/lib/api";
 import { useChatSession, useModifyProposalMutation } from "@/lib/hooks";
 import { queryKeys } from "@/lib/query-keys";
 import { Asset, ChatSessionDetail, ChatSessionMessageRecord, ProjectSnapshot, Proposal } from "@/lib/types";
@@ -216,6 +216,7 @@ export function ManagerChatPanel({
   const lastSavedSignatureRef = useRef("[]");
 
   const attachments = useWorkspaceUiStore((s) => s.attachmentsByProject[projectId] ?? EMPTY_ATTACHMENTS);
+  const scriptPreference = useWorkspaceUiStore((s) => s.scriptPreferenceByProject?.[projectId] ?? "auto");
   const addAttachment = useWorkspaceUiStore((s) => s.addAttachment);
   const removeAttachment = useWorkspaceUiStore((s) => s.removeAttachment);
   const clearAttachments = useWorkspaceUiStore((s) => s.clearAttachments);
@@ -617,6 +618,7 @@ export function ManagerChatPanel({
       ? `上下文附件: ${attachments.map((a) => `[${a.type === "card" ? "卡片" : "资产"}: ${a.label}; id=${a.id}]`).join(" ")}\n\n${text}`
       : text;
     const history = buildChatHistory(text);
+    const chatContext: ChatRequestContext = { script_preference: scriptPreference };
     const userMessageId = createMessageId();
     const managerMessageId = createMessageId();
     setMessages((prev) => [
@@ -644,6 +646,7 @@ export function ManagerChatPanel({
           }
         },
         abortController.signal,
+        chatContext,
       );
       if (streamError) {
         throw new Error(streamError);

@@ -11,7 +11,7 @@ import {
   Sparkles,
   Archive,
 } from "lucide-react";
-import { Card, PythonRuntime, WorkerCapability } from "@/lib/types";
+import { Card, PythonRuntime, RRuntime, WorkerCapability } from "@/lib/types";
 import { CardStatusBadge } from "./CardStatusBadge";
 import { SpecialistAvatar } from "./SpecialistAvatar";
 import { FileBag } from "./FileBag";
@@ -29,9 +29,13 @@ export function ModuleCard({
   selectedWorkerType,
   onSelectWorker,
   pythonRuntimes = [],
+  rRuntimes = [],
   globalPythonRuntime,
+  globalRRuntime,
   selectedPythonRuntime,
+  selectedRRuntime,
   onSelectPythonRuntime,
+  onSelectRRuntime,
 }: {
   projectId: string;
   card: Card;
@@ -44,9 +48,13 @@ export function ModuleCard({
   selectedWorkerType?: string;
   onSelectWorker?: (card: Card, workerType: string) => void;
   pythonRuntimes?: PythonRuntime[];
+  rRuntimes?: RRuntime[];
   globalPythonRuntime?: string;
+  globalRRuntime?: string;
   selectedPythonRuntime?: string;
+  selectedRRuntime?: string;
   onSelectPythonRuntime?: (card: Card, runtime?: string) => void;
+  onSelectRRuntime?: (card: Card, runtime?: string) => void;
 }) {
   const cardPages = useWorkspaceUiStore((s) => s.cardPageByProject[projectId] ?? EMPTY_CARD_PAGE_BY_ID);
   const setCardPage = useWorkspaceUiStore((s) => s.setCardPage);
@@ -58,10 +66,11 @@ export function ModuleCard({
   const isDormant = card.status === "cancelled" || card.status === "rejected";
   const configuredWorkers = workerCapabilities.filter((item) => item.configured);
   const globalRuntimeLabel = globalPythonRuntime && globalPythonRuntime !== "__system__" ? globalPythonRuntime : "system";
+  const globalRRuntimeLabel = globalRRuntime && globalRRuntime !== "__system__" ? globalRRuntime : "system";
 
   const pages: CardPage[] = isDormant
-    ? ["specialist", "result", "detail", "archive"]
-    : ["specialist", "result", "detail", "files"];
+    ? ["specialist", "result", "archive"]
+    : ["specialist", "result", "files"];
   const currentPage = pages.includes((storedPage as CardPage | undefined) ?? "specialist")
     ? ((storedPage as CardPage | undefined) ?? (isDormant ? "archive" : "specialist"))
     : (isDormant ? "archive" : "specialist");
@@ -118,7 +127,6 @@ export function ModuleCard({
         <div className="file-bag-tabs" role="tablist" aria-label={`${card.title} card pages`}>
           <button className={`file-bag-tab ${currentPage === "specialist" ? "active" : ""}`} onClick={(e) => handleDot("specialist", e)}>封面</button>
           <button className={`file-bag-tab ${currentPage === "result" ? "active" : ""}`} onClick={(e) => handleDot("result", e)}>结果</button>
-          <button className={`file-bag-tab ${currentPage === "detail" ? "active" : ""}`} onClick={(e) => handleDot("detail", e)}>详情</button>
           <button className={`file-bag-tab ${(currentPage === "files" || currentPage === "archive") ? "active" : ""}`} onClick={(e) => handleDot(isDormant ? "archive" : "files", e)}>
             {isDormant ? <Archive size={11} /> : <Files size={11} />} {isDormant ? "归档袋" : "文件袋"}
           </button>
@@ -192,6 +200,21 @@ export function ModuleCard({
                         ))}
                       </select>
                     </label>
+                    <label className="executor-select-label" onClick={(e) => e.stopPropagation()}>
+                      <span>R runtime</span>
+                      <select
+                        value={selectedRRuntime ?? "__global__"}
+                        onChange={(e) => onSelectRRuntime?.(card, e.target.value === "__global__" ? undefined : e.target.value)}
+                        disabled={!rRuntimes.length}
+                      >
+                        <option value="__global__">跟随全局 ({globalRRuntimeLabel})</option>
+                        {rRuntimes.map((item) => (
+                          <option key={`${item.manager}:${item.name}`} value={item.name}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                     <button className="btn primary" style={{ width: "100%" }} onClick={(e) => { e.stopPropagation(); onStartRun(card); }}>
                       <Play size={14} /> 开始执行
                     </button>
@@ -227,36 +250,6 @@ export function ModuleCard({
                     <CheckCircle2 size={14} /> 人工接受旧结果
                   </button>
                 ) : null}
-              </div>
-            </div>
-
-            {/* ─── Page 3: Detail ─── */}
-            <div className="file-bag-page">
-              <div className="page-content-scroll">
-                <div style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.6 }}>
-                  <div style={{ marginBottom: 6 }}><strong style={{ color: "var(--text)", display: "block" }}>目的:</strong> {card.why || "—"}</div>
-                  <div style={{ marginBottom: 6 }}><strong style={{ color: "var(--text)", display: "block" }}>输入:</strong> {card.inputs.map((i) => i.label).join(", ") || "—"}</div>
-                  <div style={{ marginBottom: 6 }}><strong style={{ color: "var(--text)", display: "block" }}>输出:</strong> {card.outputs.map((o) => o.label).join(", ") || "—"}</div>
-                  <div><strong style={{ color: "var(--text)", display: "block" }}>下一步:</strong> {card.next_actions.join(", ") || "—"}</div>
-                </div>
-
-                <div className="inline-actions" style={{ marginTop: 12, borderTop: "1px dashed var(--line)", paddingTop: 8 }}>
-                  {card.status === "failed" && (
-                    <button className="btn secondary" style={{ fontSize: 10, padding: "4px 8px", flex: 1 }} onClick={(e) => { e.stopPropagation(); onStartRun(card); }}>
-                      <RotateCcw size={12} /> 重新运行
-                    </button>
-                  )}
-                  {isDormant && onAskManager ? (
-                    <button className="btn secondary" style={{ fontSize: 10, padding: "4px 8px", flex: 1 }} onClick={(e) => sendToManager(`请恢复卡片 ${card.title}，必要时同步恢复关联模块，并重新纳入蓝图`, e)}>
-                      <RotateCcw size={12} /> 恢复
-                    </button>
-                  ) : null}
-                  {onAskManager && card.status !== "cancelled" && card.status !== "rejected" && (
-                    <button className="btn secondary" style={{ fontSize: 10, padding: "4px 8px", flex: 1, color: "var(--red-dark)" }} onClick={(e) => sendToManager(`请删除模块 ${card.title}`, e)}>
-                      <Trash2 size={12} /> 删除
-                    </button>
-                  )}
-                </div>
               </div>
             </div>
 

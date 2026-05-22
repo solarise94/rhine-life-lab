@@ -61,7 +61,7 @@ const AdvancedPanels = dynamic(
 
 type View = "tasks" | "results" | "files" | "report" | "advanced";
 
-function formatPythonRuntime(runtime?: string) {
+function formatRuntime(runtime?: string) {
   if (!runtime || runtime === "__system__") return "system";
   return runtime;
 }
@@ -70,14 +70,20 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const queryClient = useQueryClient();
   const selectedCardId = useWorkspaceUiStore((s) => s.selectedCardByProject[projectId]);
   const selectedWorkerByProject = useWorkspaceUiStore((s) => s.selectedWorkerByProject[projectId] ?? EMPTY_SELECTED_WORKER_BY_CARD);
-  const globalPythonRuntime = useWorkspaceUiStore((s) => s.globalPythonRuntimeByProject[projectId]);
-  const selectedPythonRuntimeByProject = useWorkspaceUiStore((s) => s.selectedPythonRuntimeByProject[projectId] ?? EMPTY_SELECTED_RUNTIME_BY_CARD);
+  const globalPythonRuntime = useWorkspaceUiStore((s) => s.globalPythonRuntimeByProject?.[projectId]);
+  const selectedPythonRuntimeByProject = useWorkspaceUiStore((s) => s.selectedPythonRuntimeByProject?.[projectId] ?? EMPTY_SELECTED_RUNTIME_BY_CARD);
+  const globalRRuntime = useWorkspaceUiStore((s) => s.globalRRuntimeByProject?.[projectId]);
+  const selectedRRuntimeByProject = useWorkspaceUiStore((s) => s.selectedRRuntimeByProject?.[projectId] ?? EMPTY_SELECTED_RUNTIME_BY_CARD);
+  const scriptPreference = useWorkspaceUiStore((s) => s.scriptPreferenceByProject?.[projectId] ?? "auto");
   const currentChatSessionId = useWorkspaceUiStore((s) => s.currentChatSessionIdByProject[projectId] ?? null);
   const notice = useWorkspaceUiStore((s) => s.noticesByProject[projectId] ?? null);
   const setSelectedCard = useWorkspaceUiStore((s) => s.setSelectedCard);
   const setSelectedWorker = useWorkspaceUiStore((s) => s.setSelectedWorker);
   const setGlobalPythonRuntime = useWorkspaceUiStore((s) => s.setGlobalPythonRuntime);
   const setSelectedPythonRuntime = useWorkspaceUiStore((s) => s.setSelectedPythonRuntime);
+  const setGlobalRRuntime = useWorkspaceUiStore((s) => s.setGlobalRRuntime);
+  const setSelectedRRuntime = useWorkspaceUiStore((s) => s.setSelectedRRuntime);
+  const setScriptPreference = useWorkspaceUiStore((s) => s.setScriptPreference);
   const setNotice = useWorkspaceUiStore((s) => s.setNotice);
   const mobileTab = useWorkspaceUiStore((s) => s.mobileTabByProject[projectId] ?? "chat");
   const setMobileTab = useWorkspaceUiStore((s) => s.setMobileTab);
@@ -130,6 +136,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     ? selectedWorkerByProject[selectedCard.card_id] ?? selectedRun?.worker_type ?? configuredWorkers[0]?.worker_type
     : configuredWorkers[0]?.worker_type;
   const selectedPythonRuntime = selectedCard ? selectedPythonRuntimeByProject[selectedCard.card_id] : undefined;
+  const selectedRRuntime = selectedCard ? selectedRRuntimeByProject[selectedCard.card_id] : undefined;
   const allResultAssets = useMemo(
     () => (resultsQuery.data ? [...resultsQuery.data.accepted, ...resultsQuery.data.candidate, ...resultsQuery.data.other] : []),
     [resultsQuery.data],
@@ -206,19 +213,14 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     setSelectedCard(projectId, card.card_id);
     const workerType = selectedWorkerByProject[card.card_id] ?? configuredWorkers[0]?.worker_type;
     const pythonRuntime = selectedPythonRuntimeByProject[card.card_id] ?? globalPythonRuntime ?? "__system__";
+    const rRuntime = selectedRRuntimeByProject[card.card_id] ?? globalRRuntime ?? "__system__";
     try {
-      const response = await startRunMutation.mutateAsync({ cardId: card.card_id, workerType, pythonRuntime });
+      const response = await startRunMutation.mutateAsync({ cardId: card.card_id, workerType, pythonRuntime, rRuntime });
       if (response.latest_event) {
         queryClient.setQueryData(queryKeys.runEvents(projectId, response.run_id), { items: [response.latest_event] });
       }
-      if (response.status === "needs_approval") {
-        setNotice(projectId, `Run ${response.run_id} 已用 ${response.worker_type} 启动，正在等待运行时批准。`);
-      } else if (response.status === "cancelled") {
+      if (response.status === "cancelled") {
         setNotice(projectId, `Run ${response.run_id} 未启动：${response.worker_type} 的权限校验被拒绝。`);
-      } else if (response.latest_event?.message) {
-        setNotice(projectId, `[${response.worker_type}] ${response.latest_event.message}`);
-      } else {
-        setNotice(projectId, `Run ${response.run_id} 已用 ${response.worker_type} 启动。`);
       }
     } catch (error) {
       if (error instanceof ApiError && error.status === 409 && error.detail && typeof error.detail === "object") {
@@ -280,13 +282,14 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     setNotice(projectId, null);
     const workerType = selectedWorkerByProject[selectedCard.card_id] ?? configuredWorkers[0]?.worker_type;
     const pythonRuntime = selectedPythonRuntimeByProject[selectedCard.card_id] ?? globalPythonRuntime ?? "__system__";
+    const rRuntime = selectedRRuntimeByProject[selectedCard.card_id] ?? globalRRuntime ?? "__system__";
     try {
-      const response = await rerunCardMutation.mutateAsync({ cardId: selectedCard.card_id, workerType, pythonRuntime });
+      const response = await rerunCardMutation.mutateAsync({ cardId: selectedCard.card_id, workerType, pythonRuntime, rRuntime });
       if (response.latest_event) {
         queryClient.setQueryData(queryKeys.runEvents(projectId, response.run_id), { items: [response.latest_event] });
       }
       setSelectedCard(projectId, selectedCard.card_id);
-      setNotice(projectId, response.latest_event?.message ?? `已用 ${response.worker_type} 重新创建 run ${response.run_id}。`);
+      setNotice(projectId, null);
     } catch (error) {
       reportActionError(error, "重新运行 card 失败。");
     }
@@ -364,11 +367,18 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             setNotice(projectId, `Card ${card.card_id} 将使用 ${workerType} 执行。`);
           }}
           pythonRuntimes={snapshot.python_runtimes ?? []}
+          rRuntimes={snapshot.r_runtimes ?? []}
           globalPythonRuntime={globalPythonRuntime}
+          globalRRuntime={globalRRuntime}
           selectedPythonRuntimeByCard={selectedPythonRuntimeByProject}
+          selectedRRuntimeByCard={selectedRRuntimeByProject}
           onSelectPythonRuntime={(card, runtime) => {
             setSelectedPythonRuntime(projectId, card.card_id, runtime);
-            setNotice(projectId, `Card ${card.card_id} Python runtime: ${runtime ? formatPythonRuntime(runtime) : "follow global"}。`);
+            setNotice(projectId, `Card ${card.card_id} Python runtime: ${runtime ? formatRuntime(runtime) : "follow global"}。`);
+          }}
+          onSelectRRuntime={(card, runtime) => {
+            setSelectedRRuntime(projectId, card.card_id, runtime);
+            setNotice(projectId, `Card ${card.card_id} R runtime: ${runtime ? formatRuntime(runtime) : "follow global"}。`);
           }}
         />
       </div>
@@ -378,32 +388,41 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
         workItem={selectedWorkItem}
         run={selectedRun}
         latestEvent={runEventsQuery.data?.items?.at(-1)}
-        workerCapabilities={snapshot.worker_capabilities}
-        selectedWorkerType={selectedWorkerType}
-        pythonRuntimes={snapshot.python_runtimes ?? []}
-        globalPythonRuntime={globalPythonRuntime}
-        selectedPythonRuntime={selectedPythonRuntime}
-        onSelectGlobalPythonRuntime={(runtime) => {
-          setGlobalPythonRuntime(projectId, runtime);
-          setNotice(projectId, `全局 Python runtime: ${formatPythonRuntime(runtime)}。`);
-        }}
-        onSelectPythonRuntime={(runtime) => {
-          if (!selectedCard) return;
-          setSelectedPythonRuntime(projectId, selectedCard.card_id, runtime);
-          setNotice(projectId, `Card ${selectedCard.card_id} Python runtime: ${runtime ? formatPythonRuntime(runtime) : "follow global"}。`);
-        }}
-        onSelectWorker={(workerType) => {
-          if (!selectedCard) return;
-          setSelectedWorker(projectId, selectedCard.card_id, workerType);
-          setNotice(projectId, `Card ${selectedCard.card_id} 将使用 ${workerType} 执行。`);
-        }}
       />
     </div>
   );
 
   return (
     <div className="page-shell">
-      <SideNav projectId={projectId} current={view} />
+      <SideNav
+        projectId={projectId}
+        current={view}
+        pythonRuntimes={snapshot.python_runtimes ?? []}
+        rRuntimes={snapshot.r_runtimes ?? []}
+        globalPythonRuntime={globalPythonRuntime}
+        globalRRuntime={globalRRuntime}
+        scriptPreference={scriptPreference}
+        onSelectGlobalPythonRuntime={(runtime) => {
+          setGlobalPythonRuntime(projectId, runtime);
+          setNotice(projectId, `全局 Python runtime: ${formatRuntime(runtime)}。`);
+        }}
+        onSelectGlobalRRuntime={(runtime) => {
+          setGlobalRRuntime(projectId, runtime);
+          setNotice(projectId, `全局 R runtime: ${formatRuntime(runtime)}。`);
+        }}
+        onSelectScriptPreference={(preference) => {
+          setScriptPreference(projectId, preference);
+          const label =
+            preference === "prefer_python"
+              ? "偏好 Python"
+              : preference === "prefer_r"
+                ? "偏好 R"
+                : preference === "prefer_mixed"
+                  ? "按任务选择"
+                  : "让 Manager 询问";
+          setNotice(projectId, `脚本偏好: ${label}。`);
+        }}
+      />
       <main className={`content ${view === "tasks" ? "task-content" : ""}`}>
         {view !== "tasks" ? (
           <ProjectHeader
@@ -488,34 +507,21 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 graph={advancedGraphQuery.data?.graph ?? null}
                 gitItems={advancedGitQuery.data?.items ?? []}
                 pythonRuntimes={snapshot.python_runtimes ?? []}
+                rRuntimes={snapshot.r_runtimes ?? []}
                 globalPythonRuntime={globalPythonRuntime}
+                globalRRuntime={globalRRuntime}
                 onSelectGlobalPythonRuntime={(runtime) => {
                   setGlobalPythonRuntime(projectId, runtime);
-                  setNotice(projectId, `全局 Python runtime: ${formatPythonRuntime(runtime)}。`);
+                  setNotice(projectId, `全局 Python runtime: ${formatRuntime(runtime)}。`);
+                }}
+                onSelectGlobalRRuntime={(runtime) => {
+                  setGlobalRRuntime(projectId, runtime);
+                  setNotice(projectId, `全局 R runtime: ${formatRuntime(runtime)}。`);
                 }}
               />
               <CardDetailPanel
                 card={selectedCard}
                 summary={snapshot.summary}
-                workerCapabilities={snapshot.worker_capabilities}
-                selectedWorkerType={selectedWorkerType}
-                pythonRuntimes={snapshot.python_runtimes ?? []}
-                globalPythonRuntime={globalPythonRuntime}
-                selectedPythonRuntime={selectedPythonRuntime}
-                onSelectGlobalPythonRuntime={(runtime) => {
-                  setGlobalPythonRuntime(projectId, runtime);
-                  setNotice(projectId, `全局 Python runtime: ${formatPythonRuntime(runtime)}。`);
-                }}
-                onSelectPythonRuntime={(runtime) => {
-                  if (!selectedCard) return;
-                  setSelectedPythonRuntime(projectId, selectedCard.card_id, runtime);
-                  setNotice(projectId, `Card ${selectedCard.card_id} Python runtime: ${runtime ? formatPythonRuntime(runtime) : "follow global"}。`);
-                }}
-                onSelectWorker={(workerType) => {
-                  if (!selectedCard) return;
-                  setSelectedWorker(projectId, selectedCard.card_id, workerType);
-                  setNotice(projectId, `Card ${selectedCard.card_id} 将使用 ${workerType} 执行。`);
-                }}
               />
             </div>
           ) : null}
@@ -550,6 +556,20 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 onSelectWorker={(card, workerType) => {
                   setSelectedWorker(projectId, card.card_id, workerType);
                   setNotice(projectId, `Card ${card.card_id} 将使用 ${workerType} 执行。`);
+                }}
+                pythonRuntimes={snapshot.python_runtimes ?? []}
+                rRuntimes={snapshot.r_runtimes ?? []}
+                globalPythonRuntime={globalPythonRuntime}
+                globalRRuntime={globalRRuntime}
+                selectedPythonRuntimeByCard={selectedPythonRuntimeByProject}
+                selectedRRuntimeByCard={selectedRRuntimeByProject}
+                onSelectPythonRuntime={(card, runtime) => {
+                  setSelectedPythonRuntime(projectId, card.card_id, runtime);
+                  setNotice(projectId, `Card ${card.card_id} Python runtime: ${runtime ? formatRuntime(runtime) : "follow global"}。`);
+                }}
+                onSelectRRuntime={(card, runtime) => {
+                  setSelectedRRuntime(projectId, card.card_id, runtime);
+                  setNotice(projectId, `Card ${card.card_id} R runtime: ${runtime ? formatRuntime(runtime) : "follow global"}。`);
                 }}
               />
             )
@@ -603,34 +623,21 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     graph={advancedGraphQuery.data?.graph ?? null}
                     gitItems={advancedGitQuery.data?.items ?? []}
                     pythonRuntimes={snapshot.python_runtimes ?? []}
+                    rRuntimes={snapshot.r_runtimes ?? []}
                     globalPythonRuntime={globalPythonRuntime}
+                    globalRRuntime={globalRRuntime}
                     onSelectGlobalPythonRuntime={(runtime) => {
                       setGlobalPythonRuntime(projectId, runtime);
-                      setNotice(projectId, `全局 Python runtime: ${formatPythonRuntime(runtime)}。`);
+                      setNotice(projectId, `全局 Python runtime: ${formatRuntime(runtime)}。`);
+                    }}
+                    onSelectGlobalRRuntime={(runtime) => {
+                      setGlobalRRuntime(projectId, runtime);
+                      setNotice(projectId, `全局 R runtime: ${formatRuntime(runtime)}。`);
                     }}
                   />
                   <CardDetailPanel
                     card={selectedCard}
                     summary={snapshot.summary}
-                    workerCapabilities={snapshot.worker_capabilities}
-                    selectedWorkerType={selectedWorkerType}
-                    pythonRuntimes={snapshot.python_runtimes ?? []}
-                    globalPythonRuntime={globalPythonRuntime}
-                    selectedPythonRuntime={selectedPythonRuntime}
-                    onSelectGlobalPythonRuntime={(runtime) => {
-                      setGlobalPythonRuntime(projectId, runtime);
-                      setNotice(projectId, `全局 Python runtime: ${formatPythonRuntime(runtime)}。`);
-                    }}
-                    onSelectPythonRuntime={(runtime) => {
-                      if (!selectedCard) return;
-                      setSelectedPythonRuntime(projectId, selectedCard.card_id, runtime);
-                      setNotice(projectId, `Card ${selectedCard.card_id} Python runtime: ${runtime ? formatPythonRuntime(runtime) : "follow global"}。`);
-                    }}
-                    onSelectWorker={(workerType) => {
-                      if (!selectedCard) return;
-                      setSelectedWorker(projectId, selectedCard.card_id, workerType);
-                      setNotice(projectId, `Card ${selectedCard.card_id} 将使用 ${workerType} 执行。`);
-                    }}
                   />
                 </>
               ) : null}

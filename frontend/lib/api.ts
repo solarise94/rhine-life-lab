@@ -26,6 +26,12 @@ export interface ChatHistoryMessage {
   content: string;
 }
 
+export interface ChatRequestContext {
+  selected_card_id?: string | null;
+  selected_result_id?: string | null;
+  script_preference?: "auto" | "prefer_python" | "prefer_r" | "prefer_mixed";
+}
+
 export type ChatStreamEvent =
   | { type: "thinking_start"; content_index?: number }
   | { type: "thinking_delta"; delta?: string; content_index?: number }
@@ -193,12 +199,12 @@ export const api = {
   getAdvancedProposals(projectId: string) {
     return request<{ items: unknown[] }>(`/projects/${projectId}/advanced/proposals`);
   },
-  sendChat(projectId: string, message: string, messages: ChatHistoryMessage[] = []) {
+  sendChat(projectId: string, message: string, messages: ChatHistoryMessage[] = [], context: ChatRequestContext = {}) {
     return request<{ message: string; thinking?: string; proposal?: unknown; actions: Array<{ label: string; action: string }> }>(
       `/projects/${projectId}/chat`,
       {
         method: "POST",
-        body: JSON.stringify({ message, context: {}, thinking_effort: "medium", messages }),
+        body: JSON.stringify({ message, context, thinking_effort: "medium", messages }),
       },
     );
   },
@@ -209,11 +215,12 @@ export const api = {
     messages: ChatHistoryMessage[] = [],
     onEvent?: (event: ChatStreamEvent) => void,
     signal?: AbortSignal,
+    context: ChatRequestContext = {},
   ) {
     const response = await fetch(`${API_BASE}/projects/${projectId}/chat-stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, context: {}, thinking_effort: thinkingEffort, messages }),
+      body: JSON.stringify({ message, context, thinking_effort: thinkingEffort, messages }),
       cache: "no-store",
       signal,
     });
@@ -263,10 +270,11 @@ export const api = {
     message: string,
     thinkingEffort: "low" | "medium" | "high" = "medium",
     messages: ChatHistoryMessage[] = [],
+    context: ChatRequestContext = {},
   ) {
     return request<{ job_id: string; status: string }>(`/projects/${projectId}/chat-jobs`, {
       method: "POST",
-      body: JSON.stringify({ message, context: {}, thinking_effort: thinkingEffort, messages }),
+      body: JSON.stringify({ message, context, thinking_effort: thinkingEffort, messages }),
     });
   },
   getChatJob(projectId: string, jobId: string) {
@@ -292,10 +300,10 @@ export const api = {
   rejectProposal(projectId: string, proposalId: string) {
     return request<{ proposal: Proposal }>(`/projects/${projectId}/proposals/${proposalId}/reject`, { method: "POST" });
   },
-  startRun(projectId: string, cardId: string, workerType?: string, pythonRuntime?: string) {
+  startRun(projectId: string, cardId: string, workerType?: string, pythonRuntime?: string, rRuntime?: string) {
     return request<StartRunResponse>(`/projects/${projectId}/cards/${cardId}/start-run`, {
       method: "POST",
-      body: JSON.stringify({ worker_type: workerType ?? null, python_runtime: pythonRuntime ?? null }),
+      body: JSON.stringify({ worker_type: workerType ?? null, python_runtime: pythonRuntime ?? null, r_runtime: rRuntime ?? null }),
     });
   },
   resetCardRunState(projectId: string, cardId: string) {
@@ -303,10 +311,10 @@ export const api = {
       method: "POST",
     });
   },
-  rerunCard(projectId: string, cardId: string, workerType?: string, pythonRuntime?: string) {
+  rerunCard(projectId: string, cardId: string, workerType?: string, pythonRuntime?: string, rRuntime?: string) {
     return request<StartRunResponse>(`/projects/${projectId}/cards/${cardId}/rerun`, {
       method: "POST",
-      body: JSON.stringify({ worker_type: workerType ?? null, python_runtime: pythonRuntime ?? null }),
+      body: JSON.stringify({ worker_type: workerType ?? null, python_runtime: pythonRuntime ?? null, r_runtime: rRuntime ?? null }),
     });
   },
   getRunEvents(projectId: string, runId: string) {

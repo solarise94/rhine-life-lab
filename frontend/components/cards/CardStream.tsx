@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Archive, ChevronDown, ChevronUp } from "lucide-react";
-import { Card, PythonRuntime, WorkOrder, WorkerCapability } from "@/lib/types";
+import { Card, PythonRuntime, RRuntime, WorkOrder, WorkerCapability } from "@/lib/types";
 import { ModuleCard } from "./ModuleCard";
 import { ConnectionLines } from "./ConnectionLines";
 
@@ -20,9 +20,13 @@ export function CardStream({
   selectedWorkerByCard = {},
   onSelectWorker,
   pythonRuntimes = [],
+  rRuntimes = [],
   globalPythonRuntime,
+  globalRRuntime,
   selectedPythonRuntimeByCard = {},
+  selectedRRuntimeByCard = {},
   onSelectPythonRuntime,
+  onSelectRRuntime,
 }: {
   projectId: string;
   cards: Card[];
@@ -37,9 +41,13 @@ export function CardStream({
   selectedWorkerByCard?: Record<string, string | undefined>;
   onSelectWorker?: (card: Card, workerType: string) => void;
   pythonRuntimes?: PythonRuntime[];
+  rRuntimes?: RRuntime[];
   globalPythonRuntime?: string;
+  globalRRuntime?: string;
   selectedPythonRuntimeByCard?: Record<string, string | undefined>;
+  selectedRRuntimeByCard?: Record<string, string | undefined>;
   onSelectPythonRuntime?: (card: Card, runtime?: string) => void;
+  onSelectRRuntime?: (card: Card, runtime?: string) => void;
 }) {
   const moduleCards = useMemo(() => cards.filter((c) => c.card_type !== "system"), [cards]);
   const archivedCards = useMemo(
@@ -151,9 +159,13 @@ export function CardStream({
                       selectedWorkerType={selectedWorkerByCard[card.card_id]}
                       onSelectWorker={onSelectWorker}
                       pythonRuntimes={pythonRuntimes}
+                      rRuntimes={rRuntimes}
                       globalPythonRuntime={globalPythonRuntime}
+                      globalRRuntime={globalRRuntime}
                       selectedPythonRuntime={selectedPythonRuntimeByCard[card.card_id]}
+                      selectedRRuntime={selectedRRuntimeByCard[card.card_id]}
                       onSelectPythonRuntime={onSelectPythonRuntime}
+                      onSelectRRuntime={onSelectRRuntime}
                     />
                   </div>
                 ))}
@@ -197,9 +209,13 @@ export function CardStream({
                         selectedWorkerType={selectedWorkerByCard[card.card_id]}
                         onSelectWorker={onSelectWorker}
                         pythonRuntimes={pythonRuntimes}
+                        rRuntimes={rRuntimes}
                         globalPythonRuntime={globalPythonRuntime}
+                        globalRRuntime={globalRRuntime}
                         selectedPythonRuntime={selectedPythonRuntimeByCard[card.card_id]}
+                        selectedRRuntime={selectedRRuntimeByCard[card.card_id]}
                         onSelectPythonRuntime={onSelectPythonRuntime}
+                        onSelectRRuntime={onSelectRRuntime}
                       />
                     </div>
                   ))}
