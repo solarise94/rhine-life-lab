@@ -1099,13 +1099,14 @@ export function ManagerChatPanel({
 
   async function runManualCompaction() {
     if (busy || !sessionId) return;
+    const startedAt = Date.now();
     const compactId = `compact_manual_${Date.now().toString(36)}`;
     upsertCompactMessage({
       id: compactId,
       kind: "compact",
-      content: "",
+      content: "正在压缩历史对话，后续回复会使用压缩后的上下文。",
       status: "running",
-      startedAt: Date.now(),
+      startedAt,
     });
     setDraft("");
     setBusy(true);
@@ -1113,11 +1114,11 @@ export function ManagerChatPanel({
     try {
       const response = await api.compactChatSession(projectId, serializeSessionMessages(messages), thinkingEffort);
       finalizeCompaction({
-        id: response.compact_id,
+        id: compactId,
         kind: "compact",
         content: response.summary,
         status: "done",
-        startedAt: Date.now() - response.duration_ms,
+        startedAt,
         endedAt: Date.now(),
         durationMs: response.duration_ms,
         firstKeptMessageId: response.first_kept_message_id,
@@ -1134,7 +1135,7 @@ export function ManagerChatPanel({
         kind: "compact",
         content: message,
         status: "error",
-        startedAt: Date.now(),
+        startedAt,
         endedAt: Date.now(),
       });
     } finally {
@@ -1407,6 +1408,12 @@ export function ManagerChatPanel({
       title: `DeepSeek context window: ${sourceLabel}，当前约 ${historyTokens.toLocaleString()} tokens，剩余约 ${remainingTokens.toLocaleString()} tokens。上下文窗口 ${contextLimit.toLocaleString()} tokens。`,
     };
   }, [attachments, draft, messages]);
+  const slashCommandHint = draft.trim().startsWith("/")
+    ? {
+        command: "/compact",
+        label: "压缩当前会话上下文",
+      }
+    : null;
   const displayMessages = messages.length ? messages : [DEFAULT_MANAGER_MESSAGE];
   const sessionLoadError = chatSessionQuery.error instanceof Error ? chatSessionQuery.error.message : null;
   const sessionBusy = !sessionId || chatSessionQuery.isLoading;
@@ -1595,6 +1602,20 @@ export function ManagerChatPanel({
         ) : null}
 
         <div className="manager-composer-shell">
+          {slashCommandHint ? (
+            <div className="manager-slash-hint">
+              <button
+                type="button"
+                onClick={() => {
+                  setDraft(slashCommandHint.command);
+                  textareaRef.current?.focus();
+                }}
+              >
+                <span className="manager-slash-command">{slashCommandHint.command}</span>
+                <span>{slashCommandHint.label}</span>
+              </button>
+            </div>
+          ) : null}
           <div className="manager-composer">
             <input ref={fileInputRef} type="file" hidden onChange={handleFileChange} />
             <button
@@ -1614,7 +1635,7 @@ export function ManagerChatPanel({
                 setDraft(e.target.value);
                 syncMentionState(e.target.value, e.target.selectionStart);
               }}
-              placeholder="给 Manager 发消息…"
+              placeholder="给 Manager 发消息，或输入 /compact"
               onKeyDown={(e) => {
                 if (mentionState && mentionOptions.length) {
                   if (e.key === "ArrowDown") {

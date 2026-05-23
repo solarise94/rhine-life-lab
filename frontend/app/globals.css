@@ -1365,6 +1365,38 @@ button {
   background: transparent;
 }
 
+.manager-slash-hint {
+  display: flex;
+  justify-content: flex-start;
+  padding: 0 14px 8px;
+}
+
+.manager-slash-hint button {
+  border: 1px solid var(--line-bright);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.94);
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+}
+
+.manager-slash-hint button:hover {
+  color: var(--text);
+  border-color: var(--line);
+}
+
+.manager-slash-command {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 700;
+}
+
 .manager-composer {
   border: 1px solid var(--line-bright);
   border-radius: 30px;
