@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { AlertTriangle, Check, ChevronDown, ChevronUp, RotateCcw, Square, Trash2, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronUp, Loader2, RotateCcw, Square, Trash2, X } from "lucide-react";
 
 import { Card, RunEvent, RunRecord, RuntimeApprovalDecision } from "@/lib/types";
 
@@ -54,25 +54,25 @@ export function RunEventsPanel({
               <div className="proposal-actions">
                 {["queued", "needs_approval", "running", "reviewing"].includes(run.status) && onCancelRun ? (
                   <button className="btn secondary" disabled={actionPending} onClick={() => onCancelRun()}>
-                    <Square size={14} />
+                    {actionPending ? <Loader2 size={14} className="spinning" /> : <Square size={14} />}
                     Cancel
                   </button>
                 ) : null}
                 {["success", "failed", "cancelled", "reviewed"].includes(run.status) && run.cleanup_status !== "completed" && onCleanupRun ? (
                   <button className="btn secondary" disabled={actionPending} onClick={() => onCleanupRun()}>
-                    <Trash2 size={14} />
+                    {actionPending ? <Loader2 size={14} className="spinning" /> : <Trash2 size={14} />}
                     Cleanup
                   </button>
                 ) : null}
                 {card && ["failed", "needs_review", "rejected", "cancelled"].includes(card.status) && onResetCard ? (
                   <button className="btn secondary" disabled={actionPending} onClick={() => onResetCard()}>
-                    <RotateCcw size={14} />
+                    {actionPending ? <Loader2 size={14} className="spinning" /> : <RotateCcw size={14} />}
                     Reset Card
                   </button>
                 ) : null}
                 {card && !["running", "reviewing", "proposed", "superseded", "stale"].includes(card.status) && onRerunCard ? (
                   <button className="btn primary" disabled={actionPending} onClick={() => onRerunCard()}>
-                    <RotateCcw size={14} />
+                    {actionPending ? <Loader2 size={14} className="spinning" /> : <RotateCcw size={14} />}
                     Rerun
                   </button>
                 ) : null}

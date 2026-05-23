@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { ChevronDown, ChevronUp, ExternalLink, FileText, FolderOpen, Send, Terminal, Trash2, RotateCcw } from "lucide-react";
 import { Card } from "@/lib/types";
-import { api } from "@/lib/api";
 import { useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 
 export function FileBag({
@@ -12,12 +11,14 @@ export function FileBag({
   embedded = false,
   mode = "files",
   onAskManager,
+  onPreviewAsset,
 }: {
   projectId: string;
   card: Card;
   embedded?: boolean;
   mode?: "files" | "archive";
   onAskManager?: (text: string) => void;
+  onPreviewAsset?: (assetId: string, cardId?: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [resultsExpanded, setResultsExpanded] = useState(!embedded);
@@ -124,11 +125,11 @@ export function FileBag({
                     {r.asset_id ? (
                       <button
                         onClick={() => {
-                          window.open(api.getResultAssetContentUrl(projectId, r.asset_id!), "_blank");
+                          onPreviewAsset?.(r.asset_id!, card.card_id);
                         }}
                       >
                         <ExternalLink size={11} />
-                        查看
+                        预览
                       </button>
                     ) : null}
                     <button

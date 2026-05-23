@@ -44,6 +44,14 @@ def chat_stream(project_id: str, request: ChatRequest, manager_service: ManagerS
     )
 
 
+@router.post("/chat-compact")
+def chat_compact(project_id: str, request: ChatRequest, manager_service: ManagerService = Depends(get_manager_service)) -> dict:
+    try:
+        return manager_service.compact_chat_session(project_id, request)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.post("/chat-jobs")
 def create_chat_job(
     project_id: str,

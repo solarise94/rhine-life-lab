@@ -1278,8 +1278,16 @@ class WorkerService:
         python_runtime: str | None = None,
         r_runtime: str | None = None,
     ) -> ExecutorContext:
+        graph = self.project_service.graph_store(project_id).load_graph()
+        default_context = self._default_executor_context(
+            graph,
+            card,
+            worker_type,
+            python_runtime=python_runtime,
+            r_runtime=r_runtime,
+        )
         if card.executor_context is not None:
-            context = card.executor_context.model_copy(deep=True)
+            context = self._merge_executor_context(default_context, card.executor_context)
             if python_runtime:
                 context.runtime_bindings.conda_env = python_runtime
                 context.runtime_bindings.env["BLUEPRINT_PYTHON_RUNTIME"] = python_runtime
@@ -1287,7 +1295,16 @@ class WorkerService:
                 context.runtime_bindings.r_env = r_runtime
                 context.runtime_bindings.env["BLUEPRINT_R_RUNTIME"] = r_runtime
             return context
-        graph = self.project_service.graph_store(project_id).load_graph()
+        return default_context
+
+    @staticmethod
+    def _default_executor_context(
+        graph: Any,
+        card: Card,
+        worker_type: str,
+        python_runtime: str | None = None,
+        r_runtime: str | None = None,
+    ) -> ExecutorContext:
         conda_env = python_runtime or graph.metadata.get("default_conda_env")
         r_env = r_runtime or graph.metadata.get("default_r_env")
         runtime_env = {}
@@ -1314,6 +1331,43 @@ class WorkerService:
                 env=runtime_env,
             ),
         )
+
+    @staticmethod
+    def _merge_executor_context(default_context: ExecutorContext, override: ExecutorContext) -> ExecutorContext:
+        context = default_context.model_copy(deep=True)
+        if override.executor_profile is not None:
+            context.executor_profile = override.executor_profile
+        if "skills" in override.model_fields_set:
+            context.skills = list(override.skills)
+        if "instruction_blocks" in override.model_fields_set:
+            context.instruction_blocks = list(override.instruction_blocks)
+        if "references" in override.model_fields_set:
+            context.references = [item.model_copy(deep=True) for item in override.references]
+        if "tool_policy" in override.model_fields_set:
+            policy_fields = override.tool_policy.model_fields_set
+            if "network" in policy_fields and override.tool_policy.network in {"allow", "deny"}:
+                context.tool_policy.network = override.tool_policy.network
+            if "python" in policy_fields:
+                context.tool_policy.python = override.tool_policy.python
+            if "rscript" in policy_fields:
+                context.tool_policy.rscript = override.tool_policy.rscript
+            if "shell" in policy_fields:
+                context.tool_policy.shell = override.tool_policy.shell
+            if "git_write" in policy_fields:
+                context.tool_policy.git_write = override.tool_policy.git_write
+        if "runtime_bindings" in override.model_fields_set:
+            runtime_fields = override.runtime_bindings.model_fields_set
+            if "conda_env" in runtime_fields:
+                context.runtime_bindings.conda_env = override.runtime_bindings.conda_env
+            if "r_env" in runtime_fields:
+                context.runtime_bindings.r_env = override.runtime_bindings.r_env
+            if "container_image" in runtime_fields:
+                context.runtime_bindings.container_image = override.runtime_bindings.container_image
+            if "working_dir" in runtime_fields:
+                context.runtime_bindings.working_dir = override.runtime_bindings.working_dir
+            if "env" in runtime_fields:
+                context.runtime_bindings.env.update(override.runtime_bindings.env)
+        return context
 
     @staticmethod
     def _build_manager_reporting_contract() -> ManagerReportingContract:

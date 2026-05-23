@@ -22,11 +22,13 @@ export function ResultsGrid({
   items,
   selectedAssetId,
   onSelect,
+  onPreview,
 }: {
   title: string;
   items: Asset[];
   selectedAssetId?: string;
   onSelect: (asset: Asset) => void;
+  onPreview?: (asset: Asset) => void;
 }) {
   return (
     <div className="panel">
@@ -45,7 +47,10 @@ export function ResultsGrid({
                   key={item.asset_id}
                   className={`result-item result-button ${selectedAssetId === item.asset_id ? "active" : ""} animate-enter`}
                   style={{ animationDelay: `${idx * 40}ms`, minHeight: 100 }}
-                  onClick={() => onSelect(item)}
+                  onClick={() => {
+                    onSelect(item);
+                    onPreview?.(item);
+                  }}
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <div

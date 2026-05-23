@@ -73,6 +73,20 @@ def update_card(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.post("/card-execution")
+def configure_card_execution(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.configure_card_execution(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.delete("/cards/{card_id}")
 def delete_card(
     project_id: str,
@@ -127,5 +141,33 @@ def read_result_asset(
     _verify_internal_token(authorization)
     try:
         return manager_service.blueprint_tools.read_result_asset(project_id, asset_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/memory/list")
+def list_project_memory(
+    project_id: str,
+    payload: dict | None = None,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.list_project_memory(project_id, payload or {})
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/memory")
+def write_project_memory(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.write_project_memory(project_id, payload)
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

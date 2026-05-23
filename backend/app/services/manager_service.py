@@ -126,6 +126,40 @@ class ManagerService:
 
         return iterator()
 
+    def compact_chat_session(self, project_id: str, chat_request: ChatRequest) -> dict:
+        if self.settings.manager_backend != "pi":
+            raise ManagerPlanningError("Only BLUEPRINT_MANAGER_BACKEND=pi is supported.")
+        token = self.settings.internal_tool_token.get_secret_value() if self.settings.internal_tool_token else ""
+        if not token:
+            raise ManagerPlanningError("BLUEPRINT_INTERNAL_TOOL_TOKEN is not configured.")
+        payload = {
+            "project_id": project_id,
+            "message": chat_request.message,
+            "context": chat_request.context.model_dump(),
+            "thinking_effort": chat_request.thinking_effort,
+            "messages": [item.model_dump() for item in chat_request.messages],
+            "session_messages": [item.model_dump() for item in chat_request.session_messages],
+            "backend_api_base_url": self.settings.backend_api_base_url.rstrip("/"),
+            "internal_tool_token": token,
+        }
+        endpoint = f"{self.settings.pi_manager_url.rstrip('/')}/compact"
+        http_request = url_request.Request(
+            endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            method="POST",
+            headers={"content-type": "application/json"},
+        )
+        try:
+            with url_request.urlopen(http_request, timeout=self.settings.manager_timeout_seconds) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise ManagerPlanningError(f"Pi manager failed with HTTP {exc.code}: {detail}") from exc
+        except error.URLError as exc:
+            raise ManagerPlanningError(f"Pi manager request failed: {exc.reason}") from exc
+        except (TimeoutError, OSError, json.JSONDecodeError) as exc:
+            raise ManagerPlanningError(f"Pi manager request failed: {exc}") from exc
+
     def _chat_via_local(self, project_id: str, request: ChatRequest) -> ChatResponse:
         snapshot = self.project_service.get_project_snapshot(project_id)
         intent = self.intent_router.classify(request.message)

@@ -1,5 +1,12 @@
-import { Agent } from "@earendil-works/pi-agent-core";
+import {
+  Agent,
+  DEFAULT_COMPACTION_SETTINGS,
+  compact,
+  estimateContextTokens,
+  prepareCompaction,
+} from "@earendil-works/pi-agent-core";
 import { clampThinkingLevel, getModel, registerBuiltInApiProviders, Type } from "@earendil-works/pi-ai";
+import { buildSessionContext } from "../node_modules/@earendil-works/pi-agent-core/dist/harness/session/session.js";
 
 registerBuiltInApiProviders();
 
@@ -11,8 +18,30 @@ const API_KEY = process.env.MANAGER_AGENT_API_KEY || process.env.BLUEPRINT_DEEPS
 const TIMEOUT_MS = Number(process.env.MANAGER_AGENT_TIMEOUT_MS || "600000");
 const HEARTBEAT_INTERVAL_MS = 5000;
 const WAIT_LOG_INTERVAL_MS = Number(process.env.MANAGER_AGENT_WAIT_LOG_INTERVAL_MS || "30000");
+const MANAGER_WEBSEARCH_ENABLED = /^(1|true|yes|on)$/i.test(process.env.MANAGER_WEBSEARCH_ENABLED || "");
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY || "";
+const TAVILY_BASE_URL = process.env.TAVILY_BASE_URL || "https://api.tavily.com";
+const MANAGER_CONTEXT_WINDOW_TOKENS = Number(process.env.MANAGER_CONTEXT_WINDOW_TOKENS || "1000000");
+const MANAGER_COMPACTION_ENABLED = !/^(0|false|no|off)$/i.test(process.env.MANAGER_COMPACTION_ENABLED || "true");
+const MANAGER_COMPACTION_KEEP_RECENT_TOKENS = Number(process.env.MANAGER_COMPACTION_KEEP_RECENT_TOKENS || "120000");
+const MANAGER_COMPACTION_RESERVE_TOKENS = Number(process.env.MANAGER_COMPACTION_RESERVE_TOKENS || "16000");
 
-const SYSTEM_PROMPT = `You are the Manager AI for Blueprint RE, a bioinformatics workflow manager.
+function buildSystemPrompt() {
+  const webCapabilityLines =
+    MANAGER_WEBSEARCH_ENABLED && TAVILY_API_KEY
+      ? [
+          "- web_search finds current public web information when up-to-date external context is required.",
+          "- web_extract reads the content of a specific public web page after search identifies a source.",
+        ]
+      : [];
+  const webJudgmentLines =
+    MANAGER_WEBSEARCH_ENABLED && TAVILY_API_KEY
+      ? [
+          "- Use web_search or web_extract when the user explicitly asks for current/latest information, when external docs or recent package behavior matters, or when you need to verify a claim before editing the blueprint.",
+          "- Do not use web tools when project context is already sufficient, or when doing so could expose local secrets or private project content.",
+        ]
+      : [];
+  return `You are the Manager AI for Blueprint RE, a bioinformatics workflow manager.
 
 You are an interactive project agent. Answer directly when the user is asking a general question. Use tools when they materially improve correctness or when the user asks you to inspect or change the current project.
 
@@ -24,19 +53,29 @@ Core model:
 Available capabilities:
 - get_project_context reads current cards, modules, assets, runs, and claims.
 - list_data_assets reads materialized assets, planned outputs, workspace paths, producer/consumer relations, and timeline steps.
+- list_project_memory reads short-lived-to-long-term project preferences and corrections. It is not the source of project execution facts.
+- write_project_memory stores only explicit user preferences and corrections, such as "remember this", "default to this", or "do not do this again".
 - create_card, update_card, and delete_card directly modify blueprint cards after backend validation.
+- configure_card_execution directly updates card execution permissions/runtime bindings such as tool_policy.rscript and tool_policy.network.
 - read_result_asset reads a whitelisted result asset preview by asset_id.
+${webCapabilityLines.join("\n")}
 
 Judgment:
 - Decide whether current project context is needed. If exact card ids, asset ids, steps, or current blueprint state matter, inspect the project first.
 - For broad workflow additions, inspect data assets/timeline before choosing steps and asset_ids.
+- For plotting style, report style, recurring user preferences, or previously corrected behavior, read project memory when relevant.
+- Treat the blueprint/cards/assets/runs as the source of project execution facts. Do not write blueprint facts into project memory.
 - For simple conceptual questions, answer without tools.
 - For blueprint/card changes, use card tools directly once you have enough context. Do not describe a change as complete unless a write tool succeeded.
 - If a write tool returns ok:false, use the message/retry_hint to correct arguments and retry when the correction is clear. If it is not clear, inspect context or ask a focused question.
+${webJudgmentLines.join("\n")}
+- Write project memory only when the user explicitly asks you to remember a durable preference, says a behavior should be the default, or corrects something you should avoid in future. Keep memory summaries short.
+- Do not ask the user to approve executor runtime permissions in a card prompt. Card agents cannot ask the user interactively. If a card needs Rscript or network access, use configure_card_execution on that card before telling the user it is ready.
 - For multi-step workflow creation, you may create multiple cards in one conversation. Re-check the timeline when useful.
 - Reuse existing card ids when updating existing work. Create new ids only for genuinely new cards.
 - Do not use or mention blueprint proposal, blueprint review, or approval flows. Card tools are the source of truth for blueprint edits.
 - Respect selected_context.script_preference when creating analysis cards. It is a soft script-language preference, not a hard constraint.
+- Respect selected_context.python_runtime and selected_context.r_runtime as preferred execution runtimes when planning or updating analysis cards.
 - If script_preference is auto and a new bioinformatics card could reasonably be implemented in either Python or R, ask the user which script style they prefer when that choice materially affects the workflow.
 - When a concrete script preference is known, add it to executor_context.instruction_blocks on new or updated analysis cards.
 - Keep final replies concise and user-facing.
@@ -46,9 +85,10 @@ Card fields:
 - Common card_type values: module, module_group.
 - Common status values: planned, proposed, accepted, cancelled, failed, stale, superseded.
 - Useful fields: step, why, inputs, outputs, key_findings, manager_review, next_actions, linked_modules, linked_runs, linked_assets, progress_note.
-- executor_context may include instruction_blocks for soft execution guidance such as script-language preference.
+- executor_context may include instruction_blocks for soft execution guidance such as script-language preference. Prefer configure_card_execution for tool_policy/runtime permission changes.
 - Inputs and outputs are arrays shaped like { label, asset_id?, status? }.
 - Prefer status "planned" for future work, "cancelled" for dormant/deleted cards, and "accepted" only for completed accepted work.`;
+}
 
 const TOOL_STATUS_LABELS = {
   get_project_context: {
@@ -59,6 +99,14 @@ const TOOL_STATUS_LABELS = {
     active: "正在查看数据资产",
     done: "已查看数据资产",
   },
+  list_project_memory: {
+    active: "正在读取项目记忆",
+    done: "已读取项目记忆",
+  },
+  write_project_memory: {
+    active: "正在写入项目记忆",
+    done: "已写入项目记忆",
+  },
   create_card: {
     active: "正在创建卡片",
     done: "已创建卡片",
@@ -67,6 +115,10 @@ const TOOL_STATUS_LABELS = {
     active: "正在更新卡片",
     done: "已更新卡片",
   },
+  configure_card_execution: {
+    active: "正在配置卡片权限",
+    done: "已配置卡片权限",
+  },
   delete_card: {
     active: "正在删除卡片",
     done: "已删除卡片",
@@ -74,6 +126,14 @@ const TOOL_STATUS_LABELS = {
   read_result_asset: {
     active: "正在读取结果文件",
     done: "已读取结果文件",
+  },
+  web_search: {
+    active: "正在搜索网页",
+    done: "已搜索网页",
+  },
+  web_extract: {
+    active: "正在读取网页",
+    done: "已读取网页",
   },
 };
 
@@ -201,6 +261,26 @@ function scriptPreferenceGuidance(scriptPreference) {
   };
 }
 
+function runtimePreferenceGuidance(context = {}) {
+  const pythonRuntime = context?.python_runtime || null;
+  const rRuntime = context?.r_runtime || null;
+  const instructions = [];
+  if (pythonRuntime) {
+    instructions.push(`Preferred Python runtime for future card execution: ${pythonRuntime}.`);
+  }
+  if (rRuntime) {
+    instructions.push(`Preferred R runtime for future card execution: ${rRuntime}.`);
+  }
+  if (!instructions.length) {
+    return { python_runtime: null, r_runtime: null, card_instruction_block: null };
+  }
+  return {
+    python_runtime: pythonRuntime,
+    r_runtime: rRuntime,
+    card_instruction_block: `Runtime preference: ${instructions.join(" ")} Add this to executor_context.instruction_blocks when it is relevant to a new or updated analysis card.`,
+  };
+}
+
 function logManagerEvent(event, fields = {}) {
   console.log(
     JSON.stringify({
@@ -236,6 +316,18 @@ function summarizeToolPayload(toolName, payload) {
       assets: Array.isArray(payload.assets) ? payload.assets.length : undefined,
       cards: Array.isArray(payload.cards) ? payload.cards.length : undefined,
       planned_assets: Array.isArray(payload.planned_assets) ? payload.planned_assets.length : undefined,
+    };
+  }
+  if (toolName === "list_project_memory") {
+    return {
+      memory_items: Array.isArray(payload.items) ? payload.items.length : undefined,
+    };
+  }
+  if (toolName === "write_project_memory") {
+    return {
+      memory_id: payload.memory?.memory_id,
+      memory_kind: payload.memory?.kind,
+      items_count: payload.items_count,
     };
   }
   if (toolName === "create_card" || toolName === "update_card" || toolName === "delete_card") {
@@ -292,7 +384,7 @@ async function callLoggedTool(toolName, toolCallId, projectId, baseUrl, token, p
 
 function createTools(request) {
   const { project_id: projectId, backend_api_base_url: baseUrl, internal_tool_token: token } = request;
-  return [
+  const tools = [
     {
       name: "get_project_context",
       label: "Read project context",
@@ -329,6 +421,68 @@ function createTools(request) {
           signal,
         );
         return textResult(JSON.stringify(payload, null, 2), payload);
+      },
+    },
+    {
+      name: "list_project_memory",
+      label: "Read project memory",
+      description: "Read short project memory containing only explicit user preferences and corrections. Use for plotting style, report style, recurring preferences, or avoiding previously corrected behavior. Do not use it as the source of project execution facts; use blueprint tools for that.",
+      parameters: Type.Object({
+        kind: Type.Optional(Type.String({ description: "user_preference or correction_memory" })),
+        query: Type.Optional(Type.String()),
+        limit: Type.Optional(Type.Number({ description: "Maximum memories to return. Defaults to 5, capped by backend." })),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "list_project_memory",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/memory/list`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify(payload, null, 2), payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "list_project_memory_failed", tool_name: "list_project_memory" });
+        }
+      },
+    },
+    {
+      name: "write_project_memory",
+      label: "Write project memory",
+      description: "Store or update a durable project memory. Only write when the user explicitly asks you to remember a preference/default or corrects behavior to avoid. Valid kinds are user_preference and correction_memory. Keep summaries short and do not store blueprint facts.",
+      parameters: Type.Object({
+        memory_id: Type.Optional(Type.String()),
+        kind: Type.String({ description: "user_preference or correction_memory" }),
+        summary: Type.String({ description: "Short durable rule. Do not include raw chat transcripts or project execution facts." }),
+        source: Type.Optional(Type.String()),
+        confidence: Type.Optional(Type.Number()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "write_project_memory",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/memory`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify({ ok: true, ...payload }, null, 2), { ok: true, ...payload });
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "write_project_memory_failed", tool_name: "write_project_memory" });
+        }
       },
     },
     {
@@ -452,6 +606,54 @@ function createTools(request) {
       },
     },
     {
+      name: "configure_card_execution",
+      label: "Configure card execution",
+      description: "Update execution permissions and runtime bindings for one or more cards. Use this when cards need Rscript, network access, selected runtimes, or non-interactive permission policy changes. This merges into existing executor_context without rewriting the whole card.",
+      parameters: Type.Object({
+        card_id: Type.Optional(Type.String()),
+        card_ids: Type.Optional(Type.Array(Type.String())),
+        tool_policy: Type.Optional(
+          Type.Object({
+            network: Type.Optional(Type.String({ description: "allow, deny, or prompt. Use allow when the card agent must access model APIs or download databases without asking the user." })),
+            python: Type.Optional(Type.Boolean()),
+            rscript: Type.Optional(Type.Boolean({ description: "Set true for R/GSVA/ESTIMATE-style cards." })),
+            shell: Type.Optional(Type.Boolean()),
+            git_write: Type.Optional(Type.Boolean()),
+          }),
+        ),
+        runtime_bindings: Type.Optional(
+          Type.Object({
+            conda_env: Type.Optional(Type.String()),
+            r_env: Type.Optional(Type.String()),
+            working_dir: Type.Optional(Type.String()),
+            env: Type.Optional(Type.Record(Type.String(), Type.String())),
+          }),
+        ),
+        instruction_blocks: Type.Optional(Type.Array(Type.String())),
+        progress_note: Type.Optional(Type.String()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "configure_card_execution",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/card-execution`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify({ ok: true, ...payload }, null, 2), { ok: true, ...payload });
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "configure_card_execution_failed", tool_name: "configure_card_execution" });
+        }
+      },
+    },
+    {
       name: "read_result_asset",
       label: "Read result asset",
       description: "Read a whitelisted result asset detail/preview by exact asset_id.",
@@ -473,6 +675,60 @@ function createTools(request) {
       },
     },
   ];
+  if (MANAGER_WEBSEARCH_ENABLED && TAVILY_API_KEY) {
+    tools.push(
+      {
+        name: "web_search",
+        label: "Search the web",
+        description: "Search current public web information via Tavily. Use for current docs, recent behavior, or external verification.",
+        parameters: Type.Object({
+          query: Type.String(),
+          search_depth: Type.Optional(Type.String({ description: "basic or advanced" })),
+          max_results: Type.Optional(Type.Number()),
+          include_domains: Type.Optional(Type.Array(Type.String())),
+          exclude_domains: Type.Optional(Type.Array(Type.String())),
+        }),
+        execute: async (_toolCallId, params, signal) => {
+          const payload = await callTavily(
+            "/search",
+            {
+              query: params.query,
+              search_depth: params.search_depth || "basic",
+              max_results: params.max_results || 5,
+              include_domains: params.include_domains,
+              exclude_domains: params.exclude_domains,
+              include_answer: true,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify(payload, null, 2), payload);
+        },
+      },
+      {
+        name: "web_extract",
+        label: "Extract web page content",
+        description: "Extract readable markdown or text from specific URLs via Tavily.",
+        parameters: Type.Object({
+          urls: Type.Array(Type.String()),
+          extract_depth: Type.Optional(Type.String({ description: "basic or advanced" })),
+          format: Type.Optional(Type.String({ description: "markdown or text" })),
+        }),
+        execute: async (_toolCallId, params, signal) => {
+          const payload = await callTavily(
+            "/extract",
+            {
+              urls: params.urls,
+              extract_depth: params.extract_depth || "basic",
+              format: params.format || "markdown",
+            },
+            signal,
+          );
+          return textResult(JSON.stringify(payload, null, 2), payload);
+        },
+      },
+    );
+  }
+  return tools;
 }
 
 function extractText(message) {
@@ -493,9 +749,8 @@ function toolStatusLabel(toolName) {
 }
 
 function collectThinking(thinkingBlocks) {
-  return Array.from(thinkingBlocks.entries())
-    .sort((left, right) => left[0] - right[0])
-    .map((entry) => entry[1]?.trim())
+  return Array.from(thinkingBlocks.values())
+    .map((value) => value?.trim())
     .filter(Boolean)
     .join("\n\n");
 }
@@ -513,8 +768,249 @@ function normalizeHistory(messages) {
     }));
 }
 
+function compactTimelineItem(message) {
+  if (!Array.isArray(message?.timeline)) {
+    return null;
+  }
+  return message.timeline.find((item) => item?.kind === "compact" && typeof item?.content === "string" && item.content.trim());
+}
+
+const CONTEXT_FALLBACK_MESSAGE_LIMIT = 50;
+
+function messageTextForContext(message) {
+  if (!message || typeof message !== "object") {
+    return "";
+  }
+  const compactionItem = compactTimelineItem(message);
+  if (compactionItem?.content) {
+    return compactionItem.content.trim();
+  }
+  if (typeof message.content === "string" && message.content.trim()) {
+    return message.content.trim();
+  }
+  return "";
+}
+
+function buildSessionEntries(sessionMessages = []) {
+  const entries = [];
+  let parentId = null;
+  const baseTime = Date.now();
+  for (let index = 0; index < sessionMessages.length; index += 1) {
+    const message = sessionMessages[index];
+    if (!message || (message.role !== "user" && message.role !== "manager")) {
+      continue;
+    }
+    const compactionItem = compactTimelineItem(message);
+    const timestamp = new Date(baseTime + index).toISOString();
+    if (compactionItem?.content) {
+      const entryId = compactionItem.id || message.id || `compact_${index}`;
+      entries.push({
+        type: "compaction",
+        id: entryId,
+        parentId,
+        timestamp,
+        summary: compactionItem.content.trim(),
+        firstKeptEntryId: compactionItem.first_kept_message_id || "root",
+        tokensBefore: Number(compactionItem.tokens_before) || 0,
+        details: {
+          tokens_after: Number(compactionItem.tokens_after) || undefined,
+          duration_ms: Number(compactionItem.duration_ms) || undefined,
+          provider: compactionItem.provider || undefined,
+          model: compactionItem.model || undefined,
+        },
+        fromHook: true,
+      });
+      parentId = entryId;
+      continue;
+    }
+    const text = messageTextForContext(message);
+    if (!text) {
+      continue;
+    }
+    const entryId = message.id || `message_${index}`;
+    entries.push({
+      type: "message",
+      id: entryId,
+      parentId,
+      timestamp,
+      message: {
+        role: message.role === "manager" ? "assistant" : "user",
+        content: [{ type: "text", text }],
+        timestamp: baseTime + index,
+        provider: PROVIDER,
+        model: MODEL,
+      },
+    });
+    parentId = entryId;
+  }
+  return entries;
+}
+
+function compactionSettings() {
+  return {
+    ...DEFAULT_COMPACTION_SETTINGS,
+    enabled: MANAGER_COMPACTION_ENABLED,
+    keepRecentTokens: MANAGER_COMPACTION_KEEP_RECENT_TOKENS,
+    reserveTokens: MANAGER_COMPACTION_RESERVE_TOKENS,
+  };
+}
+
+function currentContextWindow(model) {
+  if (MANAGER_CONTEXT_WINDOW_TOKENS > 0) {
+    return MANAGER_CONTEXT_WINDOW_TOKENS;
+  }
+  const fromModel = Number.isFinite(Number(model?.contextWindow)) ? Number(model.contextWindow) : 0;
+  return fromModel > 0 ? fromModel : 0;
+}
+
+async function maybeCompactSessionHistory({ sessionMessages, model, thinkingEffort, emitEvent, signal, auto = true, force = false }) {
+  const entries = buildSessionEntries(sessionMessages);
+  const context = buildSessionContext(entries);
+  const messages = context.messages;
+  if (!messages.length) {
+    return { compacted: false, contextMessages: messages };
+  }
+  const settings = compactionSettings();
+  if (!settings.enabled) {
+    return { compacted: false, contextMessages: messages };
+  }
+  const estimate = estimateContextTokens(messages);
+  const contextWindow = currentContextWindow(model);
+  const threshold = contextWindow - settings.reserveTokens;
+  if (!force && (estimate.tokens <= 0 || estimate.tokens < threshold)) {
+    return { compacted: false, contextMessages: messages };
+  }
+  const preparationResult = prepareCompaction(entries, settings);
+  if (!preparationResult.ok) {
+    throw preparationResult.error;
+  }
+  const preparation = preparationResult.value;
+  if (!preparation) {
+    return { compacted: false, contextMessages: messages };
+  }
+  const compactId = `compact_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const startedAt = Date.now();
+  emitEvent?.({
+    type: "compact_start",
+    compact_id: compactId,
+    auto,
+  });
+  const compactResult = await compact(
+    preparation,
+    model,
+    API_KEY,
+    undefined,
+    undefined,
+    signal,
+    mapThinkingLevel(thinkingEffort, model),
+  );
+  if (!compactResult.ok) {
+    emitEvent?.({
+      type: "compact_error",
+      compact_id: compactId,
+      message: compactResult.error.message,
+      auto,
+    });
+    throw compactResult.error;
+  }
+  const result = compactResult.value;
+  const compactionEntry = {
+    type: "compaction",
+    id: compactId,
+    parentId: entries.at(-1)?.id ?? null,
+    timestamp: new Date().toISOString(),
+    summary: result.summary,
+    firstKeptEntryId: result.firstKeptEntryId,
+    tokensBefore: result.tokensBefore,
+    details: result.details,
+    fromHook: auto,
+  };
+  const compactedMessages = buildSessionContext([...entries, compactionEntry]).messages;
+  const tokensAfter = estimateContextTokens(compactedMessages).tokens;
+  const durationMs = Date.now() - startedAt;
+  emitEvent?.({
+    type: "compact_end",
+    compact_id: compactId,
+    content: result.summary,
+    duration_ms: durationMs,
+    tokens_before: result.tokensBefore,
+    tokens_after: tokensAfter,
+    first_kept_message_id: result.firstKeptEntryId,
+    provider: PROVIDER,
+    model: MODEL,
+    auto,
+  });
+  return {
+    compacted: true,
+    compactId,
+    contextMessages: compactedMessages,
+    summary: result.summary,
+    firstKeptMessageId: result.firstKeptEntryId,
+    tokensBefore: result.tokensBefore,
+    tokensAfter,
+    durationMs,
+    provider: PROVIDER,
+    model: MODEL,
+  };
+}
+
+async function callTavily(path, payload, signal) {
+  if (!MANAGER_WEBSEARCH_ENABLED || !TAVILY_API_KEY) {
+    return {
+      ok: false,
+      disabled: true,
+      message: "Web search is disabled. Set MANAGER_WEBSEARCH_ENABLED=true and configure TAVILY_API_KEY.",
+    };
+  }
+  const response = await fetch(`${TAVILY_BASE_URL}${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${TAVILY_API_KEY}`,
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  const text = await response.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { detail: text };
+  }
+  if (!response.ok) {
+    throw new Error(typeof data?.detail === "string" ? data.detail : `Tavily request failed with HTTP ${response.status}`);
+  }
+  return data;
+}
+
 function createRunId() {
   return `mgr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeTokenUsage(usage, model) {
+  if (!usage || typeof usage !== "object") {
+    return null;
+  }
+  const numberOrZero = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0);
+  const inputTokens = numberOrZero(usage.input);
+  const outputTokens = numberOrZero(usage.output);
+  const cacheReadTokens = numberOrZero(usage.cacheRead);
+  const cacheWriteTokens = numberOrZero(usage.cacheWrite);
+  const totalTokens =
+    numberOrZero(usage.totalTokens) || inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+  if (totalTokens <= 0) {
+    return null;
+  }
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    cache_read_tokens: cacheReadTokens,
+    cache_write_tokens: cacheWriteTokens,
+    total_tokens: totalTokens,
+    context_window_tokens: currentContextWindow(model) || null,
+    max_output_tokens: Number.isFinite(Number(model?.maxTokens)) ? Number(model.maxTokens) : null,
+  };
 }
 
 function mapThinkingLevel(thinkingEffort, model) {
@@ -543,8 +1039,11 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
   }
   const events = [];
   let finalAssistantMessage = null;
+  let finalTokenUsage = null;
   let streamedText = "";
   const thinkingBlocks = new Map();
+  let assistantTurnIndex = -1;
+  let currentAssistantTurnIndex = -1;
   let lastEmitAt = Date.now();
   let lastAgentEventAt = Date.now();
   let lastAgentEventType = "run_start";
@@ -562,52 +1061,75 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     lastEmitAt = Date.now();
     emitEvent?.(event);
   };
+  const modelContext = buildSessionContext(buildSessionEntries(payload.session_messages || []));
+  let initialMessages = modelContext.messages.length ? modelContext.messages : normalizeHistory(payload.messages);
+  if (payload.session_messages?.length) {
+    const compaction = await maybeCompactSessionHistory({
+      sessionMessages: payload.session_messages,
+      model,
+      thinkingEffort: payload.thinking_effort,
+      emitEvent: emit,
+      signal: externalAbortSignal,
+      auto: true,
+    });
+    initialMessages = compaction.contextMessages;
+  }
   const agent = new Agent({
     initialState: {
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt: buildSystemPrompt(),
       model,
       thinkingLevel: mapThinkingLevel(payload.thinking_effort, model),
       tools: createTools(payload),
-      messages: normalizeHistory(payload.messages),
+      messages: initialMessages,
     },
     getApiKey: () => API_KEY,
     toolExecution: "sequential",
     transport: "auto",
     maxRetryDelayMs: 60000,
-    transformContext: async (messages) => messages.slice(-30),
+    transformContext: async (messages) =>
+      MANAGER_COMPACTION_ENABLED ? messages : messages.slice(-CONTEXT_FALLBACK_MESSAGE_LIMIT),
   });
   agent.subscribe((event) => {
     lastAgentEventAt = Date.now();
     lastAgentEventType = event.type;
     events.push(event);
+    if (event.type === "message_start" && event.message?.role === "assistant") {
+      assistantTurnIndex += 1;
+      currentAssistantTurnIndex = assistantTurnIndex;
+    }
     if (event.type === "message_update" && event.assistantMessageEvent) {
       const assistantEvent = event.assistantMessageEvent;
+      const turnIndex = currentAssistantTurnIndex >= 0 ? currentAssistantTurnIndex : 0;
+      const blockKey = `${turnIndex}:${assistantEvent.contentIndex}`;
       if (assistantEvent.type === "thinking_start") {
-        if (!thinkingBlocks.has(assistantEvent.contentIndex)) {
-          thinkingBlocks.set(assistantEvent.contentIndex, "");
+        if (!thinkingBlocks.has(blockKey)) {
+          thinkingBlocks.set(blockKey, "");
         }
         emit({
           type: "thinking_start",
           content_index: assistantEvent.contentIndex,
+          assistant_turn_index: turnIndex,
         });
       } else if (assistantEvent.type === "thinking_delta") {
-        const nextThinking = `${thinkingBlocks.get(assistantEvent.contentIndex) || ""}${assistantEvent.delta || ""}`;
-        thinkingBlocks.set(assistantEvent.contentIndex, nextThinking);
+        const nextThinking = `${thinkingBlocks.get(blockKey) || ""}${assistantEvent.delta || ""}`;
+        thinkingBlocks.set(blockKey, nextThinking);
         emit({
           type: "thinking_delta",
           delta: assistantEvent.delta || "",
           content_index: assistantEvent.contentIndex,
+          assistant_turn_index: turnIndex,
         });
       } else if (assistantEvent.type === "thinking_end") {
         const finalizedThinking =
           typeof assistantEvent.content === "string"
             ? assistantEvent.content
-            : thinkingBlocks.get(assistantEvent.contentIndex) || "";
-        thinkingBlocks.set(assistantEvent.contentIndex, finalizedThinking);
+            : thinkingBlocks.get(blockKey) || "";
+        thinkingBlocks.set(blockKey, finalizedThinking);
         emit({
           type: "thinking_end",
           content: finalizedThinking,
           content_index: assistantEvent.contentIndex,
+          assistant_turn_index: turnIndex,
         });
       } else if (assistantEvent.type === "text_delta") {
         const delta = assistantEvent.delta || "";
@@ -616,6 +1138,7 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
           type: "text_delta",
           delta,
           content_index: assistantEvent.contentIndex,
+          assistant_turn_index: turnIndex,
         });
       }
     }
@@ -659,12 +1182,21 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     }
     if (event.type === "message_end" && event.message?.role === "assistant") {
       finalAssistantMessage = event.message;
+      const tokenUsage = normalizeTokenUsage(event.message.usage, model);
+      if (tokenUsage) {
+        finalTokenUsage = tokenUsage;
+        emit({
+          type: "usage",
+          usage: tokenUsage,
+        });
+      }
     }
   });
   const userEnvelope = {
     user_request: payload.message,
     selected_context: payload.context || {},
     script_preference_guidance: scriptPreferenceGuidance(payload.context?.script_preference),
+    runtime_preference_guidance: runtimePreferenceGuidance(payload.context || {}),
     instruction:
       "Answer naturally. Decide whether project tools are needed. If you change the blueprint, remember that cards are the blueprint units and use create_card, update_card, or delete_card directly. After ok:false tool results, correct and retry when the fix is clear.",
   };
@@ -759,8 +1291,47 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     outcome: "text",
     event_count: events.length,
     streamed_chars: streamedText.length,
+    total_tokens: finalTokenUsage?.total_tokens,
   });
-  return { message: text, thinking, proposal: null, actions: [], warnings: [] };
+  return {
+    message: text,
+    thinking,
+    proposal: null,
+    actions: [],
+    warnings: [],
+    metadata: finalTokenUsage ? { token_usage: finalTokenUsage } : {},
+  };
+}
+
+async function runManualCompaction(payload) {
+  if (!API_KEY) {
+    throw new Error("MANAGER_AGENT_API_KEY or BLUEPRINT_DEEPSEEK_API_KEY is not configured.");
+  }
+  const model = getModel(PROVIDER, MODEL);
+  if (!model) {
+    throw new Error(`Manager model not found: provider=${PROVIDER}, model=${MODEL}`);
+  }
+  const result = await maybeCompactSessionHistory({
+    sessionMessages: payload.session_messages || [],
+    model,
+    thinkingEffort: payload.thinking_effort || "medium",
+    signal: undefined,
+    auto: false,
+    force: true,
+  });
+  if (!result.compacted) {
+    throw new Error("当前上下文还不需要压缩。");
+  }
+  return {
+    compact_id: result.compactId,
+    summary: result.summary,
+    first_kept_message_id: result.firstKeptMessageId,
+    tokens_before: result.tokensBefore,
+    tokens_after: result.tokensAfter,
+    duration_ms: result.durationMs,
+    provider: result.provider,
+    model: result.model,
+  };
 }
 
 async function handle(req, res) {
@@ -782,6 +1353,16 @@ async function handle(req, res) {
       writeSseEvent(res, { type: "error", detail: error instanceof Error ? error.message : String(error) });
     } finally {
       res.end();
+    }
+    return;
+  }
+  if (req.method === "POST" && pathname === "/compact") {
+    try {
+      const payload = await readJson(req);
+      const response = await runManualCompaction(payload);
+      jsonResponse(res, 200, response);
+    } catch (error) {
+      jsonResponse(res, 502, { detail: error instanceof Error ? error.message : String(error) });
     }
     return;
   }

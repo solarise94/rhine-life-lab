@@ -1,25 +1,54 @@
 "use client";
 
-import { useState } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ChevronDown, ChevronUp, Download, Link2, MessageSquareText, X } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { AssetDetail } from "@/lib/types";
 
 export function ResultPreviewPanel({
   detail,
+  title = "Result Preview",
+  mode = "panel",
+  loading = false,
+  error,
+  onClose,
+  onSendToManager,
+  onExplain,
 }: {
   detail?: AssetDetail;
+  title?: string;
+  mode?: "panel" | "drawer";
+  loading?: boolean;
+  error?: string;
+  onClose?: () => void;
+  onSendToManager?: (detail: AssetDetail) => void;
+  onExplain?: (detail: AssetDetail) => void;
 }) {
   const [showTech, setShowTech] = useState(false);
 
+  useEffect(() => {
+    setShowTech(false);
+  }, [detail?.asset.asset_id]);
+
   if (!detail) {
     return (
-      <section className="panel">
+      <section className={mode === "drawer" ? "artifact-preview-drawer-panel" : "panel"}>
         <div className="panel-header">
-          <h3>Result Preview</h3>
-          <span>No selection</span>
+          <h3>{title}</h3>
+          <div className="artifact-preview-header-meta">
+            <span>No selection</span>
+            {onClose ? (
+              <button type="button" className="artifact-preview-close" onClick={onClose} aria-label="关闭预览">
+                <X size={14} />
+              </button>
+            ) : null}
+          </div>
         </div>
         <div className="panel-body">
-          <div className="empty-state">选择一个结果查看 markdown、表格或图片预览。</div>
+          <div className="empty-state">
+            {loading ? "正在加载预览…" : error ? `预览加载失败：${error}` : "选择一个结果查看 markdown、表格或图片预览。"}
+          </div>
         </div>
       </section>
     );
@@ -27,12 +56,39 @@ export function ResultPreviewPanel({
 
   const { asset, preview } = detail;
   return (
-    <section className="panel">
+    <section className={mode === "drawer" ? "artifact-preview-drawer-panel" : "panel"}>
       <div className="panel-header">
         <h3>{asset.title}</h3>
-        <span>{preview.kind}</span>
+        <div className="artifact-preview-header-meta">
+          <span>{preview.kind}</span>
+          {onClose ? (
+            <button type="button" className="artifact-preview-close" onClick={onClose} aria-label="关闭预览">
+              <X size={14} />
+            </button>
+          ) : null}
+        </div>
       </div>
       <div className="panel-body stack">
+        <div className="proposal-actions" style={{ marginTop: 0 }}>
+          {onSendToManager ? (
+            <button type="button" className="btn secondary" onClick={() => onSendToManager(detail)}>
+              <Link2 size={14} />
+              发送给 Manager
+            </button>
+          ) : null}
+          {onExplain ? (
+            <button type="button" className="btn secondary" onClick={() => onExplain(detail)}>
+              <MessageSquareText size={14} />
+              解释这个结果
+            </button>
+          ) : null}
+          {preview.content_url ? (
+            <a href={preview.content_url} target="_blank" rel="noreferrer" className="btn secondary">
+              <Download size={14} />
+              下载原文件
+            </a>
+          ) : null}
+        </div>
         <div
           className="meta-block"
           style={{ cursor: "pointer" }}
@@ -54,7 +110,15 @@ export function ResultPreviewPanel({
             </div>
           </div>
         ) : null}
-        {preview.kind === "markdown" || preview.kind === "text" ? (
+        {preview.kind === "markdown" && preview.text ? (
+          <div className="meta-block">
+            <h4>Markdown Preview</h4>
+            <div className="manager-markdown">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{preview.text}</ReactMarkdown>
+            </div>
+          </div>
+        ) : null}
+        {preview.kind === "text" ? (
           <div className="meta-block">
             <h4>Text Preview</h4>
             <pre className="code-block">{preview.text}</pre>

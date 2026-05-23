@@ -18,6 +18,9 @@ import {
   RuntimeApprovalDecision,
   WorkOrder,
 } from "./types";
+import type { ChatTokenUsage } from "./types";
+
+export type { ChatTokenUsage } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api";
 
@@ -30,14 +33,32 @@ export interface ChatRequestContext {
   selected_card_id?: string | null;
   selected_result_id?: string | null;
   script_preference?: "auto" | "prefer_python" | "prefer_r" | "prefer_mixed";
+  python_runtime?: string | null;
+  r_runtime?: string | null;
 }
 
 export type ChatStreamEvent =
-  | { type: "thinking_start"; content_index?: number }
-  | { type: "thinking_delta"; delta?: string; content_index?: number }
-  | { type: "thinking_end"; content?: string; content_index?: number }
+  | { type: "thinking_start"; content_index?: number; assistant_turn_index?: number }
+  | { type: "thinking_delta"; delta?: string; content_index?: number; assistant_turn_index?: number }
+  | { type: "thinking_end"; content?: string; content_index?: number; assistant_turn_index?: number }
+  | { type: "compact_start"; compact_id: string; auto?: boolean }
+  | { type: "compact_delta"; compact_id: string; content?: string }
+  | {
+      type: "compact_end";
+      compact_id: string;
+      content?: string;
+      duration_ms?: number;
+      tokens_before?: number;
+      tokens_after?: number;
+      first_kept_message_id?: string;
+      provider?: string;
+      model?: string;
+      auto?: boolean;
+    }
+  | { type: "compact_error"; compact_id: string; message?: string; auto?: boolean }
   | { type: "heartbeat"; stage?: string; message?: string }
-  | { type: "text_delta"; delta?: string; content_index?: number }
+  | { type: "text_delta"; delta?: string; content_index?: number; assistant_turn_index?: number }
+  | { type: "usage"; usage?: ChatTokenUsage }
   | {
       type: "tool_start";
       tool_name?: string;
@@ -62,6 +83,10 @@ export type ChatStreamEvent =
         proposal?: unknown;
         actions: Array<{ label: string; action: string }>;
         warnings: string[];
+        metadata?: {
+          token_usage?: ChatTokenUsage;
+          [key: string]: unknown;
+        };
       };
     }
   | { type: "done" }
@@ -187,6 +212,31 @@ export const api = {
   getResultAsset(projectId: string, assetId: string) {
     return request<AssetDetail>(`/projects/${projectId}/results/${assetId}`);
   },
+  compactChatSession(
+    projectId: string,
+    sessionMessages: ChatSessionMessageRecord[],
+    thinkingEffort: "low" | "medium" | "high" = "medium",
+  ) {
+    return request<{
+      compact_id: string;
+      summary: string;
+      first_kept_message_id: string;
+      tokens_before: number;
+      tokens_after: number;
+      duration_ms: number;
+      provider?: string | null;
+      model?: string | null;
+    }>(`/projects/${projectId}/chat-compact`, {
+      method: "POST",
+      body: JSON.stringify({
+        message: "/compact",
+        context: {},
+        thinking_effort: thinkingEffort,
+        messages: [],
+        session_messages: sessionMessages,
+      }),
+    });
+  },
   getReport(projectId: string) {
     return request<{ project: unknown; sections: ReportSection[] }>(`/projects/${projectId}/report`);
   },
@@ -213,6 +263,7 @@ export const api = {
     message: string,
     thinkingEffort: "low" | "medium" | "high" = "medium",
     messages: ChatHistoryMessage[] = [],
+    sessionMessages: ChatSessionMessageRecord[] = [],
     onEvent?: (event: ChatStreamEvent) => void,
     signal?: AbortSignal,
     context: ChatRequestContext = {},
@@ -220,7 +271,13 @@ export const api = {
     const response = await fetch(`${API_BASE}/projects/${projectId}/chat-stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, context, thinking_effort: thinkingEffort, messages }),
+      body: JSON.stringify({
+        message,
+        context,
+        thinking_effort: thinkingEffort,
+        messages,
+        session_messages: sessionMessages,
+      }),
       cache: "no-store",
       signal,
     });

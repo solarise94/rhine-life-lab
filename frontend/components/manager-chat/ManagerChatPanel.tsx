@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -18,7 +18,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { api, ChatHistoryMessage, ChatRequestContext, ChatStreamEvent } from "@/lib/api";
+import { api, ChatHistoryMessage, ChatRequestContext, ChatStreamEvent, ChatTokenUsage } from "@/lib/api";
 import { useChatSession, useModifyProposalMutation } from "@/lib/hooks";
 import { queryKeys } from "@/lib/query-keys";
 import { Asset, ChatSessionDetail, ChatSessionMessageRecord, ProjectSnapshot, Proposal } from "@/lib/types";
@@ -26,12 +26,30 @@ import { Attachment, EMPTY_ATTACHMENTS, useWorkspaceUiStore } from "@/lib/stores
 
 type ThinkingEffort = "low" | "medium" | "high";
 type ToolState = "running" | "done" | "error";
+type TimelineItemKind = "thinking" | "tool" | "text" | "compact";
 
 interface ToolUseState {
   id: string;
   toolName?: string;
   label: string;
   status: ToolState;
+}
+
+interface MessageTimelineItem {
+  id: string;
+  kind: TimelineItemKind;
+  content?: string;
+  label?: string;
+  toolName?: string;
+  status?: ToolState | "idle";
+  startedAt?: number;
+  endedAt?: number;
+  firstKeptMessageId?: string;
+  tokensBefore?: number;
+  tokensAfter?: number;
+  durationMs?: number;
+  provider?: string;
+  model?: string;
 }
 
 interface ChatMessage {
@@ -44,6 +62,8 @@ interface ChatMessage {
   thinkingState?: "idle" | "running" | "done" | "error";
   tools?: ToolUseState[];
   state?: "idle" | "thinking" | "streaming" | "done" | "error";
+  timeline?: MessageTimelineItem[];
+  tokenUsage?: ChatTokenUsage;
 }
 
 interface ProposalMutationResponse {
@@ -58,12 +78,22 @@ interface MentionState {
 }
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+const MANAGER_CONTEXT_WINDOW_TOKENS = 1_000_000;
+const CHARS_PER_TOKEN_ESTIMATE = 3.6;
 
 const DEFAULT_MANAGER_MESSAGE: ChatMessage = {
   id: "welcome",
   role: "manager",
   state: "done",
   content: "可以先正常聊天和查看上下文；当你明确要求调整蓝图时，我会通过后端工具直接读写 cards，并按数据资产时间线校验。",
+  timeline: [
+    {
+      id: "welcome_text",
+      kind: "text",
+      content: "可以先正常聊天和查看上下文；当你明确要求调整蓝图时，我会通过后端工具直接读写 cards，并按数据资产时间线校验。",
+      status: "done",
+    },
+  ],
 };
 
 function isProposalShape(value: unknown): value is Proposal {
@@ -116,19 +146,128 @@ function settleInterruptedTools(tools?: ToolUseState[]) {
   );
 }
 
+function runtimeForChatContext(runtime?: string | null) {
+  if (!runtime || runtime === "__system__") return null;
+  return runtime;
+}
+
+function estimateTokens(text: string) {
+  if (!text) return 0;
+  return Math.ceil(text.length / CHARS_PER_TOKEN_ESTIMATE);
+}
+
+function normalizeTokenUsage(usage?: ChatTokenUsage | null): ChatTokenUsage | undefined {
+  if (!usage) return undefined;
+  const numberOrZero = (value: unknown) => (Number.isFinite(Number(value)) ? Number(value) : 0);
+  const inputTokens = numberOrZero(usage.input_tokens);
+  const outputTokens = numberOrZero(usage.output_tokens);
+  const cacheReadTokens = numberOrZero(usage.cache_read_tokens);
+  const cacheWriteTokens = numberOrZero(usage.cache_write_tokens);
+  const totalTokens =
+    numberOrZero(usage.total_tokens) || inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+  if (totalTokens <= 0) return undefined;
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    cache_read_tokens: cacheReadTokens,
+    cache_write_tokens: cacheWriteTokens,
+    total_tokens: totalTokens,
+    context_window_tokens: usage.context_window_tokens ?? null,
+    max_output_tokens: usage.max_output_tokens ?? null,
+  };
+}
+
+function formatElapsedTime(startedAt?: number, endedAt?: number) {
+  if (!startedAt) return "";
+  const end = endedAt ?? Date.now();
+  const totalSeconds = Math.max(0, Math.round((end - startedAt) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes > 0) return `${minutes} 分 ${seconds} 秒`;
+  return `${seconds} 秒`;
+}
+
+function upsertTimelineItem(
+  timeline: MessageTimelineItem[],
+  item: MessageTimelineItem,
+  matcher?: (candidate: MessageTimelineItem) => boolean,
+): MessageTimelineItem[] {
+  const next = [...timeline];
+  const index = matcher ? next.findIndex(matcher) : -1;
+  if (index >= 0) {
+    next[index] = { ...next[index], ...item };
+    return next;
+  }
+  next.push(item);
+  return next;
+}
+
+function timelineItemId(kind: TimelineItemKind, index: number | undefined, fallback: string, turnIndex?: number) {
+  const turnPrefix = turnIndex === undefined ? "" : `${turnIndex}_`;
+  return `${kind}_${turnPrefix}${index ?? fallback}`;
+}
+
+function lastTimelineIndex(timeline: MessageTimelineItem[], predicate: (item: MessageTimelineItem) => boolean) {
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    if (predicate(timeline[index])) return index;
+  }
+  return -1;
+}
+
 function normalizeSessionMessages(messages: ChatSessionMessageRecord[]): ChatMessage[] {
   return messages
     .filter((message) => Boolean(message?.id) && (message.role === "user" || message.role === "manager"))
-    .map((message) => ({
-      id: message.id,
-      role: message.role,
-      content: message.content,
-      proposal: message.proposal ?? undefined,
-      thinking: message.thinking ?? undefined,
-      attachments: message.attachments ?? [],
-      state: message.state ?? "done",
-      thinkingState: message.thinking ? "done" : "idle",
-    }));
+    .map((message) => {
+      const timeline: MessageTimelineItem[] = message.timeline?.length
+        ? message.timeline.map((item) => ({
+            id: item.id,
+            kind: item.kind as TimelineItemKind,
+            content: item.content ?? undefined,
+            label: item.label ?? undefined,
+            toolName: item.tool_name ?? undefined,
+            status: (item.status as ToolState | "idle" | undefined) ?? undefined,
+            startedAt: item.started_at ?? undefined,
+            endedAt: item.ended_at ?? undefined,
+            firstKeptMessageId: item.first_kept_message_id ?? undefined,
+            tokensBefore: item.tokens_before ?? undefined,
+            tokensAfter: item.tokens_after ?? undefined,
+            durationMs: item.duration_ms ?? undefined,
+            provider: item.provider ?? undefined,
+            model: item.model ?? undefined,
+          }))
+        : [];
+      if (!timeline.length) {
+        if (message.thinking) {
+          timeline.push({
+            id: `${message.id}_thinking`,
+            kind: "thinking",
+            content: message.thinking,
+            status: "done",
+            endedAt: Date.now(),
+          });
+        }
+        if (message.content) {
+          timeline.push({
+            id: `${message.id}_text`,
+            kind: "text",
+            content: message.content,
+            status: "done",
+          });
+        }
+      }
+      return {
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        proposal: message.proposal ?? undefined,
+        thinking: message.thinking ?? undefined,
+        attachments: message.attachments ?? [],
+        state: message.state ?? "done",
+        thinkingState: message.thinking ? "done" : "idle",
+        timeline,
+        tokenUsage: normalizeTokenUsage(message.token_usage),
+      };
+    });
 }
 
 function serializeSessionMessages(messages: ChatMessage[]): ChatSessionMessageRecord[] {
@@ -140,7 +279,39 @@ function serializeSessionMessages(messages: ChatMessage[]): ChatSessionMessageRe
     thinking: message.thinking ?? null,
     attachments: message.attachments ?? [],
     state: message.state ?? "done",
+    timeline: message.timeline?.length
+      ? message.timeline.map((item) => ({
+          id: item.id,
+          kind: item.kind,
+          content: item.content ?? null,
+          label: item.label ?? null,
+          tool_name: item.toolName ?? null,
+          status: item.status ?? null,
+          started_at: item.startedAt ?? null,
+          ended_at: item.endedAt ?? null,
+          first_kept_message_id: item.firstKeptMessageId ?? null,
+          tokens_before: item.tokensBefore ?? null,
+          tokens_after: item.tokensAfter ?? null,
+          duration_ms: item.durationMs ?? null,
+          provider: item.provider ?? null,
+          model: item.model ?? null,
+        }))
+      : null,
+    token_usage: message.tokenUsage ?? null,
   }));
+}
+
+function compactTimelineSummary(message: ChatMessage): string | null {
+  const item = message.timeline?.find((candidate) => candidate.kind === "compact" && candidate.content?.trim());
+  return item?.content?.trim() || null;
+}
+
+function toHistoryContent(message: ChatMessage): string {
+  const compactSummary = compactTimelineSummary(message);
+  if (compactSummary) {
+    return `Context summary:\n${compactSummary}`;
+  }
+  return message.content.trim();
 }
 
 function sessionMessagesSignature(messages: ChatMessage[]): string {
@@ -154,6 +325,17 @@ function sessionMessagesSignature(messages: ChatMessage[]): string {
       thinking: message.thinking ?? null,
       attachments: message.attachments ?? [],
       state: message.state ?? null,
+      token_usage: message.tokenUsage
+        ? {
+            total_tokens: message.tokenUsage.total_tokens,
+            context_window_tokens: message.tokenUsage.context_window_tokens ?? null,
+          }
+        : null,
+      timeline: message.timeline?.map((item) => ({
+        id: item.id,
+        kind: item.kind,
+        status: item.status,
+      })) ?? [],
     })),
   );
 }
@@ -203,9 +385,11 @@ export function ManagerChatPanel({
   const [editDraft, setEditDraft] = useState("");
   const [mentionState, setMentionState] = useState<MentionState | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
+  const [effortMenuOpen, setEffortMenuOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const effortMenuRef = useRef<HTMLDivElement>(null);
   const thinkingRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const refreshTimerRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
@@ -217,6 +401,8 @@ export function ManagerChatPanel({
 
   const attachments = useWorkspaceUiStore((s) => s.attachmentsByProject[projectId] ?? EMPTY_ATTACHMENTS);
   const scriptPreference = useWorkspaceUiStore((s) => s.scriptPreferenceByProject?.[projectId] ?? "auto");
+  const globalPythonRuntime = useWorkspaceUiStore((s) => s.globalPythonRuntimeByProject?.[projectId]);
+  const globalRRuntime = useWorkspaceUiStore((s) => s.globalRRuntimeByProject?.[projectId]);
   const addAttachment = useWorkspaceUiStore((s) => s.addAttachment);
   const removeAttachment = useWorkspaceUiStore((s) => s.removeAttachment);
   const clearAttachments = useWorkspaceUiStore((s) => s.clearAttachments);
@@ -292,8 +478,36 @@ export function ManagerChatPanel({
   }, [draftMessage, projectId, clearDraftMessage]);
 
   useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "0px";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 144)}px`;
+  }, [draft]);
+
+  useEffect(() => {
+    if (!error || typeof window === "undefined") {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setError(null);
+    }, 3200);
+    return () => window.clearTimeout(timer);
+  }, [error]);
+
+  useEffect(() => {
     setMentionIndex(0);
   }, [mentionState?.query]);
+
+  useEffect(() => {
+    if (!effortMenuOpen) return;
+    function handlePointerDown(event: MouseEvent) {
+      if (!effortMenuRef.current?.contains(event.target as Node)) {
+        setEffortMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [effortMenuOpen]);
 
   useEffect(() => {
     currentSessionIdRef.current = sessionId ?? null;
@@ -312,6 +526,7 @@ export function ManagerChatPanel({
     setEditDraft("");
     setMentionState(null);
     setMentionIndex(0);
+    setEffortMenuOpen(false);
     setMessages([]);
   }, [sessionId]);
 
@@ -366,13 +581,15 @@ export function ManagerChatPanel({
 
   useEffect(() => {
     messages.forEach((message) => {
-      if (message.role !== "manager" || (!message.thinking && message.thinkingState !== "running")) {
-        return;
-      }
-      const element = thinkingRefs.current[message.id];
-      if (element) {
-        element.scrollTop = element.scrollHeight;
-      }
+      if (message.role !== "manager") return;
+      (message.timeline ?? [])
+        .filter((item) => item.kind === "thinking" && item.content)
+        .forEach((item) => {
+          const element = thinkingRefs.current[item.id];
+          if (element) {
+            element.scrollTop = element.scrollHeight;
+          }
+        });
     });
   }, [messages]);
 
@@ -419,16 +636,72 @@ export function ManagerChatPanel({
     setMessages((previous) => previous.map((message) => (message.id === messageId ? updater(message) : message)));
   }
 
-  function buildChatHistory(nextUserText: string): ChatHistoryMessage[] {
-    return [
-      ...messages
-        .filter((message) => message.role === "user" || message.role === "manager")
-        .map((message) => ({
-          role: message.role,
-          content: message.content,
-        })),
-      { role: "user", content: nextUserText },
-    ];
+  function buildChatHistory(sourceMessages: ChatMessage[]): ChatHistoryMessage[] {
+    return sourceMessages
+      .filter((message) => message.role === "user" || message.role === "manager")
+      .map((message) => ({
+        role: message.role,
+        content: toHistoryContent(message),
+      }))
+      .filter((message) => message.content);
+  }
+
+  function findMessageIndexByTimelineId(sourceMessages: ChatMessage[], itemId?: string) {
+    if (!itemId) return -1;
+    return sourceMessages.findIndex(
+      (message) => message.id === itemId || Boolean(message.timeline?.some((item) => item.id === itemId)),
+    );
+  }
+
+  function buildCompactMessage(item: MessageTimelineItem): ChatMessage {
+    return {
+      id: `compact_msg_${item.id}`,
+      role: "manager",
+      content: "",
+      state: item.status === "error" ? "error" : "done",
+      thinkingState: "idle",
+      timeline: [item],
+    };
+  }
+
+  function upsertCompactMessage(item: MessageTimelineItem) {
+    setMessages((previous) => {
+      const next = [...previous];
+      const messageId = `compact_msg_${item.id}`;
+      const existingIndex = next.findIndex((message) => message.id === messageId);
+      if (existingIndex >= 0) {
+        next[existingIndex] = {
+          ...next[existingIndex],
+          state: item.status === "error" ? "error" : "done",
+          timeline: [item],
+        };
+        return next;
+      }
+      const insertIndex = next.findIndex((message) => message.state !== "done");
+      next.splice(insertIndex >= 0 ? insertIndex : next.length, 0, buildCompactMessage(item));
+      return next;
+    });
+  }
+
+  function finalizeCompaction(item: MessageTimelineItem) {
+    setMessages((previous) => {
+      let retainedMessages = previous;
+      if (item.firstKeptMessageId === "root") {
+        const activeIndex = previous.findIndex((message) => message.state !== "done");
+        retainedMessages = activeIndex >= 0 ? previous.slice(Math.max(0, activeIndex - 1)) : [];
+      } else {
+        const retainedIndex = findMessageIndexByTimelineId(previous, item.firstKeptMessageId);
+        if (retainedIndex < 0) {
+          retainedMessages = previous;
+        } else {
+        const matchedMessage = previous[retainedIndex];
+        const matchedCompact = matchedMessage.timeline?.some((timelineItem) => timelineItem.id === item.firstKeptMessageId && timelineItem.kind === "compact");
+        retainedMessages = previous.slice(matchedCompact ? retainedIndex + 1 : retainedIndex);
+      }
+      }
+      const filtered = retainedMessages.filter((message) => !message.id.startsWith("compact_msg_"));
+      return [buildCompactMessage(item), ...filtered];
+    });
   }
 
   function schedulePartialRefresh() {
@@ -517,54 +790,210 @@ export function ManagerChatPanel({
 
   function applyStreamEvent(messageId: string, event: ChatStreamEvent) {
     updateMessage(messageId, (current) => {
+      const timeline = current.timeline ?? [];
       switch (event.type) {
         case "thinking_start":
-          return {
-            ...current,
-            thinkingState: "running",
-            thinking: current.thinking ?? "",
-            state: current.content ? "streaming" : "thinking",
-          };
+          {
+            const itemId = timelineItemId("thinking", event.content_index, `${timeline.length}`, event.assistant_turn_index);
+            const existing = timeline.find((item) => item.id === itemId);
+            return {
+              ...current,
+              thinkingState: "running",
+              thinking: current.thinking ?? "",
+              state: current.content ? "streaming" : "thinking",
+              timeline: upsertTimelineItem(
+                timeline,
+                {
+                  id: itemId,
+                  kind: "thinking",
+                  content: existing?.content ?? "",
+                  status: "running",
+                  startedAt: existing?.startedAt ?? Date.now(),
+                  endedAt: undefined,
+                },
+                (item) => item.id === itemId,
+              ),
+            };
+          }
         case "thinking_delta":
-          return {
-            ...current,
-            thinkingState: "running",
-            thinking: `${current.thinking || ""}${event.delta || ""}`,
-            state: current.content ? "streaming" : "thinking",
-          };
+          {
+            const itemId =
+              event.content_index !== undefined
+                ? timelineItemId("thinking", event.content_index, `${timeline.length}`, event.assistant_turn_index)
+                : timeline.find((item) => item.kind === "thinking" && item.status === "running")?.id ?? timelineItemId("thinking", undefined, `${timeline.length}`);
+            const existingContent = timeline.find((item) => item.id === itemId)?.content ?? "";
+            return {
+              ...current,
+              thinkingState: "running",
+              thinking: `${current.thinking || ""}${event.delta || ""}`,
+              state: current.content ? "streaming" : "thinking",
+              timeline: upsertTimelineItem(
+                timeline,
+                {
+                  id: itemId,
+                  kind: "thinking",
+                  content: `${existingContent}${event.delta || ""}`,
+                  status: "running",
+                  startedAt: timeline.find((item) => item.id === itemId)?.startedAt ?? Date.now(),
+                  endedAt: undefined,
+                },
+                (item) => item.id === itemId,
+              ),
+            };
+          }
         case "thinking_end":
-          return {
-            ...current,
-            thinkingState: current.thinking || event.content ? "done" : current.thinkingState,
-            thinking: event.content?.trim() || current.thinking,
-          };
+          {
+            const itemId =
+              event.content_index !== undefined
+                ? timelineItemId("thinking", event.content_index, `${timeline.length}`, event.assistant_turn_index)
+                : timeline.find((item) => item.kind === "thinking" && item.status === "running")?.id ?? timelineItemId("thinking", undefined, `${timeline.length}`);
+            const existingContent = timeline.find((item) => item.id === itemId)?.content ?? "";
+            const existing = timeline.find((item) => item.id === itemId);
+            const content = event.content?.trim() || existingContent || current.thinking || "";
+            return {
+              ...current,
+              thinkingState: content ? "done" : current.thinkingState,
+              thinking: content || current.thinking,
+              timeline: upsertTimelineItem(
+                timeline,
+                {
+                  id: itemId,
+                  kind: "thinking",
+                  content,
+                  status: "done",
+                  startedAt: existing?.startedAt ?? Date.now(),
+                  endedAt: Date.now(),
+                },
+                (item) => item.id === itemId,
+              ),
+            };
+          }
         case "heartbeat":
-          return {
-            ...current,
-            thinkingState: current.state === "done" ? current.thinkingState : "running",
-            thinking: current.thinking || event.message || "Manager 正在生成回复…",
-            state: current.content ? current.state : "thinking",
-          };
+          {
+            const hbContent = current.thinking || event.message || "Manager 正在生成回复…";
+            const runningThinkingIndex = timeline.findIndex((item) => item.kind === "thinking" && item.status === "running");
+            if (runningThinkingIndex >= 0) {
+              const nextTimeline = [...timeline];
+              nextTimeline[runningThinkingIndex] = {
+                ...nextTimeline[runningThinkingIndex],
+                content: hbContent,
+                startedAt: nextTimeline[runningThinkingIndex].startedAt ?? Date.now(),
+              };
+              return {
+                ...current,
+                thinkingState: current.state === "done" ? current.thinkingState : "running",
+                thinking: hbContent,
+                state: current.content ? current.state : "thinking",
+                timeline: nextTimeline,
+              };
+            }
+            if (!current.content) {
+              return {
+                ...current,
+                thinkingState: current.state === "done" ? current.thinkingState : "running",
+                thinking: hbContent,
+                state: current.content ? current.state : "thinking",
+                timeline: [
+                  ...timeline,
+                  {
+                    id: "thinking_hb",
+                    kind: "thinking",
+                    content: hbContent,
+                    status: "running",
+                    startedAt: Date.now(),
+                  },
+                ],
+              };
+            }
+            return {
+              ...current,
+              thinkingState: current.state === "done" ? current.thinkingState : "running",
+              thinking: hbContent,
+              state: current.content ? current.state : "thinking",
+            };
+          }
         case "text_delta":
+          {
+            const itemId =
+              event.content_index !== undefined
+                ? timelineItemId("text", event.content_index, `${timeline.length}`, event.assistant_turn_index)
+                : timeline[timeline.length - 1]?.kind === "text"
+                  ? timeline[timeline.length - 1].id
+                  : timelineItemId("text", undefined, `${timeline.length}`);
+            const existingContent = timeline.find((item) => item.id === itemId)?.content ?? "";
+            return {
+              ...current,
+              state: "streaming",
+              content: `${current.content}${event.delta || ""}`,
+              timeline: upsertTimelineItem(
+                timeline,
+                {
+                  id: itemId,
+                  kind: "text",
+                  content: `${existingContent}${event.delta || ""}`,
+                  status: "running",
+                },
+                (item) => item.id === itemId,
+              ),
+            };
+          }
+        case "usage":
           return {
             ...current,
-            state: "streaming",
-            content: `${current.content}${event.delta || ""}`,
+            tokenUsage: normalizeTokenUsage(event.usage) ?? current.tokenUsage,
           };
         case "tool_start":
-          return {
-            ...current,
-            tools: upsertTool(current.tools || [], event),
-            state: current.content ? "streaming" : "thinking",
-          };
+          {
+            const itemId = event.tool_call_id || timelineItemId("tool", undefined, `${event.tool_name || "unknown"}_${timeline.length}`);
+            const existing = timeline.find((item) => item.id === itemId);
+            return {
+              ...current,
+              tools: upsertTool(current.tools || [], event),
+              state: current.content ? "streaming" : "thinking",
+              timeline: upsertTimelineItem(
+                timeline,
+                {
+                  id: itemId,
+                  kind: "tool",
+                  label: event.label || event.done_label || event.tool_name || "Tool",
+                  toolName: event.tool_name,
+                  status: "running",
+                  startedAt: existing?.startedAt ?? Date.now(),
+                  endedAt: undefined,
+                },
+                (item) => item.id === itemId,
+              ),
+            };
+          }
         case "tool_end":
-          if (!event.is_error && event.tool_name && /blueprint_proposal|blueprint_module|blueprint_card/.test(event.tool_name)) {
+          if (!event.is_error && event.tool_name && /create_card|update_card|delete_card|configure_card_execution/.test(event.tool_name)) {
             schedulePartialRefresh();
           }
-          return {
-            ...current,
-            tools: upsertTool(current.tools || [], event),
-          };
+          {
+            const fallbackIndex = lastTimelineIndex(
+              timeline,
+              (item) => item.kind === "tool" && item.status === "running" && (!event.tool_name || item.toolName === event.tool_name),
+            );
+            const itemId = event.tool_call_id || (fallbackIndex >= 0 ? timeline[fallbackIndex].id : timelineItemId("tool", undefined, `${event.tool_name || "unknown"}_${timeline.length}`));
+            const existing = timeline.find((item) => item.id === itemId);
+            return {
+              ...current,
+              tools: upsertTool(current.tools || [], event),
+              timeline: upsertTimelineItem(
+                timeline,
+                {
+                  id: itemId,
+                  kind: "tool",
+                  label: event.done_label || event.label || event.tool_name || "Tool",
+                  toolName: event.tool_name,
+                  status: event.is_error ? "error" : "done",
+                  startedAt: existing?.startedAt ?? Date.now(),
+                  endedAt: Date.now(),
+                },
+                (item) => item.id === itemId,
+              ),
+            };
+          }
         case "proposal":
           {
             const proposal = parseProposal(event.proposal);
@@ -589,6 +1018,58 @@ export function ManagerChatPanel({
               thinking: event.response?.thinking?.trim() || current.thinking,
               thinkingState: current.thinking || event.response?.thinking ? "done" : current.thinkingState,
               proposal: proposal || current.proposal,
+              tokenUsage: normalizeTokenUsage(event.response?.metadata?.token_usage) ?? current.tokenUsage,
+              timeline: (() => {
+                let nextTimeline = [...timeline];
+                if (event.response?.thinking?.trim()) {
+                  const runningThinkingIndex = lastTimelineIndex(nextTimeline, (item) => item.kind === "thinking" && item.status === "running");
+                  if (runningThinkingIndex >= 0) {
+                    const item = nextTimeline[runningThinkingIndex];
+                    nextTimeline = upsertTimelineItem(
+                      nextTimeline,
+                      {
+                        ...item,
+                        content: item.content || event.response.thinking.trim(),
+                        status: "done",
+                        endedAt: item.endedAt ?? Date.now(),
+                      },
+                      (candidate) => candidate.id === item.id,
+                    );
+                  } else if (!nextTimeline.some((item) => item.kind === "thinking" && item.content)) {
+                    nextTimeline.push({
+                      id: "thinking_final",
+                      kind: "thinking",
+                      content: event.response.thinking.trim(),
+                      status: "done",
+                      startedAt: Date.now(),
+                      endedAt: Date.now(),
+                    });
+                  }
+                }
+                if (event.response?.message) {
+                  const runningTextIndex = lastTimelineIndex(nextTimeline, (item) => item.kind === "text" && item.status === "running");
+                  if (runningTextIndex >= 0) {
+                    const item = nextTimeline[runningTextIndex];
+                    nextTimeline = upsertTimelineItem(
+                      nextTimeline,
+                      {
+                        ...item,
+                        content: item.content || event.response.message,
+                        status: "done",
+                      },
+                      (candidate) => candidate.id === item.id,
+                    );
+                  } else if (!nextTimeline.some((item) => item.kind === "text" && item.content)) {
+                    nextTimeline.push({
+                      id: "text_final",
+                      kind: "text",
+                      content: event.response.message,
+                      status: "done",
+                    });
+                  }
+                }
+                return nextTimeline;
+              })(),
             };
           }
         case "done":
@@ -596,6 +1077,9 @@ export function ManagerChatPanel({
             ...current,
             state: current.state === "error" ? "error" : "done",
             thinkingState: current.thinkingState === "running" ? "done" : current.thinkingState,
+            timeline: timeline.map((item) =>
+              item.status === "running" ? { ...item, status: "done", endedAt: item.endedAt ?? Date.now() } : item,
+            ),
           };
         case "error":
           return {
@@ -603,6 +1087,9 @@ export function ManagerChatPanel({
             state: "error",
             thinkingState: current.thinkingState === "running" ? "error" : current.thinkingState,
             content: current.content || "请求失败。",
+            timeline: timeline.map((item) =>
+              item.status === "running" ? { ...item, status: "error", endedAt: item.endedAt ?? Date.now() } : item,
+            ),
           };
         default:
           return current;
@@ -610,21 +1097,82 @@ export function ManagerChatPanel({
     });
   }
 
+  async function runManualCompaction() {
+    if (busy || !sessionId) return;
+    const compactId = `compact_manual_${Date.now().toString(36)}`;
+    upsertCompactMessage({
+      id: compactId,
+      kind: "compact",
+      content: "",
+      status: "running",
+      startedAt: Date.now(),
+    });
+    setDraft("");
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await api.compactChatSession(projectId, serializeSessionMessages(messages), thinkingEffort);
+      finalizeCompaction({
+        id: response.compact_id,
+        kind: "compact",
+        content: response.summary,
+        status: "done",
+        startedAt: Date.now() - response.duration_ms,
+        endedAt: Date.now(),
+        durationMs: response.duration_ms,
+        firstKeptMessageId: response.first_kept_message_id,
+        tokensBefore: response.tokens_before,
+        tokensAfter: response.tokens_after,
+        provider: response.provider ?? undefined,
+        model: response.model ?? undefined,
+      });
+    } catch (nextError) {
+      const message = nextError instanceof Error ? nextError.message : "上下文压缩失败。";
+      setError(message);
+      upsertCompactMessage({
+        id: compactId,
+        kind: "compact",
+        content: message,
+        status: "error",
+        startedAt: Date.now(),
+        endedAt: Date.now(),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function submit() {
     if (!draft.trim() || busy || !sessionId) return;
     const text = draft.trim();
+    if (text === "/compact") {
+      await runManualCompaction();
+      return;
+    }
+    const priorMessages = messages;
     const messageAttachments = attachments.map((attachment) => ({ ...attachment }));
     const context = attachments.length
       ? `上下文附件: ${attachments.map((a) => `[${a.type === "card" ? "卡片" : "资产"}: ${a.label}; id=${a.id}]`).join(" ")}\n\n${text}`
       : text;
-    const history = buildChatHistory(text);
-    const chatContext: ChatRequestContext = { script_preference: scriptPreference };
+    const history = buildChatHistory(priorMessages);
+    const chatContext: ChatRequestContext = {
+      script_preference: scriptPreference,
+      python_runtime: runtimeForChatContext(globalPythonRuntime),
+      r_runtime: runtimeForChatContext(globalRRuntime),
+    };
     const userMessageId = createMessageId();
     const managerMessageId = createMessageId();
     setMessages((prev) => [
       ...prev,
-      { id: userMessageId, role: "user", content: text, attachments: messageAttachments, state: "done" },
-      { id: managerMessageId, role: "manager", content: "", thinking: "", thinkingState: "idle", tools: [], state: "thinking" },
+      {
+        id: userMessageId,
+        role: "user",
+        content: text,
+        attachments: messageAttachments,
+        state: "done",
+        timeline: [{ id: `${userMessageId}_text`, kind: "text", content: text, status: "done" }],
+      },
+      { id: managerMessageId, role: "manager", content: "", thinking: "", thinkingState: "idle", tools: [], state: "thinking", timeline: [] },
     ]);
     setDraft("");
     setBusy(true);
@@ -639,7 +1187,56 @@ export function ManagerChatPanel({
         context,
         thinkingEffort,
         history,
+        serializeSessionMessages(priorMessages),
         (event) => {
+          if (event.type === "compact_start") {
+            upsertCompactMessage({
+              id: event.compact_id,
+              kind: "compact",
+              content: "",
+              status: "running",
+              startedAt: Date.now(),
+            });
+            return;
+          }
+          if (event.type === "compact_delta") {
+            upsertCompactMessage({
+              id: event.compact_id,
+              kind: "compact",
+              content: event.content || "",
+              status: "running",
+              startedAt: Date.now(),
+            });
+            return;
+          }
+          if (event.type === "compact_end") {
+            finalizeCompaction({
+              id: event.compact_id,
+              kind: "compact",
+              content: event.content || "",
+              status: "done",
+              startedAt: Date.now() - (event.duration_ms ?? 0),
+              endedAt: Date.now(),
+              durationMs: event.duration_ms,
+              firstKeptMessageId: event.first_kept_message_id,
+              tokensBefore: event.tokens_before,
+              tokensAfter: event.tokens_after,
+              provider: event.provider,
+              model: event.model,
+            });
+            return;
+          }
+          if (event.type === "compact_error") {
+            upsertCompactMessage({
+              id: event.compact_id,
+              kind: "compact",
+              content: event.message || "上下文压缩失败。",
+              status: "error",
+              startedAt: Date.now(),
+              endedAt: Date.now(),
+            });
+            return;
+          }
           applyStreamEvent(managerMessageId, event);
           if (event.type === "error") {
             streamError = event.detail || "Chat failed.";
@@ -786,6 +1383,30 @@ export function ManagerChatPanel({
     const messageProposalIds = new Set(messages.filter((m) => m.proposal).map((m) => m.proposal!.proposal_id));
     return proposals.filter((p) => p.status === "proposed" && !messageProposalIds.has(p.proposal_id));
   }, [proposals, messages]);
+  const contextWindow = useMemo(() => {
+    const draftTokens = estimateTokens(draft);
+    const attachmentTokens = attachments.reduce((total, item) => total + estimateTokens(`${item.type}:${item.label}:${item.id}`), 0);
+    const latestUsage = [...messages].reverse().find((message) => message.role === "manager" && message.tokenUsage)?.tokenUsage;
+    const contextLimit = latestUsage?.context_window_tokens || MANAGER_CONTEXT_WINDOW_TOKENS;
+    const trailingTokens = draftTokens + attachmentTokens;
+    const historyTokens = latestUsage
+      ? latestUsage.total_tokens + trailingTokens
+      : messages.reduce((total, message) => {
+          const attachmentText = (message.attachments ?? []).map((item) => item.label).join(" ");
+          return total + estimateTokens(`${message.role}: ${toHistoryContent(message)}\n${attachmentText}`);
+        }, 0) + trailingTokens;
+    const ratio = Math.min(1, historyTokens / contextLimit);
+    const fillPercent = Math.max(0.6, ratio * 100);
+    const remainingTokens = Math.max(0, contextLimit - historyTokens);
+    const level = ratio >= 0.82 ? "high" : ratio >= 0.58 ? "medium" : "low";
+    const sourceLabel = latestUsage ? "DeepSeek 实际 usage + 当前输入估算" : "字符粗略估算";
+    return {
+      estimatedTokens: historyTokens,
+      fillPercent,
+      level,
+      title: `DeepSeek context window: ${sourceLabel}，当前约 ${historyTokens.toLocaleString()} tokens，剩余约 ${remainingTokens.toLocaleString()} tokens。上下文窗口 ${contextLimit.toLocaleString()} tokens。`,
+    };
+  }, [attachments, draft, messages]);
   const displayMessages = messages.length ? messages : [DEFAULT_MANAGER_MESSAGE];
   const sessionLoadError = chatSessionQuery.error instanceof Error ? chatSessionQuery.error.message : null;
   const sessionBusy = !sessionId || chatSessionQuery.isLoading;
@@ -803,6 +1424,12 @@ export function ManagerChatPanel({
     return <Sparkles size={12} />;
   }
 
+  function effortLabel(value: ThinkingEffort) {
+    if (value === "low") return "Low";
+    if (value === "high") return "High";
+    return "Medium";
+  }
+
   function renderMessageText(message: ChatMessage) {
     if (message.role === "manager") {
       return (
@@ -817,6 +1444,64 @@ export function ManagerChatPanel({
         {message.content}
         {message.state === "thinking" || message.state === "streaming" ? <span className="manager-stream-cursor" /> : null}
       </>
+    );
+  }
+
+  function renderTimelineItem(message: ChatMessage, item: MessageTimelineItem) {
+    if (item.kind === "thinking" || item.kind === "compact") {
+      const elapsed = formatElapsedTime(item.startedAt, item.endedAt);
+      const running = item.status === "running";
+      const prefix = item.kind === "compact" ? (running ? "正在压缩上下文" : "已压缩上下文") : running ? "思考中" : "已思考";
+      const label = `${prefix}${elapsed ? ` ${elapsed}` : ""}`;
+      return (
+        <details key={item.id} className={`manager-thinking-panel ${running ? "running" : "done"}`} open={running}>
+          <summary>
+            <span className="manager-thinking-label">
+              {label}
+              <span className="manager-thinking-arrow">{running ? "↓" : "<"}</span>
+            </span>
+            <span className="manager-thinking-line" />
+          </summary>
+          <div
+            ref={(element) => {
+              thinkingRefs.current[item.id] = element;
+            }}
+            className="manager-thinking-text"
+          >
+            {(item.content || "").split("\n").map((line, index) => (
+              <div key={`${item.id}-${index}`}>{line}</div>
+            ))}
+            {item.kind === "compact" && (item.tokensBefore || item.tokensAfter) ? (
+              <div className="meta-text">
+                {item.tokensBefore ? `压缩前 ${Math.round(item.tokensBefore).toLocaleString()}` : null}
+                {item.tokensBefore && item.tokensAfter ? " · " : null}
+                {item.tokensAfter ? `压缩后 ${Math.round(item.tokensAfter).toLocaleString()}` : null}
+              </div>
+            ) : null}
+          </div>
+        </details>
+      );
+    }
+    if (item.kind === "tool") {
+      const label = item.label || (item.status === "running" ? "正在执行工具" : "已完成工具调用");
+      return (
+        <div key={item.id} className={`manager-tool-divider ${item.status ?? "done"}`}>
+          <span className="manager-tool-divider-label">{label}</span>
+          <span className="manager-tool-divider-line" />
+        </div>
+      );
+    }
+    return (
+      <div key={item.id} className={`manager-message-bubble ${message.role}`}>
+        <div className="manager-message-text">
+          {renderMessageText({
+            ...message,
+            content: item.content || "",
+            state: item.status === "running" ? message.state : "done",
+          })}
+        </div>
+        {message.role === "manager" && item.kind === "text" && message.proposal ? renderProposalControls(message.proposal) : null}
+      </div>
     );
   }
 
@@ -850,19 +1535,9 @@ export function ManagerChatPanel({
 
   return (
     <section className="manager-chat-panel" style={{ maxHeight: "calc(100vh - 140px)" }}>
-      <div className="manager-chat-header">
-        <div>
-          <div className="manager-chat-kicker">Manager AI</div>
-          <h3>
-            <Sparkles size={16} />
-            Blueprint copilot
-          </h3>
-        </div>
-        <span>{busy ? "Responding…" : uploadMutation.isPending ? "Uploading…" : `Thinking ${thinkingEffort}`}</span>
-      </div>
       <div className="manager-chat-body">
         {error ? (
-          <div className="notice-panel error">
+          <div className="notice-panel error notice-toast manager-chat-toast">
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <AlertTriangle size={14} />
               {error}
@@ -877,50 +1552,33 @@ export function ManagerChatPanel({
             <div className="manager-session-empty">当前 session 加载失败：{sessionLoadError}</div>
           ) : (
             displayMessages.map((message) => (
-            <div key={message.id} className={`manager-message-row ${message.role}`}>
-              {message.role === "manager" ? <div className="manager-message-avatar">M</div> : null}
-              <div className={`manager-message-content ${message.role}`}>
-                {message.role === "manager" ? <div className="manager-message-role">Manager</div> : null}
-                {message.role === "manager" && (message.thinking || message.thinkingState === "running") ? (
-                  <details className="manager-thinking-panel" open={message.thinkingState === "running"}>
-                    <summary>
-                      <span className="manager-thinking-label">
-                        {renderStatusIcon(message.thinkingState)}
-                        Thinking
-                      </span>
-                      <ChevronDown size={12} />
-                    </summary>
-                    <div
-                      ref={(element) => {
-                        thinkingRefs.current[message.id] = element;
-                      }}
-                      className="manager-thinking-text"
-                    >
-                      {(message.thinking || "").split("\n").map((line, index) => (
-                        <div key={`${message.id}-thinking-${index}`}>{line}</div>
-                      ))}
-                    </div>
-                  </details>
-                ) : null}
-                {message.role === "manager" && message.tools?.length ? (
-                  <div className="manager-tool-stack">
-                    {message.tools.map((tool) => (
-                      <div key={tool.id} className={`manager-tool-pill ${tool.status}`}>
-                        <span className="manager-tool-label">
-                          {renderStatusIcon(tool.status)}
-                          {tool.label}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
+              <div key={message.id} className={`manager-message-row ${message.role}`}>
+                <div className={`manager-message-content ${message.role}`}>
                 {message.role === "user" ? renderMessageAttachments(message) : null}
-                <div className={`manager-message-bubble ${message.role}`}>
-                  <div className="manager-message-text">{renderMessageText(message)}</div>
-                </div>
+                  <div className="manager-message-stack">
+                    {(() => {
+                      if (message.timeline?.length) {
+                        return message.timeline.map((item) => renderTimelineItem(message, item));
+                      }
+                      if (message.thinkingState === "running" && message.thinking) {
+                        return renderTimelineItem(message, {
+                          id: `${message.id}_thinking_fallback`,
+                          kind: "thinking",
+                          content: message.thinking,
+                          status: "running",
+                        });
+                      }
+                      return renderTimelineItem(message, {
+                        id: `${message.id}_fallback`,
+                        kind: "text" as const,
+                        content: message.content,
+                        status: "done" as const,
+                      });
+                    })()}
+                  </div>
                 {message.role === "manager" ? renderMessageAttachments(message) : null}
+                </div>
               </div>
-            </div>
             ))
           )}
         </div>
@@ -950,12 +1608,13 @@ export function ManagerChatPanel({
             </button>
             <textarea
               ref={textareaRef}
+              rows={1}
               value={draft}
               onChange={(e) => {
                 setDraft(e.target.value);
                 syncMentionState(e.target.value, e.target.selectionStart);
               }}
-              placeholder="Message Blueprint copilot..."
+              placeholder="给 Manager 发消息…"
               onKeyDown={(e) => {
                 if (mentionState && mentionOptions.length) {
                   if (e.key === "ArrowDown") {
@@ -979,7 +1638,7 @@ export function ManagerChatPanel({
                     return;
                   }
                 }
-                if (e.key === "Enter" && !e.shiftKey) {
+                if (e.key === "Enter" && (e.shiftKey || e.metaKey || e.ctrlKey)) {
                   e.preventDefault();
                   submit();
                 }
@@ -988,20 +1647,63 @@ export function ManagerChatPanel({
               onClick={(e) => syncMentionState(e.currentTarget.value, e.currentTarget.selectionStart)}
               onKeyUp={(e) => syncMentionState(e.currentTarget.value, e.currentTarget.selectionStart)}
             />
-            {busy ? (
-              <button className="manager-stop-button" onClick={stopGeneration} type="button" title="停止生成">
-                <Square size={14} />
-              </button>
-            ) : (
-              <button
-                className="manager-send-button"
-                onClick={submit}
-                disabled={!draft.trim() || sessionBusy || Boolean(sessionLoadError)}
-                type="button"
+            <div className="manager-composer-actions">
+              <div className="manager-effort-menu" ref={effortMenuRef}>
+                <button
+                  className={`manager-effort-button ${effortMenuOpen ? "open" : ""}`}
+                  type="button"
+                  onClick={() => setEffortMenuOpen((current) => !current)}
+                  disabled={busy || sessionBusy}
+                  title="Thinking effort"
+                >
+                  <span>{effortLabel(thinkingEffort)}</span>
+                  <ChevronDown size={12} />
+                </button>
+                {effortMenuOpen ? (
+                  <div className="manager-effort-dropdown">
+                    {([
+                      ["low", "Low"],
+                      ["medium", "Medium"],
+                      ["high", "High"],
+                    ] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        className={`manager-effort-option ${thinkingEffort === value ? "active" : ""}`}
+                        onClick={() => {
+                          setThinkingEffort(value);
+                          setEffortMenuOpen(false);
+                        }}
+                      >
+                        <span>{label}</span>
+                        {thinkingEffort === value ? <Check size={12} /> : null}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+              <div
+                className={`manager-context-ring ${contextWindow.level}`}
+                style={{ "--context-fill": `${contextWindow.fillPercent}%` } as CSSProperties}
+                title={contextWindow.title}
+                aria-label={contextWindow.title}
               >
-                <Send size={16} />
-              </button>
-            )}
+                {busy ? (
+                  <button className="manager-stop-button" onClick={stopGeneration} type="button" title="停止生成">
+                    <Square size={14} />
+                  </button>
+                ) : (
+                  <button
+                    className="manager-send-button"
+                    onClick={submit}
+                    disabled={!draft.trim() || sessionBusy || Boolean(sessionLoadError)}
+                    type="button"
+                  >
+                    <Send size={16} />
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
           {mentionState && mentionOptions.length ? (
             <div className="mention-menu">
@@ -1021,21 +1723,6 @@ export function ManagerChatPanel({
               ))}
             </div>
           ) : null}
-          <div className="manager-composer-meta">
-            <label className="manager-effort-pill">
-              <span>Thinking effort</span>
-              <select
-                value={thinkingEffort}
-                onChange={(e) => setThinkingEffort(e.target.value as ThinkingEffort)}
-                disabled={busy || sessionBusy}
-              >
-                <option value="low">Low</option>
-                <option value="medium">Medium</option>
-                <option value="high">High</option>
-              </select>
-            </label>
-            <div className="manager-hint">`Enter` 发送，`Shift + Enter` 换行</div>
-          </div>
         </div>
       </div>
     </section>

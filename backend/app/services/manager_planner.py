@@ -57,6 +57,7 @@ You must follow the patch contract strictly:
 - Do not use `update_card` to modify a module. Cards and modules are different objects.
 - Do not use module ids where a card id is required, or card ids where a module id is required.
 - Respect `selected_context.script_preference` when creating analysis cards. Treat it as a soft user preference, not a hard constraint.
+- Respect `selected_context.python_runtime` and `selected_context.r_runtime` as preferred execution runtimes when planning or updating analysis cards.
 - If `script_preference` is `auto` and a new bioinformatics card could reasonably be implemented in either Python or R, ask the user for a preference before creating cards when that choice materially affects the workflow.
 - When a concrete preference is known, add it to each new or updated analysis card through `executor_context.instruction_blocks`, e.g. "Soft script preference: prefer R scripts when practical; use Python if it is more reliable for this task."
 
@@ -491,6 +492,10 @@ class DeepSeekManagerPlanner:
             ],
         }
         context["script_preference_guidance"] = self._script_preference_guidance(chat_request.context.script_preference)
+        context["runtime_preference_guidance"] = self._runtime_preference_guidance(
+            chat_request.context.python_runtime,
+            chat_request.context.r_runtime,
+        )
         if extra_context:
             context["extra_context"] = extra_context
         return context
@@ -520,4 +525,22 @@ class DeepSeekManagerPlanner:
             "value": normalized,
             "card_instruction_block": instructions[normalized],
             "hard_constraint": False,
+        }
+
+    @staticmethod
+    def _runtime_preference_guidance(python_runtime: str | None, r_runtime: str | None) -> dict:
+        instructions = []
+        if python_runtime:
+            instructions.append(f"Preferred Python runtime for future card execution: {python_runtime}.")
+        if r_runtime:
+            instructions.append(f"Preferred R runtime for future card execution: {r_runtime}.")
+        return {
+            "python_runtime": python_runtime,
+            "r_runtime": r_runtime,
+            "card_instruction_block": (
+                f"Runtime preference: {' '.join(instructions)} Add this to executor_context.instruction_blocks "
+                "when it is relevant to a new or updated analysis card."
+                if instructions
+                else None
+            ),
         }

@@ -4,8 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 APP_ENV_DIR="${HOME}/.config/blueprint-re"
+APP_RELEASE_DIR="${HOME}/.local/share/blueprint-re"
+FRONTEND_RELEASE_DIR="${APP_RELEASE_DIR}/frontend-release"
+NODE_BIN="$(command -v node)"
 
-mkdir -p "${SYSTEMD_USER_DIR}" "${APP_ENV_DIR}"
+mkdir -p "${SYSTEMD_USER_DIR}" "${APP_ENV_DIR}" "${APP_RELEASE_DIR}"
 
 install_runtime_dependencies() {
   local missing_runtime=0
@@ -100,6 +103,13 @@ MANAGER_AGENT_MODEL=${BLUEPRINT_MANAGER_MODEL:-deepseek-v4-pro}
 MANAGER_AGENT_TIMEOUT_MS=600000
 BLUEPRINT_DEEPSEEK_API_KEY=${BLUEPRINT_DEEPSEEK_API_KEY:-}
 BLUEPRINT_INTERNAL_TOOL_TOKEN=${INTERNAL_TOOL_TOKEN}
+MANAGER_WEBSEARCH_ENABLED=${MANAGER_WEBSEARCH_ENABLED:-}
+TAVILY_API_KEY=${TAVILY_API_KEY:-}
+TAVILY_BASE_URL=${TAVILY_BASE_URL:-https://api.tavily.com}
+MANAGER_CONTEXT_WINDOW_TOKENS=${MANAGER_CONTEXT_WINDOW_TOKENS:-1000000}
+MANAGER_COMPACTION_ENABLED=${MANAGER_COMPACTION_ENABLED:-true}
+MANAGER_COMPACTION_KEEP_RECENT_TOKENS=${MANAGER_COMPACTION_KEEP_RECENT_TOKENS:-120000}
+MANAGER_COMPACTION_RESERVE_TOKENS=${MANAGER_COMPACTION_RESERVE_TOKENS:-16000}
 EOF
 
 cat > "${APP_ENV_DIR}/frontend.env" <<EOF
@@ -119,8 +129,16 @@ set -a
 source "${APP_ENV_DIR}/frontend.env"
 set +a
 npm run build
-# standalone mode requires static assets to be linked manually
-ln -sfn "${ROOT_DIR}/frontend/.next/static" "${ROOT_DIR}/frontend/.next/standalone/frontend/.next/static"
+# Keep the deployed server isolated from repo-local builds so later `npm run build`
+# calls do not invalidate the live chunk manifest under the running process.
+rm -rf "${FRONTEND_RELEASE_DIR}"
+mkdir -p "${FRONTEND_RELEASE_DIR}/frontend/.next"
+cp -a "${ROOT_DIR}/frontend/.next/standalone/." "${FRONTEND_RELEASE_DIR}/"
+rm -rf "${FRONTEND_RELEASE_DIR}/frontend/.next/static"
+cp -a "${ROOT_DIR}/frontend/.next/static" "${FRONTEND_RELEASE_DIR}/frontend/.next/"
+if [[ -d "${ROOT_DIR}/frontend/public" ]]; then
+  cp -a "${ROOT_DIR}/frontend/public" "${FRONTEND_RELEASE_DIR}/frontend/"
+fi
 popd >/dev/null
 
 pushd "${ROOT_DIR}/manager-agent" >/dev/null
@@ -131,9 +149,9 @@ else
 fi
 popd >/dev/null
 
-sed "s|__ROOT__|${ROOT_DIR}|g" "${ROOT_DIR}/deploy/systemd/blueprint-re-manager-agent.service" > "${SYSTEMD_USER_DIR}/blueprint-re-manager-agent.service"
-sed "s|__ROOT__|${ROOT_DIR}|g" "${ROOT_DIR}/deploy/systemd/blueprint-re-backend.service" > "${SYSTEMD_USER_DIR}/blueprint-re-backend.service"
-sed "s|__ROOT__|${ROOT_DIR}|g" "${ROOT_DIR}/deploy/systemd/blueprint-re-frontend.service" > "${SYSTEMD_USER_DIR}/blueprint-re-frontend.service"
+sed -e "s|__ROOT__|${ROOT_DIR}|g" -e "s|__NODE_BIN__|${NODE_BIN}|g" "${ROOT_DIR}/deploy/systemd/blueprint-re-manager-agent.service" > "${SYSTEMD_USER_DIR}/blueprint-re-manager-agent.service"
+sed -e "s|__ROOT__|${ROOT_DIR}|g" -e "s|__NODE_BIN__|${NODE_BIN}|g" "${ROOT_DIR}/deploy/systemd/blueprint-re-backend.service" > "${SYSTEMD_USER_DIR}/blueprint-re-backend.service"
+sed -e "s|__ROOT__|${ROOT_DIR}|g" -e "s|__FRONTEND_RELEASE_DIR__|${FRONTEND_RELEASE_DIR}|g" -e "s|__NODE_BIN__|${NODE_BIN}|g" "${ROOT_DIR}/deploy/systemd/blueprint-re-frontend.service" > "${SYSTEMD_USER_DIR}/blueprint-re-frontend.service"
 
 systemctl --user daemon-reload
 systemctl --user enable blueprint-re-manager-agent.service

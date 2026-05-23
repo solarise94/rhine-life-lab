@@ -43,11 +43,13 @@ export function FilesPanel({
   files,
   onRefresh,
   onAttachAsset,
+  onPreviewAsset,
 }: {
   projectId: string;
   files?: ProjectFiles;
   onRefresh: () => Promise<void>;
   onAttachAsset: (asset: Asset) => void;
+  onPreviewAsset?: (asset: Asset) => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [clientError, setClientError] = useState<string | null>(null);
@@ -153,6 +155,7 @@ export function FilesPanel({
         projectId={projectId}
         emptyText="当前没有正在使用的数据资产。"
         onAttachAsset={onAttachAsset}
+        onPreviewAsset={onPreviewAsset}
         onDeleteAsset={(asset) => deleteAssetMutation.mutate(asset.asset_id)}
         deletingAssetId={deleteAssetMutation.isPending ? deleteAssetMutation.variables : undefined}
       />
@@ -163,6 +166,7 @@ export function FilesPanel({
         projectId={projectId}
         emptyText="当前没有过时的数据资产。"
         onAttachAsset={onAttachAsset}
+        onPreviewAsset={onPreviewAsset}
         onDeleteAsset={(asset) => deleteAssetMutation.mutate(asset.asset_id)}
         deletingAssetId={deleteAssetMutation.isPending ? deleteAssetMutation.variables : undefined}
       />
@@ -173,6 +177,7 @@ export function FilesPanel({
         projectId={projectId}
         emptyText="当前没有会话上传文件。"
         onAttachAsset={onAttachAsset}
+        onPreviewAsset={onPreviewAsset}
         onDeleteAsset={(asset) => deleteUploadMutation.mutate(asset.asset_id)}
         deletingAssetId={deleteUploadMutation.isPending ? deleteUploadMutation.variables : undefined}
       />
@@ -188,6 +193,7 @@ function AssetSection({
   projectId,
   emptyText,
   onAttachAsset,
+  onPreviewAsset,
   onDeleteAsset,
   deletingAssetId,
 }: {
@@ -197,6 +203,7 @@ function AssetSection({
   projectId: string;
   emptyText: string;
   onAttachAsset: (asset: Asset) => void;
+  onPreviewAsset?: (asset: Asset) => void;
   onDeleteAsset?: (asset: Asset) => void;
   deletingAssetId?: string;
 }) {
@@ -228,6 +235,10 @@ function AssetSection({
                   {asset.created_by_run ? <span className="pill">run {asset.created_by_run}</span> : null}
                 </div>
                 <div className="proposal-actions">
+                  <button className="btn secondary" type="button" onClick={() => onPreviewAsset?.(asset)}>
+                    <FileText size={14} />
+                    预览
+                  </button>
                   <button className="btn secondary" type="button" onClick={() => onAttachAsset(asset)}>
                     <Link2 size={14} />
                     加入聊天上下文

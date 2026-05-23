@@ -16,6 +16,7 @@ export function CardStream({
   onStartRun,
   onReviewRun,
   onAskManager,
+  onPreviewAsset,
   workerCapabilities = [],
   selectedWorkerByCard = {},
   onSelectWorker,
@@ -37,6 +38,7 @@ export function CardStream({
   onStartRun: (card: Card) => void;
   onReviewRun: (card: Card) => void;
   onAskManager?: (text: string) => void;
+  onPreviewAsset?: (assetId: string, cardId?: string) => void;
   workerCapabilities?: WorkerCapability[];
   selectedWorkerByCard?: Record<string, string | undefined>;
   onSelectWorker?: (card: Card, workerType: string) => void;
@@ -59,8 +61,35 @@ export function CardStream({
     [moduleCards],
   );
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const canvasRef = useRef<HTMLElement | null>(null);
   const [rowWidths, setRowWidths] = useState<Record<string, number>>({});
-  const [archiveOpen, setArchiveOpen] = useState(true);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const cardWrapperRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  useEffect(() => {
+    if (!selectedCardId) return;
+    let nestedFrame = 0;
+    const frame = window.requestAnimationFrame(() => {
+      nestedFrame = window.requestAnimationFrame(() => {
+        const wrapper = cardWrapperRefs.current[selectedCardId];
+        const canvas = canvasRef.current;
+        if (!wrapper || !canvas) return;
+        const wrapperRect = wrapper.getBoundingClientRect();
+        const canvasRect = canvas.getBoundingClientRect();
+        const targetLeft = canvas.scrollLeft + (wrapperRect.left - canvasRect.left) - (canvas.clientWidth - wrapperRect.width) / 2;
+        const targetTop = canvas.scrollTop + (wrapperRect.top - canvasRect.top) - 40;
+        canvas.scrollTo({
+          left: Math.max(0, targetLeft),
+          top: Math.max(0, targetTop),
+          behavior: "smooth",
+        });
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.cancelAnimationFrame(nestedFrame);
+    };
+  }, [selectedCardId]);
 
   const orderedRows = useMemo(() => {
     const workItemStepByCard = new Map(
@@ -117,6 +146,9 @@ export function CardStream({
 
   return (
     <section
+      ref={(node) => {
+        canvasRef.current = node;
+      }}
       className="specialist-canvas bg-grid"
       onClick={(event) => {
         if ((event.target as HTMLElement).closest("[data-card-id]")) return;
@@ -130,7 +162,6 @@ export function CardStream({
             <div key={row.id} className="workflow-row">
               <div className="workflow-row-label">
                 <span>{row.label}</span>
-                {row.cards.length > 1 ? <em>{row.cards.length} parallel specialists</em> : <em>1 specialist</em>}
               </div>
               <div
                 ref={(node) => {
@@ -141,6 +172,9 @@ export function CardStream({
                 {row.cards.map((card, idx) => (
                   <div
                     key={card.card_id}
+                    ref={(node) => {
+                      cardWrapperRefs.current[card.card_id] = node;
+                    }}
                     className="specialist-card-wrapper animate-enter"
                     style={{
                       animationDelay: `${(rowIndex * 2 + idx) * 50}ms`,
@@ -155,6 +189,7 @@ export function CardStream({
                       onStartRun={onStartRun}
                       onReviewRun={onReviewRun}
                       onAskManager={onAskManager}
+                      onPreviewAsset={onPreviewAsset}
                       workerCapabilities={workerCapabilities}
                       selectedWorkerType={selectedWorkerByCard[card.card_id]}
                       onSelectWorker={onSelectWorker}
@@ -191,6 +226,9 @@ export function CardStream({
                   {archivedCards.map((card, idx) => (
                     <div
                       key={card.card_id}
+                      ref={(node) => {
+                        cardWrapperRefs.current[card.card_id] = node;
+                      }}
                       className="archive-card-wrapper animate-enter"
                       style={{
                         animationDelay: `${(orderedRows.length * 2 + idx) * 50}ms`,
@@ -205,6 +243,7 @@ export function CardStream({
                         onStartRun={onStartRun}
                         onReviewRun={onReviewRun}
                         onAskManager={onAskManager}
+                        onPreviewAsset={onPreviewAsset}
                         workerCapabilities={workerCapabilities}
                         selectedWorkerType={selectedWorkerByCard[card.card_id]}
                         onSelectWorker={onSelectWorker}

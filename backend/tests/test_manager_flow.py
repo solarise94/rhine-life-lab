@@ -996,12 +996,19 @@ class ManagerFlowTest(unittest.TestCase):
         planner = DeepSeekManagerPlanner()
         context = planner._build_context(
             snapshot,
-            ChatRequest(message="增加一个 PCA 分析卡", context={"script_preference": "prefer_r"}),
+            ChatRequest(
+                message="增加一个 PCA 分析卡",
+                context={"script_preference": "prefer_r", "python_runtime": "omicverse", "r_runtime": "bioconductor"},
+            ),
         )
 
         self.assertEqual("prefer_r", context["selected_context"]["script_preference"])
+        self.assertEqual("omicverse", context["selected_context"]["python_runtime"])
+        self.assertEqual("bioconductor", context["selected_context"]["r_runtime"])
         self.assertFalse(context["script_preference_guidance"]["hard_constraint"])
         self.assertIn("prefer R scripts", context["script_preference_guidance"]["card_instruction_block"])
+        self.assertIn("omicverse", context["runtime_preference_guidance"]["card_instruction_block"])
+        self.assertIn("bioconductor", context["runtime_preference_guidance"]["card_instruction_block"])
         self.assertIn("executor_context", context["op_contracts"]["create_card"]["optional_fields"])
         self.assertIn("executor_context", context["op_contracts"]["update_card"]["optional_fields"])
 
@@ -1024,6 +1031,103 @@ class ManagerFlowTest(unittest.TestCase):
         instruction_blocks = result["card"]["executor_context"]["instruction_blocks"]
         self.assertEqual(1, len(instruction_blocks))
         self.assertIn("prefer R scripts", instruction_blocks[0])
+
+    def test_instruction_only_executor_context_keeps_agent_worker_permissions(self) -> None:
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        card = next(item for item in cards if item.card_id == "card_enrichment_group")
+        card.executor_context = ExecutorContext.model_validate(
+            {
+                "instruction_blocks": [
+                    "Soft script preference: prefer R scripts when practical; use Python if it is more reliable."
+                ]
+            }
+        )
+        store.save_cards(cards)
+
+        packet = self.worker._task_packet("test-project", "run_instruction_context", card, store.load_graph().assets, "pi")
+
+        self.assertEqual("allow", packet.executor_context.tool_policy.network)
+        self.assertTrue(packet.executor_context.tool_policy.rscript)
+        self.assertIn("prefer R scripts", "\n".join(packet.executor_context.instruction_blocks))
+
+    def test_executor_context_can_disable_default_rscript_permission(self) -> None:
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        card = next(item for item in cards if item.card_id == "card_enrichment_group")
+        card.executor_context = ExecutorContext.model_validate({"tool_policy": {"rscript": False}})
+        store.save_cards(cards)
+
+        packet = self.worker._task_packet("test-project", "run_disable_rscript", card, store.load_graph().assets, "pi")
+
+        self.assertEqual("allow", packet.executor_context.tool_policy.network)
+        self.assertFalse(packet.executor_context.tool_policy.rscript)
+
+    def test_manager_can_configure_card_execution_policy(self) -> None:
+        result = self.manager.blueprint_tools.configure_card_execution(
+            "test-project",
+            {
+                "card_ids": ["card_enrichment_group"],
+                "tool_policy": {"network": "allow", "rscript": True},
+                "runtime_bindings": {"r_env": "bioconductor"},
+                "instruction_blocks": ["Use Rscript for enrichment if Python packages are insufficient."],
+            },
+        )
+
+        self.assertEqual(["card_enrichment_group"], result["updated_card_ids"])
+        card = next(item for item in self.project_service.graph_store("test-project").load_cards() if item.card_id == "card_enrichment_group")
+        self.assertEqual("allow", card.executor_context.tool_policy.network)
+        self.assertTrue(card.executor_context.tool_policy.rscript)
+        self.assertEqual("bioconductor", card.executor_context.runtime_bindings.r_env)
+
+    def test_manager_can_write_and_filter_project_memory(self) -> None:
+        preference = self.manager.blueprint_tools.write_project_memory(
+            "test-project",
+            {
+                "memory_id": "pref_plotting_style",
+                "kind": "user_preference",
+                "summary": "用户明确要求记住：科研绘图偏论文发表风格，清晰克制。",
+            },
+        )
+        correction = self.manager.blueprint_tools.write_project_memory(
+            "test-project",
+            {
+                "memory_id": "corr_blueprint_facts",
+                "kind": "correction_memory",
+                "summary": "项目执行事实应从蓝图、cards、assets、runs 推断，不写入 project memory。",
+            },
+        )
+
+        self.assertEqual("pref_plotting_style", preference["memory"]["memory_id"])
+        self.assertEqual("corr_blueprint_facts", correction["memory"]["memory_id"])
+
+        listing = self.manager.blueprint_tools.list_project_memory(
+            "test-project",
+            {"kind": "user_preference", "limit": 5},
+        )
+
+        self.assertEqual(["pref_plotting_style"], [item["memory_id"] for item in listing["items"]])
+        self.assertIn("user_preference", listing["summary"])
+        self.assertEqual("Use blueprint/cards/assets/runs for project execution facts.", listing["memory_policy"]["fact_source"])
+
+    def test_project_memory_rejects_invalid_kind(self) -> None:
+        with self.assertRaises(ManagerPlanningError):
+            self.manager.blueprint_tools.write_project_memory(
+                "test-project",
+                {"kind": "project_fact", "summary": "Do not store this."},
+            )
+
+    def test_project_memory_truncates_long_summary(self) -> None:
+        result = self.manager.blueprint_tools.write_project_memory(
+            "test-project",
+            {
+                "kind": "correction_memory",
+                "summary": "x" * 700,
+            },
+        )
+
+        self.assertLessEqual(len(result["memory"]["summary"]), 500)
+        self.assertTrue(result["memory"]["summary"].endswith("..."))
 
     def test_start_run_returns_404_for_missing_card(self) -> None:
         with self.assertRaises(HTTPException) as ctx:

@@ -5,6 +5,7 @@ from pathlib import Path
 from app.models.cards import Card
 from app.models.chat import ChatSession
 from app.models.graph import Asset, Claim, GraphState, Module, ReportItem, RunRecord
+from app.models.memory import ProjectMemoryItem
 from app.models.patches import Proposal
 from app.models.project import ProjectState
 from app.models.runs import RunEvent
@@ -103,3 +104,9 @@ class GraphStore:
 
     def save_chat_sessions(self, sessions: list[ChatSession]) -> None:
         atomic_write_json(self._path("chat", "sessions.json"), [item.model_dump() for item in sessions])
+
+    def load_project_memory(self) -> list[ProjectMemoryItem]:
+        return [ProjectMemoryItem.model_validate(item) for item in read_json(self._path("memory", "project_memory.json"), [])]
+
+    def save_project_memory(self, items: list[ProjectMemoryItem]) -> None:
+        atomic_write_json(self._path("memory", "project_memory.json"), [item.model_dump() for item in items])

@@ -130,6 +130,7 @@ class ProjectService:
             f"{SCRIPTS_DIR}/curated",
             CONFIGS_DIR,
             DATA_DIR,
+            "memory",
         ]:
             (root / relative).mkdir(parents=True, exist_ok=True)
 
@@ -149,6 +150,7 @@ class ProjectService:
         store.save_graph(GraphState(metadata={"schema_version": self.settings.schema_version}))
         store.save_proposals([])
         store.save_chat_sessions([])
+        store.save_project_memory([])
         atomic_write_json(root / "graph" / "cleanup.json", [])
         (root / "configs" / "params.yaml").write_text(
             f"project_id: {project_id}\nname: {name}\n",

@@ -30,7 +30,12 @@ import {
 import { queryKeys } from "@/lib/query-keys";
 import { useReportViewStore } from "@/lib/stores/report-view-store";
 import { useResultsViewStore } from "@/lib/stores/results-view-store";
-import { EMPTY_SELECTED_RUNTIME_BY_CARD, EMPTY_SELECTED_WORKER_BY_CARD, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
+import {
+  EMPTY_ARTIFACT_PREVIEW_STATE,
+  EMPTY_SELECTED_RUNTIME_BY_CARD,
+  EMPTY_SELECTED_WORKER_BY_CARD,
+  useWorkspaceUiStore,
+} from "@/lib/stores/workspace-ui-store";
 import { Card, RunEvent } from "@/lib/types";
 import { SideNav } from "./SideNav";
 import { ProjectHeader } from "./ProjectHeader";
@@ -87,6 +92,13 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const setNotice = useWorkspaceUiStore((s) => s.setNotice);
   const mobileTab = useWorkspaceUiStore((s) => s.mobileTabByProject[projectId] ?? "chat");
   const setMobileTab = useWorkspaceUiStore((s) => s.setMobileTab);
+  const artifactPreview = useWorkspaceUiStore((s) => s.artifactPreviewByProject[projectId] ?? EMPTY_ARTIFACT_PREVIEW_STATE);
+  const openArtifactPreview = useWorkspaceUiStore((s) => s.openArtifactPreview);
+  const closeArtifactPreview = useWorkspaceUiStore((s) => s.closeArtifactPreview);
+  const setArtifactPreviewLoading = useWorkspaceUiStore((s) => s.setArtifactPreviewLoading);
+  const setArtifactPreviewError = useWorkspaceUiStore((s) => s.setArtifactPreviewError);
+  const addAttachment = useWorkspaceUiStore((s) => s.addAttachment);
+  const setDraftMessage = useWorkspaceUiStore((s) => s.setDraftMessage);
 
   const selectedAssetId = useResultsViewStore((s) => s.selectedAssetByProject[projectId]);
   const setSelectedAsset = useResultsViewStore((s) => s.setSelectedAsset);
@@ -144,7 +156,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const selectedAsset = allResultAssets.find((item) => item.asset_id === selectedAssetId) ?? allResultAssets[0];
   const selectedSection = reportQuery.data?.sections.find((item) => item.item_id === selectedSectionId) ?? reportQuery.data?.sections[0];
 
-  const resultAssetQuery = useResultAsset(projectId, view === "results" ? selectedAsset?.asset_id : undefined, view === "results");
+  const previewAssetId = artifactPreview.source?.assetId;
+  const resultAssetQuery = useResultAsset(projectId, previewAssetId, artifactPreview.open && Boolean(previewAssetId));
   const runEventsQuery = useRunEvents(projectId, view === "tasks" ? selectedRunId : undefined, selectedRun?.status);
   const runtimeApprovalsQuery = useRuntimeApprovals(projectId, view === "tasks" ? selectedRunId : undefined, selectedRun?.status);
   const runtimeApprovalMutation = useRuntimeApprovalDecisionMutation(projectId, view === "tasks" ? selectedRunId : undefined);
@@ -204,8 +217,70 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     return () => socket.close();
   }, [projectId, queryClient, selectedRunId, view]);
 
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => {
+      setNotice(projectId, null);
+    }, 2200);
+    return () => window.clearTimeout(timer);
+  }, [notice, projectId, setNotice]);
+
+  useEffect(() => {
+    if (!artifactPreview.open || !previewAssetId) {
+      return;
+    }
+    setArtifactPreviewLoading(projectId, resultAssetQuery.isLoading);
+  }, [artifactPreview.open, previewAssetId, projectId, resultAssetQuery.isLoading, setArtifactPreviewLoading]);
+
+  useEffect(() => {
+    if (!artifactPreview.open) {
+      return;
+    }
+    if (resultAssetQuery.error instanceof Error) {
+      setArtifactPreviewError(projectId, resultAssetQuery.error.message);
+      return;
+    }
+    if (resultAssetQuery.data) {
+      setArtifactPreviewError(projectId, undefined);
+    }
+  }, [artifactPreview.open, projectId, resultAssetQuery.data, resultAssetQuery.error, setArtifactPreviewError]);
+
   function reportActionError(error: unknown, fallback: string) {
     setNotice(projectId, error instanceof Error ? error.message : fallback);
+  }
+
+  function handleOpenAssetPreview(assetId: string, source: "card" | "results" | "files", cardId?: string) {
+    openArtifactPreview(projectId, {
+      projectId,
+      assetId,
+      cardId,
+      source,
+    });
+  }
+
+  function handleSendAssetToManager() {
+    const detail = resultAssetQuery.data;
+    if (!detail) return;
+    addAttachment(projectId, {
+      type: "asset",
+      id: detail.asset.asset_id,
+      label: detail.asset.title,
+    });
+    setNotice(projectId, `已将 ${detail.asset.title} 加入 Manager 上下文。`);
+    setMobileTab(projectId, "chat");
+  }
+
+  function handleExplainAsset() {
+    const detail = resultAssetQuery.data;
+    if (!detail) return;
+    addAttachment(projectId, {
+      type: "asset",
+      id: detail.asset.asset_id,
+      label: detail.asset.title,
+    });
+    setDraftMessage(projectId, `请解释结果 ${detail.asset.title}，重点说明结论、可信度和下一步动作。`);
+    setNotice(projectId, `已把 ${detail.asset.title} 送到 Manager。`);
+    setMobileTab(projectId, "chat");
   }
 
   async function handleStartRun(card: Card) {
@@ -356,10 +431,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           onStartRun={handleStartRun}
           onReviewRun={handleReviewRun}
           onAskManager={(text) => {
-            const store = useWorkspaceUiStore.getState();
-            store.setDraftMessage(projectId, text);
-            store.setMobileTab(projectId, "chat");
+            setDraftMessage(projectId, text);
+            setMobileTab(projectId, "chat");
           }}
+          onPreviewAsset={(assetId, cardId) => handleOpenAssetPreview(assetId, "card", cardId)}
           workerCapabilities={snapshot.worker_capabilities}
           selectedWorkerByCard={selectedWorkerByProject}
           onSelectWorker={(card, workerType) => {
@@ -382,13 +457,6 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           }}
         />
       </div>
-      <CardDetailPanel
-        card={selectedCard}
-        summary={snapshot.summary}
-        workItem={selectedWorkItem}
-        run={selectedRun}
-        latestEvent={runEventsQuery.data?.items?.at(-1)}
-      />
     </div>
   );
 
@@ -438,13 +506,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             }
           />
         ) : null}
-        {notice ? (
-          <div className="notice-panel">{notice}</div>
-        ) : null}
-        {error ? (
-          <div className="notice-panel error">{error}</div>
-        ) : null}
-
+        {notice ? <div className="notice-panel notice-toast">{notice}</div> : null}
         {/* Desktop */}
         <div className="desktop-content">
           {view === "tasks" ? tasksContent : null}
@@ -460,20 +522,22 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 items={resultsQuery.data?.accepted ?? []}
                 selectedAssetId={selectedAsset?.asset_id}
                 onSelect={(asset) => setSelectedAsset(projectId, asset.asset_id)}
+                onPreview={(asset) => handleOpenAssetPreview(asset.asset_id, "results")}
               />
               <ResultsGrid
                 title="Candidate Results"
                 items={resultsQuery.data?.candidate ?? []}
                 selectedAssetId={selectedAsset?.asset_id}
                 onSelect={(asset) => setSelectedAsset(projectId, asset.asset_id)}
+                onPreview={(asset) => handleOpenAssetPreview(asset.asset_id, "results")}
               />
               <ResultsGrid
                 title="Other Results"
                 items={resultsQuery.data?.other ?? []}
                 selectedAssetId={selectedAsset?.asset_id}
                 onSelect={(asset) => setSelectedAsset(projectId, asset.asset_id)}
+                onPreview={(asset) => handleOpenAssetPreview(asset.asset_id, "results")}
               />
-              <ResultPreviewPanel detail={resultAssetQuery.data} />
             </div>
           ) : null}
           {view === "files" ? (
@@ -481,10 +545,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               projectId={projectId}
               files={filesQuery.data}
               onRefresh={refreshWorkspace}
+              onPreviewAsset={(asset) => handleOpenAssetPreview(asset.asset_id, "files")}
               onAttachAsset={(asset) => {
-                const store = useWorkspaceUiStore.getState();
-                store.addAttachment(projectId, { type: "asset", id: asset.asset_id, label: asset.title });
-                store.setDraftMessage(projectId, `@${asset.title} `);
+                addAttachment(projectId, { type: "asset", id: asset.asset_id, label: asset.title });
+                setDraftMessage(projectId, `@${asset.title} `);
                 setNotice(projectId, `已将 ${asset.title} 加入 Manager 上下文。`);
               }}
             />
@@ -519,10 +583,12 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   setNotice(projectId, `全局 R runtime: ${formatRuntime(runtime)}。`);
                 }}
               />
-              <CardDetailPanel
-                card={selectedCard}
-                summary={snapshot.summary}
-              />
+              {selectedCard ? (
+                <CardDetailPanel
+                  card={selectedCard}
+                  summary={snapshot.summary}
+                />
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -533,6 +599,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             mobileTab === "chat" ? (
               <ManagerChatPanel
                 projectId={projectId}
+                sessionId={currentChatSessionId}
                 mentionableAssets={snapshot.graph.assets}
                 onRefresh={refreshWorkspace}
               />
@@ -547,10 +614,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 onStartRun={handleStartRun}
                 onReviewRun={handleReviewRun}
                 onAskManager={(text) => {
-                  const store = useWorkspaceUiStore.getState();
-                  store.setDraftMessage(projectId, text);
-                  store.setMobileTab(projectId, "chat");
+                  setDraftMessage(projectId, text);
+                  setMobileTab(projectId, "chat");
                 }}
+                onPreviewAsset={(assetId, cardId) => handleOpenAssetPreview(assetId, "card", cardId)}
                 workerCapabilities={snapshot.worker_capabilities}
                 selectedWorkerByCard={selectedWorkerByProject}
                 onSelectWorker={(card, workerType) => {
@@ -588,8 +655,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     items={allResultAssets}
                     selectedAssetId={selectedAsset?.asset_id}
                     onSelect={(asset) => setSelectedAsset(projectId, asset.asset_id)}
+                    onPreview={(asset) => handleOpenAssetPreview(asset.asset_id, "results")}
                   />
-                  <ResultPreviewPanel detail={resultAssetQuery.data} />
                 </>
               ) : null}
               {view === "report" ? (
@@ -609,10 +676,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   projectId={projectId}
                   files={filesQuery.data}
                   onRefresh={refreshWorkspace}
+                  onPreviewAsset={(asset) => handleOpenAssetPreview(asset.asset_id, "files")}
                   onAttachAsset={(asset) => {
-                    const store = useWorkspaceUiStore.getState();
-                    store.addAttachment(projectId, { type: "asset", id: asset.asset_id, label: asset.title });
-                    store.setDraftMessage(projectId, `@${asset.title} `);
+                    addAttachment(projectId, { type: "asset", id: asset.asset_id, label: asset.title });
+                    setDraftMessage(projectId, `@${asset.title} `);
                     setNotice(projectId, `已将 ${asset.title} 加入 Manager 上下文。`);
                   }}
                 />
@@ -635,15 +702,32 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                       setNotice(projectId, `全局 R runtime: ${formatRuntime(runtime)}。`);
                     }}
                   />
-                  <CardDetailPanel
-                    card={selectedCard}
-                    summary={snapshot.summary}
-                  />
+                  {selectedCard ? (
+                    <CardDetailPanel
+                      card={selectedCard}
+                      summary={snapshot.summary}
+                    />
+                  ) : null}
                 </>
               ) : null}
             </div>
           ) : null}
         </div>
+
+        {artifactPreview.open ? (
+          <div className="artifact-preview-drawer">
+            <ResultPreviewPanel
+              detail={resultAssetQuery.data}
+              mode="drawer"
+              title="Artifact Preview"
+              loading={artifactPreview.loading}
+              error={artifactPreview.error}
+              onClose={() => closeArtifactPreview(projectId)}
+              onSendToManager={() => handleSendAssetToManager()}
+              onExplain={() => handleExplainAsset()}
+            />
+          </div>
+        ) : null}
 
         {/* Run Events Panel - shown conditionally */}
         {view === "tasks" && selectedRun ? (

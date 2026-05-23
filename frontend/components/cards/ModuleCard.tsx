@@ -25,6 +25,7 @@ export function ModuleCard({
   onStartRun,
   onReviewRun,
   onAskManager,
+  onPreviewAsset,
   workerCapabilities = [],
   selectedWorkerType,
   onSelectWorker,
@@ -44,6 +45,7 @@ export function ModuleCard({
   onStartRun: (card: Card) => void;
   onReviewRun: (card: Card) => void;
   onAskManager?: (text: string) => void;
+  onPreviewAsset?: (assetId: string, cardId?: string) => void;
   workerCapabilities?: WorkerCapability[];
   selectedWorkerType?: string;
   onSelectWorker?: (card: Card, workerType: string) => void;
@@ -256,7 +258,14 @@ export function ModuleCard({
             {/* ─── Page 4: Files ─── */}
             <div className="file-bag-page">
               <div className="page-content-scroll">
-                <FileBag projectId={projectId} card={card} embedded mode={isDormant ? "archive" : "files"} onAskManager={onAskManager} />
+                <FileBag
+                  projectId={projectId}
+                  card={card}
+                  embedded
+                  mode={isDormant ? "archive" : "files"}
+                  onAskManager={onAskManager}
+                  onPreviewAsset={onPreviewAsset}
+                />
               </div>
             </div>
 

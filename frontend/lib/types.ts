@@ -145,6 +145,24 @@ export interface AssetDetail {
   preview: AssetPreview;
 }
 
+export type ArtifactPreviewSource = "card" | "run" | "results" | "files" | "manager";
+
+export interface ArtifactPreviewRequest {
+  projectId: string;
+  assetId?: string;
+  runId?: string;
+  cardId?: string;
+  source: ArtifactPreviewSource;
+}
+
+export interface ArtifactPreviewState {
+  open: boolean;
+  loading: boolean;
+  error?: string;
+  detail?: AssetDetail;
+  source?: ArtifactPreviewRequest;
+}
+
 export interface ChatUploadResponse {
   asset: Asset;
   attachment: {
@@ -152,6 +170,33 @@ export interface ChatUploadResponse {
     id: string;
     label: string;
   };
+}
+
+export interface ChatSessionMessageTimelineItem {
+  id: string;
+  kind: string;
+  content?: string | null;
+  label?: string | null;
+  tool_name?: string | null;
+  status?: string | null;
+  started_at?: number | null;
+  ended_at?: number | null;
+  first_kept_message_id?: string | null;
+  tokens_before?: number | null;
+  tokens_after?: number | null;
+  duration_ms?: number | null;
+  provider?: string | null;
+  model?: string | null;
+}
+
+export interface ChatTokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_tokens: number;
+  context_window_tokens?: number | null;
+  max_output_tokens?: number | null;
 }
 
 export interface ChatSessionMessageRecord {
@@ -162,6 +207,8 @@ export interface ChatSessionMessageRecord {
   thinking?: string | null;
   attachments?: Array<{ type: "card" | "asset"; id: string; label: string }> | null;
   state?: "idle" | "thinking" | "streaming" | "done" | "error" | null;
+  timeline?: ChatSessionMessageTimelineItem[] | null;
+  token_usage?: ChatTokenUsage | null;
 }
 
 export interface ChatSessionSummary {

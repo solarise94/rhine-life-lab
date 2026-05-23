@@ -71,6 +71,11 @@ Script-language preference is a soft planning hint, not an executor hard constra
 
 Runtime dependencies are declared in `deploy/runtime-dependencies.yml`, and `scripts/deploy_user_systemd.sh` must fail deployment if the bubblewrap smoke test fails in the real deployment environment.
 
+## Manager Project Memory Notes
+Project memory is intentionally narrow. Store only explicit long-term `user_preference` and `correction_memory` records, such as remembered plotting/report style preferences or durable corrections the Manager should not repeat. Do not store blueprint execution facts, card state, asset state, run state, or ordinary chat history in project memory.
+
+The blueprint remains the source of truth for project execution facts. Manager should use blueprint/card/asset/run tools to infer project state, and use project memory only to guide how work is planned, explained, or corrected. Keep memory summaries short and avoid injecting unrelated memory into every model turn.
+
 ## Commit & Pull Request Guidelines
 Recent commits use short, imperative subjects such as `Add runtime approval flow for executors` and `Clarify module group aggregate status`. Keep commit titles concise, capitalized, and focused on one change.
 

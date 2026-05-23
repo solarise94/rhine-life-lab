@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { ArtifactPreviewRequest } from "@/lib/types";
 
 export type CardPage = "specialist" | "result" | "detail" | "files" | "archive";
 export type Attachment = { type: "card" | "asset"; id: string; label: string };
@@ -11,6 +12,18 @@ export const EMPTY_CARD_PAGE_BY_ID: Record<string, CardPage> = {};
 export const EMPTY_ATTACHMENTS: Attachment[] = [];
 export const EMPTY_SELECTED_WORKER_BY_CARD: Record<string, string | undefined> = {};
 export const EMPTY_SELECTED_RUNTIME_BY_CARD: Record<string, string | undefined> = {};
+
+type ArtifactPreviewStoreState = {
+  open: boolean;
+  loading: boolean;
+  error?: string;
+  source?: ArtifactPreviewRequest;
+};
+
+export const EMPTY_ARTIFACT_PREVIEW_STATE: ArtifactPreviewStoreState = {
+  open: false,
+  loading: false,
+};
 
 interface WorkspaceUiState {
   currentChatSessionIdByProject: Record<string, string | null | undefined>;
@@ -27,6 +40,7 @@ interface WorkspaceUiState {
   attachmentsByProject: Record<string, Attachment[]>;
   mobileTabByProject: Record<string, "chat" | "blueprint">;
   draftMessageByProject: Record<string, string>;
+  artifactPreviewByProject: Record<string, ArtifactPreviewStoreState | undefined>;
   setCurrentChatSessionId: (projectId: string, sessionId?: string | null) => void;
   setSelectedCard: (projectId: string, cardId?: string | null) => void;
   setSelectedWorker: (projectId: string, cardId: string, workerType?: string) => void;
@@ -44,6 +58,10 @@ interface WorkspaceUiState {
   setMobileTab: (projectId: string, tab: "chat" | "blueprint") => void;
   setDraftMessage: (projectId: string, message: string) => void;
   clearDraftMessage: (projectId: string) => void;
+  openArtifactPreview: (projectId: string, source: ArtifactPreviewRequest) => void;
+  setArtifactPreviewLoading: (projectId: string, loading: boolean) => void;
+  setArtifactPreviewError: (projectId: string, error?: string) => void;
+  closeArtifactPreview: (projectId: string) => void;
 }
 
 export const useWorkspaceUiStore = create<WorkspaceUiState>()(
@@ -63,6 +81,7 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
       attachmentsByProject: {},
       mobileTabByProject: {},
       draftMessageByProject: {},
+      artifactPreviewByProject: {},
       setCurrentChatSessionId: (projectId, sessionId) =>
         set((state) => {
           if (state.currentChatSessionIdByProject[projectId] === sessionId) return state;
@@ -234,10 +253,55 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
             [projectId]: "",
           },
         })),
+      openArtifactPreview: (projectId, source) =>
+        set((state) => ({
+          artifactPreviewByProject: {
+            ...state.artifactPreviewByProject,
+            [projectId]: {
+              open: true,
+              loading: true,
+              error: undefined,
+              source,
+            },
+          },
+        })),
+      setArtifactPreviewLoading: (projectId, loading) =>
+        set((state) => ({
+          artifactPreviewByProject: {
+            ...state.artifactPreviewByProject,
+            [projectId]: {
+              ...(state.artifactPreviewByProject[projectId] ?? EMPTY_ARTIFACT_PREVIEW_STATE),
+              open: true,
+              loading,
+            },
+          },
+        })),
+      setArtifactPreviewError: (projectId, error) =>
+        set((state) => ({
+          artifactPreviewByProject: {
+            ...state.artifactPreviewByProject,
+            [projectId]: {
+              ...(state.artifactPreviewByProject[projectId] ?? EMPTY_ARTIFACT_PREVIEW_STATE),
+              open: true,
+              loading: false,
+              error,
+            },
+          },
+        })),
+      closeArtifactPreview: (projectId) =>
+        set((state) => ({
+          artifactPreviewByProject: {
+            ...state.artifactPreviewByProject,
+            [projectId]: {
+              open: false,
+              loading: false,
+            },
+          },
+        })),
     }),
     {
       name: "blueprint-workspace-ui-v3",
-      storage: createJSONStorage(() => sessionStorage),
+      storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
         currentChatSessionIdByProject: state.currentChatSessionIdByProject,
         selectedCardByProject: state.selectedCardByProject,
@@ -252,6 +316,7 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
         attachmentsByProject: state.attachmentsByProject,
         mobileTabByProject: state.mobileTabByProject,
         draftMessageByProject: state.draftMessageByProject,
+        artifactPreviewByProject: state.artifactPreviewByProject,
       }),
     },
   ),

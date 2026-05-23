@@ -32,6 +32,23 @@ function sortSessions(items: ChatSessionSummary[]) {
   return [...items].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
 }
 
+function formatSessionTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function sessionTitle(session: ChatSessionSummary) {
+  const summary = session.summary?.trim();
+  if (summary && summary !== "新会话") return summary;
+  return session.message_count > 0 ? `Session ${session.session_id.slice(-4)}` : "新会话";
+}
+
 const EMPTY_SESSIONS: ChatSessionSummary[] = [];
 
 export function SideNav({
@@ -285,13 +302,22 @@ export function SideNav({
         </button>
       </div>
       <div className="nav-session-list">
+        {sessionsQuery.isLoading ? <div className="nav-session-empty">加载 sessions…</div> : null}
+        {sessionsQuery.isError ? <div className="nav-session-empty error">Sessions 加载失败</div> : null}
+        {!sessionsQuery.isLoading && !sessionsQuery.isError && !sessions.length ? (
+          <div className="nav-session-empty">暂无 session</div>
+        ) : null}
         {sessions.map((session) => {
           const active = currentChatSessionId === session.session_id;
+          const title = sessionTitle(session);
           return (
             <div key={session.session_id} className={`nav-session-item ${active ? "active" : ""}`}>
-              <button type="button" className="nav-session-main" onClick={() => openSession(session.session_id)}>
+              <button type="button" className="nav-session-main" onClick={() => openSession(session.session_id)} title={session.summary}>
                 <MessageSquareText size={14} />
-                <span>{session.summary}</span>
+                <span className="nav-session-copy">
+                  <strong>{title}</strong>
+                  <em>{session.message_count} 条消息 · {formatSessionTime(session.updated_at)}</em>
+                </span>
               </button>
               <button
                 type="button"
