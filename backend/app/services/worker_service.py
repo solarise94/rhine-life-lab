@@ -17,6 +17,8 @@ from app.models.cards import Card, CardAssetRef
 from app.models.executor import (
     ExecutorContext,
     ExecutorReference,
+    ExecutorScriptAssetBinding,
+    ExecutorScriptAssetRequirement,
     ExecutorStructuredEvent,
     ExecutorToolPolicy,
     ManagerReportingContract,
@@ -1367,6 +1369,18 @@ class WorkerService:
                 context.runtime_bindings.working_dir = override.runtime_bindings.working_dir
             if "env" in runtime_fields:
                 context.runtime_bindings.env.update(override.runtime_bindings.env)
+        if "script_asset_requirements" in override.model_fields_set:
+            context.script_asset_requirements = [
+                ExecutorScriptAssetRequirement.model_validate(item.model_dump() if hasattr(item, "model_dump") else item)
+                for item in override.script_asset_requirements
+            ]
+        if "script_asset_bindings" in override.model_fields_set:
+            context.script_asset_bindings = [
+                ExecutorScriptAssetBinding.model_validate(item.model_dump() if hasattr(item, "model_dump") else item)
+                for item in override.script_asset_bindings
+            ]
+        if "template_metadata" in override.model_fields_set:
+            context.template_metadata = dict(override.template_metadata)
         return context
 
     @staticmethod
@@ -1791,6 +1805,8 @@ class WorkerService:
     def _reconcile_active_runs(self) -> None:
         for child in sorted(self.project_service.settings.data_root.iterdir()):
             if not child.is_dir():
+                continue
+            if child.name.startswith("_"):
                 continue
             project_id = child.name
             lock = self.project_service.lock_for(project_id)

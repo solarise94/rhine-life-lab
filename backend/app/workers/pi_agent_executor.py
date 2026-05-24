@@ -225,7 +225,7 @@ def _post_deepseek(prompt: str) -> dict[str, Any]:
     if not api_key:
         raise RuntimeError("BLUEPRINT_DEEPSEEK_API_KEY is not configured for pi executor.")
     base_url = os.environ.get("BLUEPRINT_DEEPSEEK_API_BASE_URL", "https://api.deepseek.com/anthropic").rstrip("/")
-    model = os.environ.get("BLUEPRINT_MANAGER_MODEL", "deepseek-v4-pro")
+    model = os.environ.get("BLUEPRINT_EXECUTOR_MODEL", os.environ.get("BLUEPRINT_MANAGER_MODEL", "deepseek-v4-flash"))
     max_tokens = int(os.environ.get("BLUEPRINT_MANAGER_MAX_TOKENS", "2400"))
     temperature = float(os.environ.get("BLUEPRINT_MANAGER_TEMPERATURE", "0.2"))
     timeout = int(os.environ.get("BLUEPRINT_MANAGER_TIMEOUT_SECONDS", "600"))

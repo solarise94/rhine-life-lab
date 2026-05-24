@@ -112,6 +112,7 @@ export interface WorkItem {
   depends_on_card_ids: string[];
   blocked_by_card_ids: string[];
   blocked_by_asset_ids: string[];
+  missing_script_asset_requirement_ids?: string[];
   planned_input_asset_ids?: string[];
   can_start: boolean;
   block_reasons: string[];
@@ -309,6 +310,36 @@ export interface CreateProjectPayload {
   project_id: string;
   name: string;
   current_goal: string;
+}
+
+export interface AppSettings {
+  deepseek: {
+    api_key_configured: boolean;
+    api_base_url: string;
+    pi_base_url: string;
+    manager_model: string;
+    executor_model: string;
+    reviewer_model: string;
+  };
+  web_search: {
+    enabled: boolean;
+    api_key_configured: boolean;
+    base_url: string;
+  };
+}
+
+export interface UpdateAppSettingsPayload {
+  deepseek_api_key?: string | null;
+  clear_deepseek_api_key?: boolean;
+  deepseek_api_base_url?: string | null;
+  pi_deepseek_base_url?: string | null;
+  manager_model?: string | null;
+  executor_model?: string | null;
+  reviewer_model?: string | null;
+  manager_websearch_enabled?: boolean | null;
+  tavily_api_key?: string | null;
+  clear_tavily_api_key?: boolean;
+  tavily_base_url?: string | null;
 }
 
 export interface ProjectSnapshot {

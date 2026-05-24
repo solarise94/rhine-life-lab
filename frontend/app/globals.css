@@ -197,7 +197,8 @@ button {
   font-weight: 600;
 }
 
-.nav-runtime-field select {
+.nav-runtime-field select,
+.nav-runtime-field input {
   width: 100%;
   min-width: 0;
   padding: 8px 10px;
@@ -208,13 +209,102 @@ button {
   font-size: 12px;
   font-weight: 600;
   outline: none;
-  cursor: pointer;
   transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 
-.nav-runtime-field select:focus {
+.nav-runtime-field select {
+  cursor: pointer;
+}
+
+.nav-runtime-field select:focus,
+.nav-runtime-field input:focus {
   border-color: var(--blue);
   box-shadow: 0 0 0 3px var(--glow-blue);
+}
+
+.nav-api-panel {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+
+.nav-api-summary {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 10px;
+  color: var(--text);
+  text-align: left;
+  transition: background 140ms ease;
+}
+
+.nav-api-summary:hover {
+  background: var(--bg-hover);
+}
+
+.nav-api-summary span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.nav-api-summary strong {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.nav-api-summary em {
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nav-api-form {
+  display: grid;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.nav-api-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.nav-api-check input {
+  accent-color: var(--blue);
+}
+
+.nav-api-save {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--text);
+  color: var(--panel-solid);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.nav-api-save:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.nav-api-status {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .nav-session-add {
@@ -1309,11 +1399,16 @@ button {
 }
 
 .manager-tool-divider {
+  display: grid;
+  gap: 4px;
+  padding: 4px 0;
+  margin: 4px 0;
+}
+
+.manager-tool-divider-main {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 4px 0;
-  margin: 4px 0;
 }
 
 .manager-tool-divider-line {
@@ -1336,6 +1431,12 @@ button {
 
 .manager-tool-divider.error .manager-tool-divider-label {
   color: var(--red-dark);
+}
+
+.manager-tool-report {
+  font-size: 12px;
+  color: var(--muted);
+  padding-left: 2px;
 }
 
 .manager-stream-cursor {

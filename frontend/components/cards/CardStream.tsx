@@ -11,6 +11,7 @@ export function CardStream({
   cards,
   workOrder,
   selectedCardId,
+  cardInteractionOrder = [],
   onSelect,
   onClearSelection,
   onStartRun,
@@ -33,6 +34,7 @@ export function CardStream({
   cards: Card[];
   workOrder?: WorkOrder;
   selectedCardId?: string;
+  cardInteractionOrder?: string[];
   onSelect: (card: Card) => void;
   onClearSelection?: () => void;
   onStartRun: (card: Card) => void;
@@ -65,6 +67,13 @@ export function CardStream({
   const [rowWidths, setRowWidths] = useState<Record<string, number>>({});
   const [archiveOpen, setArchiveOpen] = useState(false);
   const cardWrapperRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const interactionRank = useMemo(() => {
+    const order = new Map<string, number>();
+    cardInteractionOrder.forEach((cardId, index) => {
+      order.set(cardId, index + 1);
+    });
+    return order;
+  }, [cardInteractionOrder]);
 
   useEffect(() => {
     if (!selectedCardId) return;
@@ -175,11 +184,15 @@ export function CardStream({
                     ref={(node) => {
                       cardWrapperRefs.current[card.card_id] = node;
                     }}
-                    className="specialist-card-wrapper animate-enter"
-                    style={{
-                      animationDelay: `${(rowIndex * 2 + idx) * 50}ms`,
-                      zIndex: selectedCardId === card.card_id ? row.cards.length + 100 : row.cards.length - idx,
-                    }}
+                      className="specialist-card-wrapper animate-enter"
+                      style={{
+                        animationDelay: `${(rowIndex * 2 + idx) * 50}ms`,
+                        zIndex:
+                          (interactionRank.get(card.card_id) ?? 0) * 10 +
+                          (selectedCardId === card.card_id ? 1000 : 0) +
+                          row.cards.length -
+                          idx,
+                      }}
                   >
                     <ModuleCard
                       projectId={projectId}
@@ -232,7 +245,11 @@ export function CardStream({
                       className="archive-card-wrapper animate-enter"
                       style={{
                         animationDelay: `${(orderedRows.length * 2 + idx) * 50}ms`,
-                        zIndex: selectedCardId === card.card_id ? archivedCards.length + 100 : archivedCards.length - idx,
+                        zIndex:
+                          (interactionRank.get(card.card_id) ?? 0) * 10 +
+                          (selectedCardId === card.card_id ? 1000 : 0) +
+                          archivedCards.length -
+                          idx,
                       }}
                     >
                       <ModuleCard

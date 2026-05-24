@@ -1,6 +1,7 @@
 from functools import lru_cache
 
 from app.services.chat_session_service import ChatSessionService
+from app.services.app_config_service import AppConfigService
 from app.services.manager_service import ManagerService
 from app.services.chat_job_service import ChatJobService
 from app.services.flow_service import FlowService
@@ -11,6 +12,7 @@ from app.services.project_file_service import ProjectFileService
 from app.services.project_service import ProjectService
 from app.services.result_asset_service import ResultAssetService
 from app.services.report_service import ReportService
+from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
 from app.services.runtime_approval_service import RuntimeApprovalService
 from app.services.worker_service import WorkerService
 
@@ -34,12 +36,21 @@ def get_patch_apply_service() -> PatchApplyService:
 
 @lru_cache
 def get_manager_service() -> ManagerService:
-    return ManagerService(get_project_service())
+    return ManagerService(
+        get_project_service(),
+        worker_service=get_worker_service(),
+        runtime_dependency_job_service=get_runtime_dependency_job_service(),
+    )
 
 
 @lru_cache
 def get_chat_job_service() -> ChatJobService:
     return ChatJobService()
+
+
+@lru_cache
+def get_runtime_dependency_job_service() -> RuntimeDependencyJobService:
+    return RuntimeDependencyJobService()
 
 
 @lru_cache
@@ -80,3 +91,8 @@ def get_project_file_service() -> ProjectFileService:
 @lru_cache
 def get_flow_service() -> FlowService:
     return FlowService(get_project_service())
+
+
+@lru_cache
+def get_app_config_service() -> AppConfigService:
+    return AppConfigService()

@@ -128,6 +128,8 @@ class ProjectFileService:
                     ("manager_brief.json", "manager_brief"),
                     ("dependency_issue.json", "dependency_issue"),
                     ("review_context.json", "review_context"),
+                    ("reviewer_trace.json", "reviewer_trace"),
+                    ("reviewer_trace.jsonl", "reviewer_trace"),
                     ("transcript.md", "transcript"),
                     ("agent_trace.json", "agent_trace"),
                     ("agent_output_timeline.jsonl", "agent_output_timeline"),

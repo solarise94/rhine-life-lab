@@ -11,6 +11,7 @@ from urllib import error, request as url_request
 from app.models.chat import ChatAction, ChatRequest, ChatResponse
 from app.models.patches import GraphPatch, Proposal
 from app.core.config import get_settings
+from app.services.app_config_service import AppConfigService
 from app.services.manager_blueprint_tools import ManagerBlueprintTools
 from app.services.manager_intent import ManagerIntentRouter
 from app.services.manager_patch_compiler import ManagerPatchCompiler
@@ -19,6 +20,8 @@ from app.services.manager_planner import ManagerPlanningError
 from app.services.manager_tools import ManagerToolLayer
 from app.services.patch_validator import PatchValidator
 from app.services.project_service import ProjectService
+from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
+from app.services.worker_service import WorkerService
 from app.services.utils import utc_now
 
 
@@ -31,13 +34,20 @@ class ManagerService:
         project_service: ProjectService,
         planner: DeepSeekManagerPlanner | None = None,
         tool_layer: ManagerToolLayer | None = None,
+        worker_service: WorkerService | None = None,
+        runtime_dependency_job_service: RuntimeDependencyJobService | None = None,
     ) -> None:
         self.project_service = project_service
         self.planner = planner or DeepSeekManagerPlanner()
         self.tool_layer = tool_layer or ManagerToolLayer()
         self.intent_router = ManagerIntentRouter()
         self.settings = get_settings()
-        self.blueprint_tools = ManagerBlueprintTools(project_service=self.project_service)
+        self.app_config_service = AppConfigService(self.settings)
+        self.blueprint_tools = ManagerBlueprintTools(
+            project_service=self.project_service,
+            worker_service=worker_service,
+            runtime_dependency_job_service=runtime_dependency_job_service,
+        )
 
     def chat(self, project_id: str, request: ChatRequest) -> ChatResponse:
         if self.settings.manager_backend == "pi" and self.planner.__class__ is DeepSeekManagerPlanner:
@@ -56,6 +66,7 @@ class ManagerService:
             "messages": [item.model_dump() for item in chat_request.messages],
             "backend_api_base_url": self.settings.backend_api_base_url.rstrip("/"),
             "internal_tool_token": token,
+            "manager_config": self.app_config_service.manager_agent_config(include_secrets=True),
         }
         endpoint = f"{self.settings.pi_manager_url.rstrip('/')}/chat"
         http_request = url_request.Request(
@@ -90,6 +101,7 @@ class ManagerService:
             "messages": [item.model_dump() for item in chat_request.messages],
             "backend_api_base_url": self.settings.backend_api_base_url.rstrip("/"),
             "internal_tool_token": token,
+            "manager_config": self.app_config_service.manager_agent_config(include_secrets=True),
         }
         endpoint = f"{self.settings.pi_manager_url.rstrip('/')}/chat-stream"
         http_request = url_request.Request(
@@ -141,6 +153,7 @@ class ManagerService:
             "session_messages": [item.model_dump() for item in chat_request.session_messages],
             "backend_api_base_url": self.settings.backend_api_base_url.rstrip("/"),
             "internal_tool_token": token,
+            "manager_config": self.app_config_service.manager_agent_config(include_secrets=True),
         }
         endpoint = f"{self.settings.pi_manager_url.rstrip('/')}/compact"
         http_request = url_request.Request(

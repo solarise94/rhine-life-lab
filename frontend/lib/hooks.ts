@@ -13,6 +13,23 @@ export function useProjects() {
   });
 }
 
+export function useAppSettings() {
+  return useQuery({
+    queryKey: queryKeys.appSettings,
+    queryFn: () => api.getAppSettings(),
+  });
+}
+
+export function useUpdateAppSettingsMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: Parameters<typeof api.updateAppSettings>[0]) => api.updateAppSettings(payload),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.appSettings });
+    },
+  });
+}
+
 export function useCreateProjectMutation() {
   const queryClient = useQueryClient();
   return useMutation({

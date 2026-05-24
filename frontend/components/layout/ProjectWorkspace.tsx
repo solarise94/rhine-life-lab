@@ -65,6 +65,7 @@ const AdvancedPanels = dynamic(
 );
 
 type View = "tasks" | "results" | "files" | "report" | "advanced";
+const EMPTY_CARD_INTERACTION_ORDER: string[] = [];
 
 function formatRuntime(runtime?: string) {
   if (!runtime || runtime === "__system__") return "system";
@@ -74,6 +75,9 @@ function formatRuntime(runtime?: string) {
 export function ProjectWorkspace({ projectId, view }: { projectId: string; view: View }) {
   const queryClient = useQueryClient();
   const selectedCardId = useWorkspaceUiStore((s) => s.selectedCardByProject[projectId]);
+  const cardInteractionOrder = useWorkspaceUiStore(
+    (s) => s.cardInteractionOrderByProject[projectId] ?? EMPTY_CARD_INTERACTION_ORDER,
+  );
   const selectedWorkerByProject = useWorkspaceUiStore((s) => s.selectedWorkerByProject[projectId] ?? EMPTY_SELECTED_WORKER_BY_CARD);
   const globalPythonRuntime = useWorkspaceUiStore((s) => s.globalPythonRuntimeByProject?.[projectId]);
   const selectedPythonRuntimeByProject = useWorkspaceUiStore((s) => s.selectedPythonRuntimeByProject?.[projectId] ?? EMPTY_SELECTED_RUNTIME_BY_CARD);
@@ -426,6 +430,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           cards={snapshot.cards}
           workOrder={workOrderQuery.data}
           selectedCardId={selectedCard?.card_id}
+          cardInteractionOrder={cardInteractionOrder}
           onSelect={(card) => setSelectedCard(projectId, card.card_id)}
           onClearSelection={() => setSelectedCard(projectId, null)}
           onStartRun={handleStartRun}
@@ -609,6 +614,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 cards={snapshot.cards}
                 workOrder={workOrderQuery.data}
                 selectedCardId={selectedCard?.card_id}
+                cardInteractionOrder={cardInteractionOrder}
                 onSelect={(card) => setSelectedCard(projectId, card.card_id)}
                 onClearSelection={() => setSelectedCard(projectId, null)}
                 onStartRun={handleStartRun}

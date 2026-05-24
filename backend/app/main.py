@@ -3,14 +3,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import advanced, chat, chat_sessions, files, manager_tools, projects, report, results, runs
-from app.api.deps import get_worker_service
+from app.api import advanced, app_settings, chat, chat_sessions, files, manager_tools, projects, report, results, runs
+from app.api.deps import get_app_config_service, get_worker_service
 from app.core.config import get_settings
 
 settings = get_settings()
 
 
 def initialize_runtime_services() -> None:
+    get_app_config_service()
     get_worker_service()
 
 
@@ -30,6 +31,7 @@ app.add_middleware(
 )
 
 app.include_router(projects.router, prefix=settings.api_prefix)
+app.include_router(app_settings.router, prefix=settings.api_prefix)
 app.include_router(chat.router, prefix=settings.api_prefix)
 app.include_router(manager_tools.router, prefix=settings.api_prefix)
 app.include_router(results.router, prefix=settings.api_prefix)

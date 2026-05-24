@@ -1,24 +1,135 @@
 from __future__ import annotations
 
+import json
 from hashlib import sha256
+from pathlib import Path
 import re
+import shutil
+import subprocess
+from typing import Any
 
-from app.models.executor import ExecutorContext
+from fastapi import HTTPException
+from pydantic import BaseModel, Field
+
+from app.models.card_templates import CardTemplate, TemplateBundle, TemplateBundleFile, TemplateIoBinding, TemplateSpec
 from app.models.cards import Card, CardAssetRef
+from app.models.executor import ExecutorContext, ExecutorReference, ExecutorScriptAssetBinding
 from app.models.memory import ProjectMemoryItem
+from app.models.runs import Manifest
 from app.services.asset_timeline_service import AssetTimelineService
 from app.services.manager_planner import ManagerPlanningError
 from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.project_service import ProjectService
 from app.services.result_asset_service import ResultAssetService
-from app.services.utils import utc_now
+from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
+from app.services.utils import atomic_write_json, resolve_within, utc_now
+from app.workers.command_worker import CommandTemplateWorkerAdapter
+from app.services.worker_service import WorkerService
+
+
+class ToolPolicyPayload(BaseModel):
+    network: str | None = Field(default=None, pattern="^(allow|deny|prompt)$")
+    python: bool | None = None
+    rscript: bool | None = None
+    shell: bool | None = None
+    git_write: bool | None = None
+
+
+class RuntimeBindingsPayload(BaseModel):
+    conda_env: str | None = None
+    r_env: str | None = None
+    working_dir: str | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+
+
+class ConfigureCardExecutionPayload(BaseModel):
+    card_id: str | None = None
+    card_ids: list[str] = Field(default_factory=list)
+    tool_policy: ToolPolicyPayload | None = None
+    runtime_bindings: RuntimeBindingsPayload | None = None
+    instruction_blocks: list[str] | None = None
+    progress_note: str | None = None
+
+
+class StartCardRunPayload(BaseModel):
+    card_id: str
+    worker_type: str | None = None
+    python_runtime: str | None = None
+    r_runtime: str | None = None
+
+
+class StopCardRunPayload(BaseModel):
+    run_id: str | None = None
+    card_id: str | None = None
+    reason: str | None = None
+
+
+class ReviewCardRunPayload(BaseModel):
+    run_id: str | None = None
+    card_id: str | None = None
+    accept: bool = True
+
+
+class CleanupRunHistoryPayload(BaseModel):
+    run_id: str | None = None
+    card_id: str | None = None
+    statuses: list[str] = Field(default_factory=list)
+    keep_latest_per_card: bool = True
+    include_valid_assets: bool = False
+    dry_run: bool = False
+    reason: str | None = None
+
+
+class SearchCardTemplatesPayload(BaseModel):
+    query: str = ""
+    tags: list[str] = Field(default_factory=list)
+    card_type: str | None = None
+    limit: int = 5
+
+
+class SaveCardTemplatePayload(BaseModel):
+    card_id: str
+    title: str | None = None
+    summary: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class ScriptAssetBindingPayload(BaseModel):
+    requirement_id: str
+    asset_id: str
+
+
+class InstantiateCardTemplatePayload(BaseModel):
+    template_id: str
+    card_id: str
+    title: str | None = None
+    step: int | None = None
+    input_bindings: list[dict[str, Any]] = Field(default_factory=list)
+    output_bindings: list[dict[str, Any]] = Field(default_factory=list)
+    script_asset_bindings: list[ScriptAssetBindingPayload] = Field(default_factory=list)
+    runtime_overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class InstallRuntimeDependenciesPayload(BaseModel):
+    ecosystem: str
+    runtime: str
+    packages: list[str] = Field(default_factory=list)
+    manager: str | None = None
+    timeout_seconds: int = 600
 
 
 class ManagerBlueprintTools:
     """Controlled tools exposed to the external manager agent runtime."""
 
-    def __init__(self, project_service: ProjectService) -> None:
+    def __init__(
+        self,
+        project_service: ProjectService,
+        worker_service: WorkerService | None = None,
+        runtime_dependency_job_service: RuntimeDependencyJobService | None = None,
+    ) -> None:
         self.project_service = project_service
+        self.worker_service = worker_service
+        self.runtime_dependency_job_service = runtime_dependency_job_service
         self.result_asset_service = ResultAssetService(project_service)
         self.asset_timeline_service = AssetTimelineService()
 
@@ -120,19 +231,17 @@ class ManagerBlueprintTools:
         return {"card": updated.model_dump(), "timeline": self.asset_timeline_service.build(project_id, self.project_service.get_project_snapshot(project_id))}
 
     def configure_card_execution(self, project_id: str, payload: dict) -> dict:
-        card_ids = [str(item).strip() for item in payload.get("card_ids") or [] if str(item).strip()]
+        request = ConfigureCardExecutionPayload.model_validate(payload)
+        card_ids = [str(item).strip() for item in request.card_ids if str(item).strip()]
         if not card_ids:
-            card_id = str(payload.get("card_id") or "").strip()
+            card_id = str(request.card_id or "").strip()
             if card_id:
                 card_ids = [card_id]
         if not card_ids:
             raise ManagerPlanningError("configure_card_execution requires card_id or card_ids.")
-        tool_policy = payload.get("tool_policy") if isinstance(payload.get("tool_policy"), dict) else {}
-        runtime_bindings = payload.get("runtime_bindings") if isinstance(payload.get("runtime_bindings"), dict) else {}
-        instruction_blocks = payload.get("instruction_blocks") if isinstance(payload.get("instruction_blocks"), list) else None
-        allowed_network = {None, "allow", "deny", "prompt"}
-        if tool_policy.get("network") not in allowed_network:
-            raise ManagerPlanningError("tool_policy.network must be allow, deny, or prompt.")
+        tool_policy = request.tool_policy.model_dump(exclude_none=True) if request.tool_policy else {}
+        runtime_bindings = request.runtime_bindings.model_dump(exclude_none=True) if request.runtime_bindings else {}
+        instruction_blocks = request.instruction_blocks
         with self.project_service.lock_for(project_id):
             store = self.project_service.graph_store(project_id)
             cards = store.load_cards()
@@ -171,7 +280,7 @@ class ManagerBlueprintTools:
                             existing_blocks.append(block_text)
                     context.instruction_blocks = existing_blocks
                 card.executor_context = context
-                card.progress_note = str(payload.get("progress_note") or card.progress_note or "").strip() or card.progress_note
+                card.progress_note = str(request.progress_note or card.progress_note or "").strip() or card.progress_note
                 updated_cards.append(card)
                 self._audit_card_tool(project_id, "configure_card_execution", card.card_id, payload)
             store.save_cards(cards)
@@ -225,6 +334,359 @@ class ManagerBlueprintTools:
         if not asset_id:
             raise ManagerPlanningError("read_result_asset requires asset_id.")
         return self.result_asset_service.get_asset_detail(project_id, asset_id)
+
+    def install_runtime_dependencies(self, project_id: str, payload: dict) -> dict:
+        if self.runtime_dependency_job_service is None:
+            raise ManagerPlanningError("runtime dependency job service is unavailable.")
+        request_payload = self._validated_runtime_dependency_payload(payload)
+        job = self.runtime_dependency_job_service.submit(
+            project_id,
+            request_payload,
+            self._install_runtime_dependencies_sync,
+        )
+        return {
+            "ok": True,
+            "background": True,
+            "job_id": job.job_id,
+            "status": job.status,
+            "ecosystem": request_payload["ecosystem"],
+            "runtime": request_payload["runtime"],
+            "packages": request_payload["packages"],
+            "manager": request_payload["manager"],
+            "message": (
+                f"Started background dependency installation for {request_payload['runtime']} "
+                f"({len(request_payload['packages'])} package{'s' if len(request_payload['packages']) != 1 else ''})."
+            ),
+            "created_at": job.created_at,
+        }
+
+    def get_runtime_dependency_install_status(self, project_id: str, job_id: str) -> dict:
+        if self.runtime_dependency_job_service is None:
+            raise ManagerPlanningError("runtime dependency job service is unavailable.")
+        job = self.runtime_dependency_job_service.get(job_id)
+        if job is None or job.project_id != project_id:
+            raise ManagerPlanningError("Runtime dependency job not found.")
+        result = job.result or {}
+        payload = {
+            "job_id": job.job_id,
+            "status": job.status,
+            "created_at": job.created_at,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "payload": job.payload,
+            "result": result or None,
+            "error": job.error,
+        }
+        if result:
+            payload.update(
+                {
+                    "ok": bool(result.get("ok")),
+                    "message": result.get("message"),
+                    "runtime": result.get("runtime"),
+                    "resolved_runtime": result.get("resolved_runtime"),
+                    "packages": result.get("packages"),
+                    "manager": result.get("manager"),
+                    "stdout_tail": result.get("stdout_tail"),
+                    "stderr_tail": result.get("stderr_tail"),
+                }
+            )
+        return payload
+
+    def _install_runtime_dependencies_sync(self, project_id: str, payload: dict) -> dict:
+        request = InstallRuntimeDependenciesPayload.model_validate(payload)
+        ecosystem = self._normalize_dependency_ecosystem(request.ecosystem)
+        packages = self._validate_dependency_packages(ecosystem, request.packages)
+        runtime = str(request.runtime or "").strip()
+        if not runtime or runtime == "__system__":
+            raise ManagerPlanningError("install_runtime_dependencies requires a selected non-system runtime.")
+        timeout = max(30, min(int(request.timeout_seconds or 600), 1800))
+        if ecosystem == "python":
+            command, resolved_runtime = self._python_dependency_command(runtime, packages, request.manager)
+        else:
+            command, resolved_runtime = self._r_dependency_command(runtime, packages, request.manager)
+        started_at = utc_now()
+        try:
+            result = subprocess.run(
+                command,
+                cwd=self.project_service.project_path(project_id),
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "ok": False,
+                "ecosystem": ecosystem,
+                "runtime": runtime,
+                "resolved_runtime": resolved_runtime,
+                "packages": packages,
+                "manager": self._dependency_manager_label(ecosystem, request.manager),
+                "message": f"Dependency installation timed out after {timeout} seconds.",
+                "stdout_tail": self._tail_text(exc.stdout),
+                "stderr_tail": self._tail_text(exc.stderr),
+                "started_at": started_at,
+                "finished_at": utc_now(),
+            }
+        except OSError as exc:
+            return {
+                "ok": False,
+                "ecosystem": ecosystem,
+                "runtime": runtime,
+                "resolved_runtime": resolved_runtime,
+                "packages": packages,
+                "manager": self._dependency_manager_label(ecosystem, request.manager),
+                "message": f"Dependency installation could not start: {exc}",
+                "stdout_tail": "",
+                "stderr_tail": str(exc),
+                "started_at": started_at,
+                "finished_at": utc_now(),
+            }
+        ok = result.returncode == 0
+        return {
+            "ok": ok,
+            "ecosystem": ecosystem,
+            "runtime": runtime,
+            "resolved_runtime": resolved_runtime,
+            "packages": packages,
+            "manager": self._dependency_manager_label(ecosystem, request.manager),
+            "returncode": result.returncode,
+            "message": "Dependencies installed." if ok else "Dependency installation failed; ask the user to prepare the runtime manually if the error is not immediately fixable.",
+            "stdout_tail": self._tail_text(result.stdout),
+            "stderr_tail": self._tail_text(result.stderr),
+            "started_at": started_at,
+            "finished_at": utc_now(),
+        }
+
+    def _validated_runtime_dependency_payload(self, payload: dict) -> dict[str, Any]:
+        request = InstallRuntimeDependenciesPayload.model_validate(payload)
+        ecosystem = self._normalize_dependency_ecosystem(request.ecosystem)
+        packages = self._validate_dependency_packages(ecosystem, request.packages)
+        runtime = str(request.runtime or "").strip()
+        if not runtime or runtime == "__system__":
+            raise ManagerPlanningError("install_runtime_dependencies requires a selected non-system runtime.")
+        timeout = max(30, min(int(request.timeout_seconds or 600), 1800))
+        return {
+            "ecosystem": ecosystem,
+            "runtime": runtime,
+            "packages": packages,
+            "manager": self._dependency_manager_label(ecosystem, request.manager),
+            "timeout_seconds": timeout,
+        }
+
+    def start_card_run(self, project_id: str, payload: dict) -> dict:
+        if self.worker_service is None:
+            raise ManagerPlanningError("worker service is unavailable for start_card_run.")
+        request = StartCardRunPayload.model_validate(payload)
+        try:
+            response = self.worker_service.start_run(
+                project_id,
+                request.card_id,
+                worker_type=request.worker_type,
+                python_runtime=request.python_runtime,
+                r_runtime=request.r_runtime,
+            )
+            return {"ok": True, "can_start": True, **response}
+        except HTTPException as exc:
+            if exc.status_code == 409:
+                detail = exc.detail
+                block_details = detail.get("block_details") if isinstance(detail, dict) else {}
+                return {
+                    "ok": False,
+                    "can_start": False,
+                    "message": detail.get("message") if isinstance(detail, dict) else str(exc.detail),
+                    "pending_approvals": [],
+                    "rejected_approvals": [],
+                    "block_reasons": block_details.get("block_reasons") if isinstance(block_details, dict) else [],
+                    "block_details": block_details,
+                }
+            raise ManagerPlanningError(str(exc.detail)) from exc
+
+    def stop_card_run(self, project_id: str, payload: dict) -> dict:
+        if self.worker_service is None:
+            raise ManagerPlanningError("worker service is unavailable for stop_card_run.")
+        request = StopCardRunPayload.model_validate(payload)
+        run_id = request.run_id or self._active_run_id_for_card(project_id, request.card_id)
+        if not run_id:
+            return {
+                "ok": False,
+                "stopped": False,
+                "message": "No active run found for the requested card.",
+            }
+        try:
+            response = self.worker_service.cancel_run(project_id, run_id, reason=request.reason)
+        except HTTPException as exc:
+            raise ManagerPlanningError(str(exc.detail)) from exc
+        return {"ok": True, "stopped": True, **response}
+
+    def rerun_card(self, project_id: str, payload: dict) -> dict:
+        if self.worker_service is None:
+            raise ManagerPlanningError("worker service is unavailable for rerun_card.")
+        request = StartCardRunPayload.model_validate(payload)
+        try:
+            response = self.worker_service.rerun_card(
+                project_id,
+                request.card_id,
+                worker_type=request.worker_type,
+                python_runtime=request.python_runtime,
+                r_runtime=request.r_runtime,
+            )
+            return {"ok": True, **response}
+        except HTTPException as exc:
+            raise ManagerPlanningError(str(exc.detail)) from exc
+
+    def review_card_run(self, project_id: str, payload: dict) -> dict:
+        if self.worker_service is None:
+            raise ManagerPlanningError("worker service is unavailable for review_card_run.")
+        request = ReviewCardRunPayload.model_validate(payload)
+        run_id = request.run_id or self._latest_run_id_for_card(project_id, request.card_id)
+        if not run_id:
+            raise ManagerPlanningError("review_card_run requires run_id or a card with linked runs.")
+        try:
+            response = self.worker_service.review_run(project_id, run_id, accept=request.accept)
+        except Exception as exc:
+            raise ManagerPlanningError(str(exc)) from exc
+        return {"ok": True, **response}
+
+    def cleanup_run_history(self, project_id: str, payload: dict) -> dict:
+        if self.worker_service is None:
+            raise ManagerPlanningError("worker service is unavailable for cleanup_run_history.")
+        request = CleanupRunHistoryPayload.model_validate(payload)
+        snapshot = self.project_service.get_project_snapshot(project_id)
+        graph = snapshot["graph"]
+        requested_statuses = {str(status).strip() for status in request.statuses if str(status).strip()}
+        default_statuses = {"failed", "cancelled", "reviewed"}
+        statuses = requested_statuses or default_statuses
+        valid_asset_run_ids = {
+            asset.created_by_run
+            for asset in graph.assets
+            if asset.created_by_run and asset.status == "valid"
+        }
+        latest_by_card: dict[str, str] = {}
+        for run in sorted(graph.runs, key=lambda item: item.started_at or item.finished_at or ""):
+            latest_by_card[run.card_id] = run.run_id
+
+        candidates = []
+        for run in graph.runs:
+            if request.run_id and run.run_id != request.run_id:
+                continue
+            if request.card_id and run.card_id != request.card_id:
+                continue
+            if run.status not in statuses:
+                continue
+            if run.cleanup_status == "completed":
+                continue
+            if request.keep_latest_per_card and not request.run_id and latest_by_card.get(run.card_id) == run.run_id:
+                continue
+            candidates.append(run)
+
+        cleaned: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for run in candidates:
+            if run.run_id in valid_asset_run_ids and not request.include_valid_assets:
+                skipped.append(
+                    {
+                        "run_id": run.run_id,
+                        "card_id": run.card_id,
+                        "status": run.status,
+                        "reason": "valid_assets_protected",
+                    }
+                )
+                continue
+            if request.dry_run:
+                cleaned.append(
+                    {
+                        "run_id": run.run_id,
+                        "card_id": run.card_id,
+                        "status": run.status,
+                        "dry_run": True,
+                    }
+                )
+                continue
+            try:
+                response = self.worker_service.cleanup_run(
+                    project_id,
+                    run.run_id,
+                    reason=request.reason or "Cleaned by Manager cleanup_run_history.",
+                )
+            except HTTPException as exc:
+                skipped.append(
+                    {
+                        "run_id": run.run_id,
+                        "card_id": run.card_id,
+                        "status": run.status,
+                        "reason": str(exc.detail),
+                    }
+                )
+                continue
+            cleaned.append({"card_id": run.card_id, **response})
+
+        return {
+            "ok": True,
+            "dry_run": request.dry_run,
+            "requested": {
+                "run_id": request.run_id,
+                "card_id": request.card_id,
+                "statuses": sorted(statuses),
+                "keep_latest_per_card": request.keep_latest_per_card,
+                "include_valid_assets": request.include_valid_assets,
+            },
+            "cleaned": cleaned,
+            "skipped": skipped,
+            "cleaned_count": len(cleaned),
+            "skipped_count": len(skipped),
+            "message": f"Cleaned {len(cleaned)} run history item(s); skipped {len(skipped)}.",
+        }
+
+    def search_card_templates(self, project_id: str, payload: dict) -> dict:
+        request = SearchCardTemplatesPayload.model_validate(payload)
+        templates = self._load_card_templates()
+        matches = self._match_templates(templates, request.query, request.tags, request.card_type)
+        limit = max(1, min(int(request.limit or 5), 20))
+        return {
+            "project_id": project_id,
+            "items": [item for item in matches[:limit]],
+            "total": len(matches),
+        }
+
+    def save_card_template(self, project_id: str, payload: dict) -> dict:
+        request = SaveCardTemplatePayload.model_validate(payload)
+        snapshot = self.project_service.get_project_snapshot(project_id)
+        card = next((item for item in snapshot["cards"] if item.card_id == request.card_id), None)
+        if card is None:
+            raise ManagerPlanningError(f"Card not found: {request.card_id}")
+        run_id = self._latest_run_id_for_card(project_id, card.card_id)
+        manifest = self._load_manifest_if_exists(project_id, run_id) if run_id else None
+        if card.status != "accepted" and not self._run_reviewer_passed(project_id, run_id):
+            raise ManagerPlanningError("Card template can only be saved from an accepted card or a run with reviewer pass.")
+
+        template = self._build_card_template(project_id, card, manifest, request)
+        templates = self._load_card_templates()
+        templates = [item for item in templates if item.template_id != template.template_id]
+        templates.append(template)
+        self._save_card_templates(templates)
+        self._save_template_bundle(template)
+        return {"ok": True, "template": template.model_dump()}
+
+    def instantiate_card_template(self, project_id: str, payload: dict) -> dict:
+        request = InstantiateCardTemplatePayload.model_validate(payload)
+        template = self._load_card_template(request.template_id)
+        snapshot = self.project_service.get_project_snapshot(project_id)
+        card_payload = self._instantiate_card_payload(project_id, snapshot, template, request)
+        result = self.create_card(project_id, card_payload)
+        templates = self._load_card_templates()
+        for index, item in enumerate(templates):
+            if item.template_id != template.template_id:
+                continue
+            templates[index] = item.model_copy(
+                update={
+                    "reuse_count": item.reuse_count + 1,
+                    "updated_at": utc_now(),
+                }
+            )
+            break
+        self._save_card_templates(templates)
+        return {"template_id": template.template_id, **result}
 
     def list_project_memory(self, project_id: str, payload: dict | None = None) -> dict:
         payload = payload or {}
@@ -371,6 +833,393 @@ class ManagerBlueprintTools:
         except (TypeError, ValueError):
             confidence = 1.0
         return max(0.0, min(confidence, 1.0))
+
+    @staticmethod
+    def _normalize_dependency_ecosystem(ecosystem: str) -> str:
+        normalized = str(ecosystem or "").strip().lower()
+        if normalized == "python":
+            return "python"
+        if normalized == "r":
+            return "R"
+        raise ManagerPlanningError("install_runtime_dependencies ecosystem must be python or R.")
+
+    @staticmethod
+    def _validate_dependency_packages(ecosystem: str, packages: list[str]) -> list[str]:
+        cleaned = [str(item).strip() for item in packages if str(item).strip()]
+        if not cleaned:
+            raise ManagerPlanningError("install_runtime_dependencies requires at least one package.")
+        if len(cleaned) > 40:
+            raise ManagerPlanningError("install_runtime_dependencies accepts at most 40 packages per call.")
+        python_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*(\[[A-Za-z0-9_,.-]+\])?([<>=!~]=?[A-Za-z0-9_.+*-]+)?$")
+        r_re = re.compile(r"^[A-Za-z][A-Za-z0-9.]*$")
+        invalid = [
+            item
+            for item in cleaned
+            if not (python_re.fullmatch(item) if ecosystem == "python" else r_re.fullmatch(item))
+        ]
+        if invalid:
+            raise ManagerPlanningError(f"Unsupported package specifier(s): {', '.join(invalid)}")
+        return list(dict.fromkeys(cleaned))
+
+    def _python_dependency_command(self, runtime: str, packages: list[str], manager: str | None) -> tuple[list[str], str]:
+        manager_name = self._dependency_manager_label("python", manager)
+        conda_base, env_path = CommandTemplateWorkerAdapter._resolve_conda_runtime(runtime, self.project_service.settings)
+        if not env_path.exists():
+            raise ManagerPlanningError(f"Python runtime not found: {runtime}")
+        if manager_name == "conda":
+            conda_bin = conda_base / "bin" / "conda"
+            if not conda_bin.exists():
+                raise ManagerPlanningError(f"conda executable not found for runtime: {runtime}")
+            return [str(conda_bin), "install", "-y", "-p", str(env_path), *packages], str(env_path)
+        python_bin = env_path / "bin" / "python"
+        if not python_bin.exists():
+            raise ManagerPlanningError(f"Python executable not found for runtime: {runtime}")
+        return [str(python_bin), "-m", "pip", "install", *packages], str(env_path)
+
+    def _r_dependency_command(self, runtime: str, packages: list[str], manager: str | None) -> tuple[list[str], str]:
+        manager_name = self._dependency_manager_label("R", manager)
+        rscript = CommandTemplateWorkerAdapter._resolve_rscript_runtime(runtime, self.project_service.settings)
+        if rscript is None or not rscript.exists():
+            raise ManagerPlanningError(f"R runtime not found: {runtime}")
+        package_vector = "c(" + ", ".join(json.dumps(item) for item in packages) + ")"
+        if manager_name == "cran":
+            expression = (
+                'options(repos=c(CRAN="https://cloud.r-project.org")); '
+                f"install.packages({package_vector}, dependencies=TRUE)"
+            )
+        else:
+            expression = (
+                'options(repos=c(CRAN="https://cloud.r-project.org")); '
+                'if (!requireNamespace("BiocManager", quietly=TRUE)) install.packages("BiocManager"); '
+                f"BiocManager::install({package_vector}, ask=FALSE, update=FALSE)"
+            )
+        return [str(rscript), "--vanilla", "-e", expression], str(rscript)
+
+    @staticmethod
+    def _dependency_manager_label(ecosystem: str, manager: str | None) -> str:
+        normalized = str(manager or "").strip().lower()
+        if ecosystem == "python":
+            return "conda" if normalized in {"conda", "mamba", "micromamba"} else "pip"
+        return "cran" if normalized == "cran" else "bioconductor"
+
+    @staticmethod
+    def _tail_text(value: object, limit: int = 6000) -> str:
+        if value is None:
+            return ""
+        text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+        return text[-limit:]
+
+    def _active_run_id_for_card(self, project_id: str, card_id: str | None) -> str | None:
+        if not card_id:
+            return None
+        graph = self.project_service.graph_store(project_id).load_graph()
+        active = [
+            run.run_id
+            for run in graph.runs
+            if run.card_id == card_id and run.status in {"queued", "needs_approval", "running", "reviewing"}
+        ]
+        return active[-1] if active else None
+
+    def _latest_run_id_for_card(self, project_id: str, card_id: str | None) -> str | None:
+        if not card_id:
+            return None
+        snapshot = self.project_service.get_project_snapshot(project_id)
+        card = next((item for item in snapshot["cards"] if item.card_id == card_id), None)
+        if card and card.linked_runs:
+            return card.linked_runs[-1]
+        run_ids = [run.run_id for run in snapshot["graph"].runs if run.card_id == card_id]
+        return run_ids[-1] if run_ids else None
+
+    def _run_reviewer_passed(self, project_id: str, run_id: str | None) -> bool:
+        if not run_id:
+            return False
+        path = self.project_service.project_path(project_id) / "runs" / run_id / "executor_validation.json"
+        if not path.exists():
+            return False
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return False
+        reviewer = payload.get("reviewer") if isinstance(payload, dict) else {}
+        if not isinstance(reviewer, dict):
+            return False
+        return str(reviewer.get("verdict") or "") == "pass"
+
+    def _load_manifest_if_exists(self, project_id: str, run_id: str | None) -> Manifest | None:
+        if not run_id:
+            return None
+        path = self.project_service.project_path(project_id) / "runs" / run_id / "manifest.json"
+        if not path.exists():
+            return None
+        return Manifest.model_validate(json.loads(path.read_text(encoding="utf-8")))
+
+    def _template_store_root(self) -> Path:
+        root = self.project_service.settings.data_root / "_card_templates"
+        (root / "bundles").mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _template_index_path(self) -> Path:
+        return self._template_store_root() / "templates.json"
+
+    def _template_bundle_dir(self, template_id: str) -> Path:
+        return self._template_store_root() / "bundles" / template_id
+
+    def _load_card_templates(self) -> list[CardTemplate]:
+        path = self._template_index_path()
+        if not path.exists():
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(payload, list):
+            return []
+        return [CardTemplate.model_validate(item) for item in payload]
+
+    def _save_card_templates(self, templates: list[CardTemplate]) -> None:
+        atomic_write_json(self._template_index_path(), [item.model_dump() for item in templates])
+
+    def _load_card_template(self, template_id: str) -> CardTemplate:
+        template = next((item for item in self._load_card_templates() if item.template_id == template_id), None)
+        if template is None:
+            raise ManagerPlanningError(f"Card template not found: {template_id}")
+        spec_path = self._template_bundle_dir(template_id) / "spec.json"
+        if spec_path.exists():
+            try:
+                payload = json.loads(spec_path.read_text(encoding="utf-8"))
+                template = CardTemplate.model_validate(payload)
+            except json.JSONDecodeError as exc:
+                raise ManagerPlanningError(f"Card template spec is invalid JSON: {template_id}") from exc
+        return template
+
+    def _save_template_bundle(self, template: CardTemplate) -> None:
+        bundle_dir = self._template_bundle_dir(template.template_id)
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(bundle_dir / "spec.json", template.model_dump())
+
+    def _match_templates(
+        self,
+        templates: list[CardTemplate],
+        query: str,
+        tags: list[str],
+        card_type: str | None,
+    ) -> list[dict[str, Any]]:
+        compact_query = query.strip().lower()
+        tag_set = {item.strip().lower() for item in tags if item.strip()}
+        matches: list[dict[str, Any]] = []
+        for template in templates:
+            if card_type and template.card_type != card_type:
+                continue
+            if tag_set and not tag_set.intersection({tag.lower() for tag in template.tags}):
+                continue
+            haystack = " ".join([template.title, template.summary, " ".join(template.tags), template.spec.summary_template]).lower()
+            score = 0.2 + template.confidence_score
+            if compact_query:
+                for token in compact_query.split():
+                    if token in haystack:
+                        score += 0.4
+            if compact_query and score <= 0.2 + template.confidence_score:
+                continue
+            matches.append(
+                {
+                    "template_id": template.template_id,
+                    "title": template.title,
+                    "summary": template.summary,
+                    "tags": template.tags,
+                    "card_type": template.card_type,
+                    "status": template.status,
+                    "confidence_score": round(min(score, 5.0), 3),
+                    "reuse_count": template.reuse_count,
+                    "script_asset_requirements": [item.model_dump() for item in template.spec.bundle.script_asset_requirements],
+                }
+            )
+        matches.sort(key=lambda item: (item["confidence_score"], item["reuse_count"]), reverse=True)
+        return matches
+
+    def _build_card_template(
+        self,
+        project_id: str,
+        card: Card,
+        manifest: Manifest | None,
+        request: SaveCardTemplatePayload,
+    ) -> CardTemplate:
+        now = utc_now()
+        template_title = (request.title or card.title).strip()
+        template_summary = (request.summary or card.summary).strip()
+        template_id = self._slugged_template_id(template_title)
+        context = card.executor_context.model_copy(deep=True) if card.executor_context else ExecutorContext()
+        context.script_asset_bindings = []
+        context.template_metadata = {}
+        bundle = TemplateBundle(
+            script_asset_requirements=[item.model_copy(deep=True) for item in context.script_asset_requirements],
+            script_asset_bindings=[],
+        )
+        template = CardTemplate(
+            template_id=template_id,
+            title=template_title,
+            summary=template_summary,
+            tags=[item for item in request.tags if item.strip()],
+            card_type=card.card_type,
+            source_card_type=card.card_type,
+            created_at=now,
+            updated_at=now,
+            last_verified_at=now if manifest is not None else None,
+            confidence_score=0.8 if card.status == "accepted" else 0.7,
+            status="active",
+            source_card_id=card.card_id,
+            source_project_id=project_id,
+            spec=TemplateSpec(
+                card_title_pattern=card.title,
+                summary_template=card.summary,
+                why_template=card.why,
+                inputs_schema=[
+                    TemplateIoBinding(label=item.label, status=item.status, required=True)
+                    for item in card.inputs
+                ],
+                outputs_schema=[
+                    TemplateIoBinding(label=item.label, status=item.status, required=True)
+                    for item in card.outputs
+                ],
+                executor_context=context,
+                tool_policy=context.tool_policy.model_dump(),
+                runtime_bindings=context.runtime_bindings.model_dump(),
+                instruction_blocks=list(context.instruction_blocks),
+                prompt_blocks=list(context.instruction_blocks),
+                expected_artifacts=[item.role for item in manifest.created_assets] if manifest else [item.label for item in card.outputs],
+                success_signals=list(card.key_findings or (manifest.key_findings if manifest else [])),
+                failure_signals=list(manifest.warnings if manifest else []),
+                bundle=bundle,
+            ),
+        )
+        if manifest is not None:
+            self._copy_template_code_artifacts(project_id, template, manifest)
+        return template
+
+    def _copy_template_code_artifacts(self, project_id: str, template: CardTemplate, manifest: Manifest) -> None:
+        project_root = self.project_service.project_path(project_id)
+        bundle_dir = self._template_bundle_dir(template.template_id)
+        files_dir = bundle_dir / "files"
+        files_dir.mkdir(parents=True, exist_ok=True)
+        for artifact in manifest.code_artifacts:
+            try:
+                source = resolve_within(project_root, artifact.path)
+            except ValueError:
+                continue
+            if not source.is_file():
+                continue
+            stored_path = Path("files") / artifact.path
+            target = bundle_dir / stored_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            template.spec.bundle.files.append(
+                TemplateBundleFile(
+                    original_path=artifact.path,
+                    stored_path=stored_path.as_posix(),
+                    description=getattr(artifact, "description", None),
+                )
+            )
+            template.spec.bundle.path_rewrites[artifact.path] = stored_path.as_posix()
+
+    def _instantiate_card_payload(
+        self,
+        project_id: str,
+        snapshot: dict[str, Any],
+        template: CardTemplate,
+        request: InstantiateCardTemplatePayload,
+    ) -> dict[str, Any]:
+        context = template.spec.executor_context.model_copy(deep=True)
+        context.template_metadata = {
+            "template_id": template.template_id,
+            "instantiated_at": utc_now(),
+        }
+        copied_references = self._copy_template_bundle_into_project(project_id, request.card_id, template)
+        context.references.extend(copied_references)
+        asset_map = {asset.asset_id: asset for asset in snapshot["graph"].assets}
+        bindings: list[ExecutorScriptAssetBinding] = []
+        for binding_request in request.script_asset_bindings:
+            asset = asset_map.get(binding_request.asset_id)
+            if asset is None:
+                raise ManagerPlanningError(f"Script asset not found: {binding_request.asset_id}")
+            bindings.append(
+                ExecutorScriptAssetBinding(
+                    requirement_id=binding_request.requirement_id,
+                    asset_id=asset.asset_id,
+                    path=asset.path,
+                    title=asset.title,
+                    bound_at=utc_now(),
+                )
+            )
+            context.references.append(
+                ExecutorReference(
+                    type="file",
+                    path=asset.path,
+                    description=f"Script asset binding for {binding_request.requirement_id}: {asset.title}",
+                )
+            )
+        context.script_asset_bindings = bindings
+        if request.runtime_overrides:
+            override_context = ExecutorContext.model_validate(request.runtime_overrides)
+            context = WorkerService._merge_executor_context(context, override_context)
+        missing_requirement_ids = {
+            requirement.requirement_id
+            for requirement in context.script_asset_requirements
+            if requirement.requirement_id and not requirement.optional
+        } - {
+            binding.requirement_id
+            for binding in context.script_asset_bindings
+            if binding.requirement_id and (binding.asset_id or binding.path)
+        }
+        next_actions = ["运行前检查输入输出与运行时配置。"]
+        progress_note = None
+        if missing_requirement_ids:
+            progress_note = f"Missing script asset bindings: {', '.join(sorted(missing_requirement_ids))}"
+            next_actions.insert(0, "绑定脚本资产后再运行。")
+            context.instruction_blocks.append(
+                f"Do not run until these script asset bindings are resolved: {', '.join(sorted(missing_requirement_ids))}."
+            )
+        return {
+            "card_id": request.card_id,
+            "card_type": template.card_type,
+            "title": (request.title or template.spec.card_title_pattern).strip(),
+            "status": "planned",
+            "step": request.step,
+            "summary": template.spec.summary_template,
+            "why": template.spec.why_template,
+            "inputs": request.input_bindings or [{"label": item.label, "status": item.status} for item in template.spec.inputs_schema],
+            "outputs": request.output_bindings or [{"label": item.label, "status": item.status} for item in template.spec.outputs_schema],
+            "key_findings": [],
+            "manager_review": f"Instantiated from card template {template.template_id}.",
+            "next_actions": next_actions,
+            "progress_note": progress_note,
+            "executor_context": context.model_dump(),
+        }
+
+    def _copy_template_bundle_into_project(self, project_id: str, card_id: str, template: CardTemplate) -> list[ExecutorReference]:
+        bundle_dir = self._template_bundle_dir(template.template_id)
+        project_root = self.project_service.project_path(project_id)
+        target_root = project_root / "scripts" / "curated" / "templates" / card_id
+        references: list[ExecutorReference] = []
+        for file_entry in template.spec.bundle.files:
+            source = bundle_dir / file_entry.stored_path
+            if not source.is_file():
+                continue
+            target = target_root / Path(file_entry.original_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            relative_target = target.relative_to(project_root).as_posix()
+            references.append(
+                ExecutorReference(
+                    type="file",
+                    path=relative_target,
+                    description=file_entry.description or f"Template file from {template.template_id}",
+                )
+            )
+        return references
+
+    @staticmethod
+    def _slugged_template_id(title: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")[:40] or "card_template"
+        return f"tpl_{slug}_{sha256(f'{title}:{utc_now()}'.encode('utf-8')).hexdigest()[:8]}"
 
     @staticmethod
     def _sync_module_links(graph, card: Card, previous_card: Card | None) -> None:

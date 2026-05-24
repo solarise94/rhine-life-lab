@@ -27,6 +27,22 @@ class RuntimeBindings(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 
 
+class ExecutorScriptAssetRequirement(BaseModel):
+    requirement_id: str
+    label: str
+    description: str | None = None
+    expected_asset_type: str | None = None
+    optional: bool = False
+
+
+class ExecutorScriptAssetBinding(BaseModel):
+    requirement_id: str
+    asset_id: str | None = None
+    path: str | None = None
+    title: str | None = None
+    bound_at: str | None = None
+
+
 class ExecutorContext(BaseModel):
     executor_profile: str | None = None
     skills: list[str] = Field(default_factory=list)
@@ -34,6 +50,9 @@ class ExecutorContext(BaseModel):
     references: list[ExecutorReference] = Field(default_factory=list)
     tool_policy: ExecutorToolPolicy = Field(default_factory=ExecutorToolPolicy)
     runtime_bindings: RuntimeBindings = Field(default_factory=RuntimeBindings)
+    script_asset_requirements: list[ExecutorScriptAssetRequirement] = Field(default_factory=list)
+    script_asset_bindings: list[ExecutorScriptAssetBinding] = Field(default_factory=list)
+    template_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ManagerReportingContract(BaseModel):

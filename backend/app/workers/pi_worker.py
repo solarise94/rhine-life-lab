@@ -56,6 +56,12 @@ class PiWorkerAdapter(AgentCliWorkerAdapter):
         environment["BLUEPRINT_DEEPSEEK_API_BASE_URL"] = str(getattr(settings, "deepseek_api_base_url", ""))
         environment["BLUEPRINT_PI_DEEPSEEK_BASE_URL"] = str(getattr(settings, "pi_deepseek_base_url", "https://api.deepseek.com"))
         environment["BLUEPRINT_MANAGER_MODEL"] = str(getattr(settings, "manager_model", "deepseek-v4-pro"))
+        environment["BLUEPRINT_EXECUTOR_MODEL"] = str(
+            getattr(settings, "executor_model", getattr(settings, "manager_model", "deepseek-v4-flash"))
+        )
+        environment["BLUEPRINT_REVIEWER_MODEL"] = str(
+            getattr(settings, "reviewer_model", getattr(settings, "manager_model", "deepseek-v4-flash"))
+        )
         environment["BLUEPRINT_MANAGER_TEMPERATURE"] = str(getattr(settings, "manager_temperature", 0.2))
         environment["BLUEPRINT_MANAGER_MAX_TOKENS"] = str(getattr(settings, "manager_max_tokens", 2400))
         environment["BLUEPRINT_MANAGER_TIMEOUT_SECONDS"] = str(getattr(settings, "manager_timeout_seconds", 600))

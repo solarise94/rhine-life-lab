@@ -52,7 +52,7 @@ fi
 
 exec "${pi_bin}" \
   --provider deepseek \
-  --model "${BLUEPRINT_MANAGER_MODEL:-deepseek-v4-pro}" \
+  --model "${BLUEPRINT_EXECUTOR_MODEL:-${BLUEPRINT_MANAGER_MODEL:-deepseek-v4-pro}}" \
   --api-key "${BLUEPRINT_DEEPSEEK_API_KEY}" \
   --no-session \
   --no-context-files \

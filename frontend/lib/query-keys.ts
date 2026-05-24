@@ -1,5 +1,6 @@
 export const queryKeys = {
   projects: ["projects"] as const,
+  appSettings: ["app-settings"] as const,
   project: (projectId: string) => ["project", projectId] as const,
   chatSessions: (projectId: string) => ["chat-sessions", projectId] as const,
   chatSession: (projectId: string, sessionId: string) => ["chat-session", projectId, sessionId] as const,

@@ -2,6 +2,7 @@ import {
   Asset,
   AssetDetail,
   AssetFlow,
+  AppSettings,
   ChatSessionDetail,
   ChatSessionMessageRecord,
   ChatSessionSummary,
@@ -15,6 +16,7 @@ import {
   ReportSection,
   RunEvent,
   StartRunResponse,
+  UpdateAppSettingsPayload,
   RuntimeApprovalDecision,
   WorkOrder,
 } from "./types";
@@ -38,9 +40,9 @@ export interface ChatRequestContext {
 }
 
 export type ChatStreamEvent =
-  | { type: "thinking_start"; content_index?: number; assistant_turn_index?: number }
+  | { type: "thinking_start"; content_index?: number; assistant_turn_index?: number; started_at?: number }
   | { type: "thinking_delta"; delta?: string; content_index?: number; assistant_turn_index?: number }
-  | { type: "thinking_end"; content?: string; content_index?: number; assistant_turn_index?: number }
+  | { type: "thinking_end"; content?: string; content_index?: number; assistant_turn_index?: number; started_at?: number; ended_at?: number }
   | { type: "compact_start"; compact_id: string; auto?: boolean }
   | { type: "compact_delta"; compact_id: string; content?: string }
   | {
@@ -73,6 +75,13 @@ export type ChatStreamEvent =
       label?: string;
       done_label?: string;
       is_error?: boolean;
+    }
+  | {
+      type: "tool_report";
+      tool_name?: string;
+      tool_call_id?: string;
+      summary?: string;
+      details?: Record<string, unknown>;
     }
   | { type: "proposal"; proposal?: unknown }
   | {
@@ -135,6 +144,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   listProjects() {
     return request<{ items: ProjectSummary[] }>("/projects");
+  },
+  getAppSettings() {
+    return request<AppSettings>("/app-settings");
+  },
+  updateAppSettings(payload: UpdateAppSettingsPayload) {
+    return request<AppSettings>("/app-settings", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
   },
   createProject(payload: CreateProjectPayload) {
     return request<{ project: ProjectState }>("/projects", {
@@ -341,6 +359,26 @@ export const api = {
       response: { message: string; thinking?: string; proposal?: unknown; actions: Array<{ label: string; action: string }> } | null;
       error: string | null;
     }>(`/projects/${projectId}/chat-jobs/${jobId}`);
+  },
+  getRuntimeDependencyJob(projectId: string, jobId: string) {
+    return request<{
+      job_id: string;
+      status: "queued" | "running" | "succeeded" | "failed";
+      created_at: string;
+      started_at?: string | null;
+      finished_at?: string | null;
+      payload?: Record<string, unknown> | null;
+      result?: Record<string, unknown> | null;
+      error?: string | null;
+      ok?: boolean | null;
+      message?: string | null;
+      runtime?: string | null;
+      resolved_runtime?: string | null;
+      packages?: string[] | null;
+      manager?: string | null;
+      stdout_tail?: string | null;
+      stderr_tail?: string | null;
+    }>(`/projects/${projectId}/runtime-dependency-jobs/${jobId}`);
   },
   acceptProposal(projectId: string, proposalId: string) {
     return request<{ proposal: Proposal; apply_result: unknown; snapshot: ProjectSnapshot }>(

@@ -26,16 +26,47 @@ const MANAGER_COMPACTION_ENABLED = !/^(0|false|no|off)$/i.test(process.env.MANAG
 const MANAGER_COMPACTION_KEEP_RECENT_TOKENS = Number(process.env.MANAGER_COMPACTION_KEEP_RECENT_TOKENS || "120000");
 const MANAGER_COMPACTION_RESERVE_TOKENS = Number(process.env.MANAGER_COMPACTION_RESERVE_TOKENS || "16000");
 
-function buildSystemPrompt() {
+function resolveManagerConfig(payload = {}) {
+  const config = payload.manager_config && typeof payload.manager_config === "object" ? payload.manager_config : {};
+  return {
+    provider: config.provider || PROVIDER,
+    model: config.model || MODEL,
+    apiKey: config.api_key || API_KEY,
+    deepseekApiBaseUrl: config.deepseek_api_base_url || process.env.BLUEPRINT_DEEPSEEK_API_BASE_URL || "",
+    piDeepseekBaseUrl: config.pi_deepseek_base_url || process.env.BLUEPRINT_PI_DEEPSEEK_BASE_URL || "",
+    websearchEnabled:
+      typeof config.websearch_enabled === "boolean" ? config.websearch_enabled : MANAGER_WEBSEARCH_ENABLED,
+    tavilyApiKey: config.tavily_api_key || TAVILY_API_KEY,
+    tavilyBaseUrl: config.tavily_base_url || TAVILY_BASE_URL,
+  };
+}
+
+function normalizeBaseUrl(value) {
+  return typeof value === "string" ? value.trim().replace(/\/+$/, "") : "";
+}
+
+function resolveModel(runtimeConfig) {
+  const model = getModel(runtimeConfig.provider, runtimeConfig.model);
+  if (!model) {
+    return null;
+  }
+  const deepseekBaseUrl = normalizeBaseUrl(runtimeConfig.piDeepseekBaseUrl);
+  if (runtimeConfig.provider === "deepseek" && deepseekBaseUrl) {
+    return { ...model, baseUrl: deepseekBaseUrl };
+  }
+  return model;
+}
+
+function buildSystemPrompt(runtimeConfig = resolveManagerConfig()) {
   const webCapabilityLines =
-    MANAGER_WEBSEARCH_ENABLED && TAVILY_API_KEY
+    runtimeConfig.websearchEnabled && runtimeConfig.tavilyApiKey
       ? [
           "- web_search finds current public web information when up-to-date external context is required.",
           "- web_extract reads the content of a specific public web page after search identifies a source.",
         ]
       : [];
   const webJudgmentLines =
-    MANAGER_WEBSEARCH_ENABLED && TAVILY_API_KEY
+    runtimeConfig.websearchEnabled && runtimeConfig.tavilyApiKey
       ? [
           "- Use web_search or web_extract when the user explicitly asks for current/latest information, when external docs or recent package behavior matters, or when you need to verify a claim before editing the blueprint.",
           "- Do not use web tools when project context is already sufficient, or when doing so could expose local secrets or private project content.",
@@ -57,6 +88,11 @@ Available capabilities:
 - write_project_memory stores only explicit user preferences and corrections, such as "remember this", "default to this", or "do not do this again".
 - create_card, update_card, and delete_card directly modify blueprint cards after backend validation.
 - configure_card_execution directly updates card execution permissions/runtime bindings such as tool_policy.rscript and tool_policy.network.
+- install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime when a card reports missing runtime dependencies.
+- get_runtime_dependency_install_status checks whether a previously started dependency installation job has finished.
+- start_card_run, stop_card_run, rerun_card, and review_card_run control card execution directly when execution should happen now.
+- cleanup_run_history removes old finished run execution files/caches when they are no longer needed; by default it preserves runs that own valid accepted assets.
+- search_card_templates, save_card_template, and instantiate_card_template manage reusable manager-only card templates.
 - read_result_asset reads a whitelisted result asset preview by asset_id.
 ${webCapabilityLines.join("\n")}
 
@@ -71,6 +107,9 @@ Judgment:
 ${webJudgmentLines.join("\n")}
 - Write project memory only when the user explicitly asks you to remember a durable preference, says a behavior should be the default, or corrects something you should avoid in future. Keep memory summaries short.
 - Do not ask the user to approve executor runtime permissions in a card prompt. Card agents cannot ask the user interactively. If a card needs Rscript or network access, use configure_card_execution on that card before telling the user it is ready.
+- Card executor agents run in a constrained runtime. They must not install missing R or Python packages on their own. If runtime packages are missing and a specific non-system runtime is selected, you may use install_runtime_dependencies with explicit package names to start a background install job, then check it with get_runtime_dependency_install_status when needed. If that fails or the missing dependency is a system tool, tell the user exactly what dependency must be prepared.
+- If a task looks like a stable repeated workflow, search_card_templates before creating a new analysis card from scratch.
+- When a template requires script assets, ask the user which project script assets to bind before instantiate_card_template or before starting the card. Do not make card agents ask the user for bindings.
 - For multi-step workflow creation, you may create multiple cards in one conversation. Re-check the timeline when useful.
 - Reuse existing card ids when updating existing work. Create new ids only for genuinely new cards.
 - Do not use or mention blueprint proposal, blueprint review, or approval flows. Card tools are the source of truth for blueprint edits.
@@ -119,6 +158,34 @@ const TOOL_STATUS_LABELS = {
     active: "正在配置卡片权限",
     done: "已配置卡片权限",
   },
+  install_runtime_dependencies: {
+    active: "正在提交环境依赖任务",
+    done: "已提交环境依赖任务",
+  },
+  get_runtime_dependency_install_status: {
+    active: "正在检查环境依赖任务",
+    done: "已检查环境依赖任务",
+  },
+  start_card_run: {
+    active: "正在启动卡片",
+    done: "已启动卡片",
+  },
+  stop_card_run: {
+    active: "正在停止运行",
+    done: "已停止运行",
+  },
+  rerun_card: {
+    active: "正在重跑卡片",
+    done: "已重跑卡片",
+  },
+  review_card_run: {
+    active: "正在审核运行",
+    done: "已审核运行",
+  },
+  cleanup_run_history: {
+    active: "正在清理运行历史",
+    done: "已清理运行历史",
+  },
   delete_card: {
     active: "正在删除卡片",
     done: "已删除卡片",
@@ -126,6 +193,18 @@ const TOOL_STATUS_LABELS = {
   read_result_asset: {
     active: "正在读取结果文件",
     done: "已读取结果文件",
+  },
+  search_card_templates: {
+    active: "正在查询模板",
+    done: "已查询模板",
+  },
+  save_card_template: {
+    active: "正在保存模板",
+    done: "已保存模板",
+  },
+  instantiate_card_template: {
+    active: "正在实例化模板",
+    done: "已实例化模板",
   },
   web_search: {
     active: "正在搜索网页",
@@ -330,6 +409,58 @@ function summarizeToolPayload(toolName, payload) {
       items_count: payload.items_count,
     };
   }
+  if (toolName === "install_runtime_dependencies" || toolName === "get_runtime_dependency_install_status") {
+    return {
+      job_id: payload.job_id,
+      status: payload.status,
+      runtime: payload.runtime,
+      packages: Array.isArray(payload.packages) ? payload.packages.length : undefined,
+      background: payload.background,
+      ok: payload.ok,
+    };
+  }
+  if (toolName === "start_card_run" || toolName === "rerun_card") {
+    return {
+      run_id: payload.run_id,
+      card_id: payload.card_id,
+      status: payload.status,
+      can_start: payload.can_start,
+    };
+  }
+  if (toolName === "stop_card_run" || toolName === "review_card_run") {
+    return {
+      run_id: payload.run_id,
+      status: payload.status,
+      accepted: payload.accepted,
+      stopped: payload.stopped,
+    };
+  }
+  if (toolName === "cleanup_run_history") {
+    return {
+      cleaned_count: payload.cleaned_count,
+      skipped_count: payload.skipped_count,
+      dry_run: payload.dry_run,
+      ok: payload.ok,
+    };
+  }
+  if (toolName === "search_card_templates") {
+    return {
+      templates: Array.isArray(payload.items) ? payload.items.length : undefined,
+      total: payload.total,
+    };
+  }
+  if (toolName === "save_card_template") {
+    return {
+      template_id: payload.template?.template_id,
+      card_type: payload.template?.card_type,
+    };
+  }
+  if (toolName === "instantiate_card_template") {
+    return {
+      card_id: payload.card?.card_id,
+      card_status: payload.card?.status,
+    };
+  }
   if (toolName === "create_card" || toolName === "update_card" || toolName === "delete_card") {
     return {
       card_id: payload.card?.card_id,
@@ -347,6 +478,36 @@ function summarizeToolPayload(toolName, payload) {
     };
   }
   return {};
+}
+
+function buildToolReport(toolName, details) {
+  if (!details || typeof details !== "object") {
+    return null;
+  }
+  if (toolName === "install_runtime_dependencies" && details.background && details.job_id) {
+    const runtime = details.runtime || "selected runtime";
+    const packageCount = Array.isArray(details.packages) ? details.packages.length : 0;
+    return {
+      summary:
+        details.message ||
+        `已启动后台依赖安装任务：${runtime}${packageCount ? `，共 ${packageCount} 个包` : ""}。`,
+      details,
+    };
+  }
+  if (toolName === "get_runtime_dependency_install_status" && details.job_id) {
+    const status = details.status || "unknown";
+    return {
+      summary:
+        details.message ||
+        (status === "succeeded"
+          ? "后台依赖安装已完成。"
+          : status === "failed"
+            ? "后台依赖安装失败。"
+            : "后台依赖安装仍在进行。"),
+      details,
+    };
+  }
+  return null;
 }
 
 async function callLoggedTool(toolName, toolCallId, projectId, baseUrl, token, path, options = {}, signal) {
@@ -382,7 +543,7 @@ async function callLoggedTool(toolName, toolCallId, projectId, baseUrl, token, p
   }
 }
 
-function createTools(request) {
+function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
   const { project_id: projectId, backend_api_base_url: baseUrl, internal_tool_token: token } = request;
   const tools = [
     {
@@ -654,6 +815,328 @@ function createTools(request) {
       },
     },
     {
+      name: "install_runtime_dependencies",
+      label: "Install runtime dependencies",
+      description: "Start a background job that installs explicitly named Python or R packages into an already selected non-system runtime after a card reports missing runtime dependencies. Use only for clear package lists.",
+      parameters: Type.Object({
+        ecosystem: Type.String({ description: "python or R" }),
+        runtime: Type.String({ description: "Selected non-system runtime name, such as omicverse, rnaseq, or R_env. Do not use __system__." }),
+        packages: Type.Array(Type.String({ description: "Package names or simple Python version specs." })),
+        manager: Type.Optional(Type.String({ description: "For python: pip or conda. For R: bioconductor or cran. Defaults to pip for python and bioconductor for R." })),
+        timeout_seconds: Type.Optional(Type.Number()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "install_runtime_dependencies",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/runtime-dependencies/install`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify(payload, null, 2), payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "install_runtime_dependencies_failed", tool_name: "install_runtime_dependencies" });
+        }
+      },
+    },
+    {
+      name: "get_runtime_dependency_install_status",
+      label: "Get runtime dependency install status",
+      description: "Check whether a background runtime dependency installation job has finished, failed, or is still running.",
+      parameters: Type.Object({
+        job_id: Type.String(),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "get_runtime_dependency_install_status",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/runtime-dependencies/jobs/${encodeURIComponent(params.job_id)}`,
+            {
+              method: "GET",
+            },
+            signal,
+          );
+          return textResult(JSON.stringify(payload, null, 2), payload);
+        } catch (error) {
+          return toolErrorResult(error, {
+            error_type: "get_runtime_dependency_install_status_failed",
+            tool_name: "get_runtime_dependency_install_status",
+          });
+        }
+      },
+    },
+    {
+      name: "start_card_run",
+      label: "Start card run",
+      description: "Start executing a specific card. Use after the card plan and runtime policy are ready. If can_start is false, inspect block_reasons and fix the blocker before retrying.",
+      parameters: Type.Object({
+        card_id: Type.String(),
+        worker_type: Type.Optional(Type.String()),
+        python_runtime: Type.Optional(Type.String()),
+        r_runtime: Type.Optional(Type.String()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "start_card_run",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/runs/start`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify(payload, null, 2), payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "start_card_run_failed", tool_name: "start_card_run" });
+        }
+      },
+    },
+    {
+      name: "stop_card_run",
+      label: "Stop card run",
+      description: "Stop an active run by run_id, or by card_id if the card currently has one active run.",
+      parameters: Type.Object({
+        run_id: Type.Optional(Type.String()),
+        card_id: Type.Optional(Type.String()),
+        reason: Type.Optional(Type.String()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "stop_card_run",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/runs/stop`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify(payload, null, 2), payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "stop_card_run_failed", tool_name: "stop_card_run" });
+        }
+      },
+    },
+    {
+      name: "rerun_card",
+      label: "Rerun card",
+      description: "Start a fresh rerun for a card after a previous run finished or failed.",
+      parameters: Type.Object({
+        card_id: Type.String(),
+        worker_type: Type.Optional(Type.String()),
+        python_runtime: Type.Optional(Type.String()),
+        r_runtime: Type.Optional(Type.String()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "rerun_card",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/runs/rerun`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify(payload, null, 2), payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "rerun_card_failed", tool_name: "rerun_card" });
+        }
+      },
+    },
+    {
+      name: "review_card_run",
+      label: "Review card run",
+      description: "Accept or reject the latest run for a card, or a specific run_id when you need to finalize a reviewed result.",
+      parameters: Type.Object({
+        run_id: Type.Optional(Type.String()),
+        card_id: Type.Optional(Type.String()),
+        accept: Type.Optional(Type.Boolean()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "review_card_run",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/runs/review`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify(payload, null, 2), payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "review_card_run_failed", tool_name: "review_card_run" });
+        }
+      },
+    },
+    {
+      name: "cleanup_run_history",
+      label: "Clean run history",
+      description: "Remove old finished run execution files, caches, transient state, and candidate artifacts. Use after failed/cancelled/rejected runs accumulate or before reruns. Defaults preserve the latest run per card and runs that own valid accepted assets.",
+      parameters: Type.Object({
+        run_id: Type.Optional(Type.String({ description: "Clean one specific run. If omitted, cleanup can target card_id or project-wide old runs." })),
+        card_id: Type.Optional(Type.String({ description: "Clean old runs for one card." })),
+        statuses: Type.Optional(Type.Array(Type.String({ description: "Run statuses to consider. Defaults to failed, cancelled, reviewed." }))),
+        keep_latest_per_card: Type.Optional(Type.Boolean({ description: "Default true. Keep the newest run for each card unless run_id is specified." })),
+        include_valid_assets: Type.Optional(Type.Boolean({ description: "Default false. Leave runs that own valid accepted assets untouched." })),
+        dry_run: Type.Optional(Type.Boolean({ description: "Preview what would be cleaned without deleting files." })),
+        reason: Type.Optional(Type.String()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "cleanup_run_history",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/runs/cleanup-history`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify(payload, null, 2), payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "cleanup_run_history_failed", tool_name: "cleanup_run_history" });
+        }
+      },
+    },
+    {
+      name: "search_card_templates",
+      label: "Search card templates",
+      description: "Search the manager-only local card template library before designing a repeated workflow from scratch.",
+      parameters: Type.Object({
+        query: Type.Optional(Type.String()),
+        tags: Type.Optional(Type.Array(Type.String())),
+        card_type: Type.Optional(Type.String()),
+        limit: Type.Optional(Type.Number()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "search_card_templates",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/card-templates/search`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify(payload, null, 2), payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "search_card_templates_failed", tool_name: "search_card_templates" });
+        }
+      },
+    },
+    {
+      name: "save_card_template",
+      label: "Save card template",
+      description: "Save a stable accepted/reviewer-passed card into the manager-only card template library for later reuse.",
+      parameters: Type.Object({
+        card_id: Type.String(),
+        title: Type.Optional(Type.String()),
+        summary: Type.Optional(Type.String()),
+        tags: Type.Optional(Type.Array(Type.String())),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "save_card_template",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/card-templates`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify(payload, null, 2), payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "save_card_template_failed", tool_name: "save_card_template" });
+        }
+      },
+    },
+    {
+      name: "instantiate_card_template",
+      label: "Instantiate card template",
+      description: "Create a new card from a saved template. If the template requires script assets, ask the user which project script assets to bind before calling this tool.",
+      parameters: Type.Object({
+        template_id: Type.String(),
+        card_id: Type.String(),
+        title: Type.Optional(Type.String()),
+        step: Type.Optional(Type.Number()),
+        input_bindings: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
+        output_bindings: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
+        script_asset_bindings: Type.Optional(
+          Type.Array(
+            Type.Object({
+              requirement_id: Type.String(),
+              asset_id: Type.String(),
+            }),
+          ),
+        ),
+        runtime_overrides: Type.Optional(Type.Record(Type.String(), Type.Any())),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "instantiate_card_template",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/card-templates/instantiate`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+          );
+          return textResult(JSON.stringify({ ok: true, ...payload }, null, 2), { ok: true, ...payload });
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "instantiate_card_template_failed", tool_name: "instantiate_card_template" });
+        }
+      },
+    },
+    {
       name: "read_result_asset",
       label: "Read result asset",
       description: "Read a whitelisted result asset detail/preview by exact asset_id.",
@@ -675,7 +1158,7 @@ function createTools(request) {
       },
     },
   ];
-  if (MANAGER_WEBSEARCH_ENABLED && TAVILY_API_KEY) {
+  if (runtimeConfig.websearchEnabled && runtimeConfig.tavilyApiKey) {
     tools.push(
       {
         name: "web_search",
@@ -700,6 +1183,7 @@ function createTools(request) {
               include_answer: true,
             },
             signal,
+            runtimeConfig,
           );
           return textResult(JSON.stringify(payload, null, 2), payload);
         },
@@ -722,6 +1206,7 @@ function createTools(request) {
               format: params.format || "markdown",
             },
             signal,
+            runtimeConfig,
           );
           return textResult(JSON.stringify(payload, null, 2), payload);
         },
@@ -791,7 +1276,7 @@ function messageTextForContext(message) {
   return "";
 }
 
-function buildSessionEntries(sessionMessages = []) {
+function buildSessionEntries(sessionMessages = [], runtimeConfig = resolveManagerConfig()) {
   const entries = [];
   let parentId = null;
   const baseTime = Date.now();
@@ -837,8 +1322,8 @@ function buildSessionEntries(sessionMessages = []) {
         role: message.role === "manager" ? "assistant" : "user",
         content: [{ type: "text", text }],
         timestamp: baseTime + index,
-        provider: PROVIDER,
-        model: MODEL,
+        provider: runtimeConfig.provider,
+        model: runtimeConfig.model,
       },
     });
     parentId = entryId;
@@ -863,8 +1348,17 @@ function currentContextWindow(model) {
   return fromModel > 0 ? fromModel : 0;
 }
 
-async function maybeCompactSessionHistory({ sessionMessages, model, thinkingEffort, emitEvent, signal, auto = true, force = false }) {
-  const entries = buildSessionEntries(sessionMessages);
+async function maybeCompactSessionHistory({
+  sessionMessages,
+  model,
+  thinkingEffort,
+  emitEvent,
+  signal,
+  auto = true,
+  force = false,
+  runtimeConfig = resolveManagerConfig(),
+}) {
+  const entries = buildSessionEntries(sessionMessages, runtimeConfig);
   const context = buildSessionContext(entries);
   const messages = context.messages;
   if (!messages.length) {
@@ -898,7 +1392,7 @@ async function maybeCompactSessionHistory({ sessionMessages, model, thinkingEffo
   const compactResult = await compact(
     preparation,
     model,
-    API_KEY,
+    runtimeConfig.apiKey,
     undefined,
     undefined,
     signal,
@@ -936,8 +1430,8 @@ async function maybeCompactSessionHistory({ sessionMessages, model, thinkingEffo
     tokens_before: result.tokensBefore,
     tokens_after: tokensAfter,
     first_kept_message_id: result.firstKeptEntryId,
-    provider: PROVIDER,
-    model: MODEL,
+    provider: runtimeConfig.provider,
+    model: runtimeConfig.model,
     auto,
   });
   return {
@@ -949,24 +1443,24 @@ async function maybeCompactSessionHistory({ sessionMessages, model, thinkingEffo
     tokensBefore: result.tokensBefore,
     tokensAfter,
     durationMs,
-    provider: PROVIDER,
-    model: MODEL,
+    provider: runtimeConfig.provider,
+    model: runtimeConfig.model,
   };
 }
 
-async function callTavily(path, payload, signal) {
-  if (!MANAGER_WEBSEARCH_ENABLED || !TAVILY_API_KEY) {
+async function callTavily(path, payload, signal, runtimeConfig = resolveManagerConfig()) {
+  if (!runtimeConfig.websearchEnabled || !runtimeConfig.tavilyApiKey) {
     return {
       ok: false,
       disabled: true,
       message: "Web search is disabled. Set MANAGER_WEBSEARCH_ENABLED=true and configure TAVILY_API_KEY.",
     };
   }
-  const response = await fetch(`${TAVILY_BASE_URL}${path}`, {
+  const response = await fetch(`${runtimeConfig.tavilyBaseUrl}${path}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${TAVILY_API_KEY}`,
+      authorization: `Bearer ${runtimeConfig.tavilyApiKey}`,
     },
     body: JSON.stringify(payload),
     signal,
@@ -1030,29 +1524,30 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
   const runId = createRunId();
   const runStartedAt = Date.now();
   const projectId = payload.project_id;
-  if (!API_KEY) {
+  const runtimeConfig = resolveManagerConfig(payload);
+  if (!runtimeConfig.apiKey) {
     throw new Error("MANAGER_AGENT_API_KEY or BLUEPRINT_DEEPSEEK_API_KEY is not configured.");
   }
-  const model = getModel(PROVIDER, MODEL);
+  const model = resolveModel(runtimeConfig);
   if (!model) {
-    throw new Error(`Manager model not found: provider=${PROVIDER}, model=${MODEL}`);
+    throw new Error(`Manager model not found: provider=${runtimeConfig.provider}, model=${runtimeConfig.model}`);
   }
   const events = [];
   let finalAssistantMessage = null;
   let finalTokenUsage = null;
   let streamedText = "";
   const thinkingBlocks = new Map();
+  const thinkingStartedAt = new Map();
   let assistantTurnIndex = -1;
   let currentAssistantTurnIndex = -1;
   let lastEmitAt = Date.now();
   let lastAgentEventAt = Date.now();
   let lastAgentEventType = "run_start";
-  let syntheticThinkingOpen = false;
   logManagerEvent("run_start", {
     run_id: runId,
     project_id: projectId,
-    model: MODEL,
-    provider: PROVIDER,
+    model: runtimeConfig.model,
+    provider: runtimeConfig.provider,
     thinking_effort: payload.thinking_effort,
     message_chars: typeof payload.message === "string" ? payload.message.length : null,
     history_messages: Array.isArray(payload.messages) ? payload.messages.length : 0,
@@ -1061,7 +1556,7 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     lastEmitAt = Date.now();
     emitEvent?.(event);
   };
-  const modelContext = buildSessionContext(buildSessionEntries(payload.session_messages || []));
+  const modelContext = buildSessionContext(buildSessionEntries(payload.session_messages || [], runtimeConfig));
   let initialMessages = modelContext.messages.length ? modelContext.messages : normalizeHistory(payload.messages);
   if (payload.session_messages?.length) {
     const compaction = await maybeCompactSessionHistory({
@@ -1071,18 +1566,19 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
       emitEvent: emit,
       signal: externalAbortSignal,
       auto: true,
+      runtimeConfig,
     });
     initialMessages = compaction.contextMessages;
   }
   const agent = new Agent({
     initialState: {
-      systemPrompt: buildSystemPrompt(),
+      systemPrompt: buildSystemPrompt(runtimeConfig),
       model,
       thinkingLevel: mapThinkingLevel(payload.thinking_effort, model),
-      tools: createTools(payload),
+      tools: createTools(payload, runtimeConfig),
       messages: initialMessages,
     },
-    getApiKey: () => API_KEY,
+    getApiKey: () => runtimeConfig.apiKey,
     toolExecution: "sequential",
     transport: "auto",
     maxRetryDelayMs: 60000,
@@ -1105,10 +1601,14 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
         if (!thinkingBlocks.has(blockKey)) {
           thinkingBlocks.set(blockKey, "");
         }
+        if (!thinkingStartedAt.has(blockKey)) {
+          thinkingStartedAt.set(blockKey, Date.now());
+        }
         emit({
           type: "thinking_start",
           content_index: assistantEvent.contentIndex,
           assistant_turn_index: turnIndex,
+          started_at: thinkingStartedAt.get(blockKey),
         });
       } else if (assistantEvent.type === "thinking_delta") {
         const nextThinking = `${thinkingBlocks.get(blockKey) || ""}${assistantEvent.delta || ""}`;
@@ -1125,11 +1625,14 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
             ? assistantEvent.content
             : thinkingBlocks.get(blockKey) || "";
         thinkingBlocks.set(blockKey, finalizedThinking);
+        const endedAt = Date.now();
         emit({
           type: "thinking_end",
           content: finalizedThinking,
           content_index: assistantEvent.contentIndex,
           assistant_turn_index: turnIndex,
+          started_at: thinkingStartedAt.get(blockKey),
+          ended_at: endedAt,
         });
       } else if (assistantEvent.type === "text_delta") {
         const delta = assistantEvent.delta || "";
@@ -1179,6 +1682,16 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
         done_label: label.done,
         is_error: toolFailed,
       });
+      const report = buildToolReport(event.toolName, details);
+      if (report) {
+        emit({
+          type: "tool_report",
+          tool_name: event.toolName,
+          tool_call_id: event.toolCallId,
+          summary: report.summary,
+          details: report.details,
+        });
+      }
     }
     if (event.type === "message_end" && event.message?.role === "assistant") {
       finalAssistantMessage = event.message;
@@ -1198,7 +1711,7 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     script_preference_guidance: scriptPreferenceGuidance(payload.context?.script_preference),
     runtime_preference_guidance: runtimePreferenceGuidance(payload.context || {}),
     instruction:
-      "Answer naturally. Decide whether project tools are needed. If you change the blueprint, remember that cards are the blueprint units and use create_card, update_card, or delete_card directly. After ok:false tool results, correct and retry when the fix is clear.",
+      "Answer naturally. Decide whether project tools are needed. If you change the blueprint, remember that cards are the blueprint units and use create_card, update_card, delete_card, configure_card_execution, run-control, or template tools directly as needed. After ok:false tool results, correct and retry when the fix is clear.",
   };
   const abortController = new AbortController();
   const timeoutId = setTimeout(() => {
@@ -1216,13 +1729,6 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     setInterval(() => {
       if (Date.now() - lastEmitAt < HEARTBEAT_INTERVAL_MS) {
         return;
-      }
-      if (!syntheticThinkingOpen) {
-        syntheticThinkingOpen = true;
-        emit({
-          type: "thinking_start",
-          content_index: -1,
-        });
       }
       emit({
         type: "heartbeat",
@@ -1304,12 +1810,13 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
 }
 
 async function runManualCompaction(payload) {
-  if (!API_KEY) {
+  const runtimeConfig = resolveManagerConfig(payload);
+  if (!runtimeConfig.apiKey) {
     throw new Error("MANAGER_AGENT_API_KEY or BLUEPRINT_DEEPSEEK_API_KEY is not configured.");
   }
-  const model = getModel(PROVIDER, MODEL);
+  const model = resolveModel(runtimeConfig);
   if (!model) {
-    throw new Error(`Manager model not found: provider=${PROVIDER}, model=${MODEL}`);
+    throw new Error(`Manager model not found: provider=${runtimeConfig.provider}, model=${runtimeConfig.model}`);
   }
   const result = await maybeCompactSessionHistory({
     sessionMessages: payload.session_messages || [],
@@ -1318,6 +1825,7 @@ async function runManualCompaction(payload) {
     signal: undefined,
     auto: false,
     force: true,
+    runtimeConfig,
   });
   if (!result.compacted) {
     throw new Error("当前上下文还不需要压缩。");

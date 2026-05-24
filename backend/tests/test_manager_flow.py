@@ -6,19 +6,20 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import Any
 import unittest
 from unittest.mock import patch
 
 from fastapi import HTTPException
 from pydantic import SecretStr
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.models.cards import Card
 from app.models.chat import ChatRequest, ChatSessionMessage
 from app.models.executor import ExecutorContext
 from app.models.graph import Asset, Claim, GraphState, Module, ModuleRef
 from app.models.patches import GraphPatch, ValidationResult
-from app.models.runs import CreatedAsset, ExpectedOutput, Manifest, TaskPacket
+from app.models.runs import CreatedAsset, ExecutorValidationReport, ExpectedOutput, Manifest, TaskPacket
 from app.services.chat_session_service import ChatSessionService
 from app.services.chat_job_service import ChatJobService
 from app.services.executor_reviewer_worker import ExecutorReviewerWorker
@@ -32,6 +33,7 @@ from app.services.patch_validator import PatchValidator
 from app.services.project_file_service import ProjectFileService
 from app.services.project_service import ProjectService
 from app.services.result_asset_service import ResultAssetService
+from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
 from app.services.runtime_approval_service import RuntimeApprovalService
 from app.services.utils import atomic_write_json
 from app.services.worker_service import WorkerService, _redact_command_for_log
@@ -122,6 +124,7 @@ class ManagerFlowTest(unittest.TestCase):
         self._original_default_worker_type = settings.default_worker_type
         self._original_executor_sandbox_mode = settings.executor_sandbox_mode
         self._original_executor_extra_ro_binds = settings.executor_extra_ro_binds
+        self._original_executor_conda_base = settings.executor_conda_base
         settings.deepseek_api_key = None
         settings.default_worker_type = "pi"
         settings.executor_sandbox_mode = "none"
@@ -138,7 +141,12 @@ class ManagerFlowTest(unittest.TestCase):
             seed_demo=True,
         )
         self.project_service.git_service = lambda _project_id: StubGitService()
-        self.manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
+        self.runtime_dependency_job_service = RuntimeDependencyJobService()
+        self.manager = ManagerService(
+            self.project_service,
+            planner=AnswerOnlyPlanner(),
+            runtime_dependency_job_service=self.runtime_dependency_job_service,
+        )
         self.validator = PatchValidator(self.project_service)
         self.apply = PatchApplyService(self.project_service, self.validator)
         self.manifest_service = ManifestService(self.project_service)
@@ -156,6 +164,7 @@ class ManagerFlowTest(unittest.TestCase):
         settings.default_worker_type = self._original_default_worker_type
         settings.executor_sandbox_mode = self._original_executor_sandbox_mode
         settings.executor_extra_ro_binds = self._original_executor_extra_ro_binds
+        settings.executor_conda_base = self._original_executor_conda_base
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _add_single_submodule_group_fixture(self) -> tuple[str, str, str, str]:
@@ -1080,6 +1089,87 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue(card.executor_context.tool_policy.rscript)
         self.assertEqual("bioconductor", card.executor_context.runtime_bindings.r_env)
 
+    def test_manager_can_start_background_python_dependency_install(self) -> None:
+        settings = get_settings()
+        conda_base = Path(self.tmpdir) / "conda"
+        python_bin = conda_base / "envs" / "rnaseq" / "bin" / "python"
+        python_bin.parent.mkdir(parents=True)
+        python_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        settings.executor_conda_base = conda_base
+
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="installed scanpy\n",
+            stderr="",
+        )
+        with patch("app.services.manager_blueprint_tools.subprocess.run", return_value=completed) as run:
+            result = self.manager.blueprint_tools.install_runtime_dependencies(
+                "test-project",
+                {
+                    "ecosystem": "python",
+                    "runtime": "rnaseq",
+                    "packages": ["scanpy"],
+                    "manager": "pip",
+                },
+            )
+            for _ in range(40):
+                status = self.manager.blueprint_tools.get_runtime_dependency_install_status("test-project", result["job_id"])
+                if status["status"] in {"succeeded", "failed"}:
+                    break
+                time.sleep(0.01)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["background"])
+        self.assertIn(result["status"], {"queued", "running", "succeeded"})
+        self.assertEqual(["scanpy"], result["packages"])
+        self.assertEqual("succeeded", status["status"])
+        self.assertTrue(status["ok"])
+        command = run.call_args.args[0]
+        self.assertEqual(str(python_bin), command[0])
+        self.assertEqual(["-m", "pip", "install", "scanpy"], command[1:])
+
+    def test_manager_can_start_background_r_dependency_install(self) -> None:
+        settings = get_settings()
+        conda_base = Path(self.tmpdir) / "conda"
+        rscript = conda_base / "envs" / "R_env" / "bin" / "Rscript"
+        rscript.parent.mkdir(parents=True)
+        rscript.write_text("#!/bin/sh\n", encoding="utf-8")
+        settings.executor_conda_base = conda_base
+
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
+        with patch("app.services.manager_blueprint_tools.subprocess.run", return_value=completed) as run:
+            result = self.manager.blueprint_tools.install_runtime_dependencies(
+                "test-project",
+                {
+                    "ecosystem": "r",
+                    "runtime": "R_env",
+                    "packages": ["GSVA", "limma"],
+                    "manager": "bioconductor",
+                },
+            )
+            for _ in range(40):
+                status = self.manager.blueprint_tools.get_runtime_dependency_install_status("test-project", result["job_id"])
+                if status["status"] in {"succeeded", "failed"}:
+                    break
+                time.sleep(0.01)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["background"])
+        self.assertEqual("succeeded", status["status"])
+        self.assertTrue(status["ok"])
+        command = run.call_args.args[0]
+        self.assertEqual(str(rscript), command[0])
+        self.assertIn("BiocManager::install", command[-1])
+        self.assertIn('"GSVA"', command[-1])
+
+    def test_manager_dependency_install_rejects_system_runtime(self) -> None:
+        with self.assertRaises(ManagerPlanningError):
+            self.manager.blueprint_tools.install_runtime_dependencies(
+                "test-project",
+                {"ecosystem": "python", "runtime": "__system__", "packages": ["scanpy"]},
+            )
+
     def test_manager_can_write_and_filter_project_memory(self) -> None:
         preference = self.manager.blueprint_tools.write_project_memory(
             "test-project",
@@ -1128,6 +1218,128 @@ class ManagerFlowTest(unittest.TestCase):
 
         self.assertLessEqual(len(result["memory"]["summary"]), 500)
         self.assertTrue(result["memory"]["summary"].endswith("..."))
+
+    def test_template_instantiation_without_script_bindings_blocks_start(self) -> None:
+        self.manager.blueprint_tools.create_card(
+            "test-project",
+            {
+                "card_id": "card_template_source",
+                "card_type": "module",
+                "title": "Template Source",
+                "status": "accepted",
+                "step": 2,
+                "summary": "Stable reusable analysis card.",
+                "why": "Used to seed the template library.",
+                "inputs": [],
+                "outputs": [{"label": "Template output"}],
+                "executor_context": {
+                    "instruction_blocks": ["Prefer reusable scripts."],
+                    "script_asset_requirements": [
+                        {
+                            "requirement_id": "main_analysis_script",
+                            "label": "Main analysis script",
+                            "description": "User-selected project script asset",
+                        }
+                    ],
+                },
+            },
+        )
+        saved = self.manager.blueprint_tools.save_card_template(
+            "test-project",
+            {
+                "card_id": "card_template_source",
+                "title": "Reusable Template",
+                "tags": ["reuse", "scripts"],
+            },
+        )
+
+        result = self.manager.blueprint_tools.instantiate_card_template(
+            "test-project",
+            {
+                "template_id": saved["template"]["template_id"],
+                "card_id": "card_template_copy",
+                "title": "Template Copy",
+                "step": 3,
+            },
+        )
+
+        self.assertEqual("card_template_copy", result["card"]["card_id"])
+        self.assertIn("Missing script asset bindings", result["card"]["progress_note"] or "")
+        work_item = next(
+            item for item in self.flow_service.get_work_order("test-project")["work_items"] if item["card_id"] == "card_template_copy"
+        )
+        self.assertFalse(work_item["can_start"])
+        self.assertIn("missing_script_asset_bindings", work_item["block_reasons"])
+
+    def test_manager_run_control_wrapper_can_start_card(self) -> None:
+        manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
+        manager_with_worker.blueprint_tools.create_card(
+            "test-project",
+            {
+                "card_id": "card_run_control_start",
+                "card_type": "module",
+                "title": "Run Control Card",
+                "status": "planned",
+                "step": 2,
+                "summary": "Simple card for manager run-control smoke.",
+                "why": "Verify manager start_card_run wrapper.",
+                "inputs": [],
+                "outputs": [{"label": "Result table"}],
+            },
+        )
+
+        result = manager_with_worker.blueprint_tools.start_card_run(
+            "test-project",
+            {
+                "card_id": "card_run_control_start",
+                "worker_type": "pi",
+            },
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["can_start"])
+        self.assertIn("run_id", result)
+        self._wait_for_run("test-project", result["run_id"])
+
+    def test_manager_can_cleanup_rejected_run_history(self) -> None:
+        manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
+        run = self.worker.start_run("test-project", "card_enrichment_group")
+        self._wait_for_run("test-project", run["run_id"])
+        self.worker.review_run("test-project", run["run_id"], accept=False)
+
+        result = manager_with_worker.blueprint_tools.cleanup_run_history(
+            "test-project",
+            {
+                "run_id": run["run_id"],
+                "reason": "Manager cleared rejected run history.",
+            },
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(1, result["cleaned_count"])
+        self.assertEqual(0, result["skipped_count"])
+        project_root = self.project_service.project_path("test-project")
+        self.assertFalse((project_root / "runs" / run["run_id"]).exists())
+        self.assertFalse((project_root / "results" / "card_enrichment_group" / run["run_id"]).exists())
+
+    def test_manager_cleanup_run_history_preserves_valid_asset_runs_by_default(self) -> None:
+        manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
+        run = self.worker.start_run("test-project", "card_enrichment_group")
+        self._wait_for_run("test-project", run["run_id"])
+        self.worker.review_run("test-project", run["run_id"], accept=True)
+
+        result = manager_with_worker.blueprint_tools.cleanup_run_history(
+            "test-project",
+            {
+                "run_id": run["run_id"],
+            },
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(0, result["cleaned_count"])
+        self.assertEqual(1, result["skipped_count"])
+        self.assertEqual("valid_assets_protected", result["skipped"][0]["reason"])
+        self.assertTrue((self.project_service.project_path("test-project") / "runs" / run["run_id"]).exists())
 
     def test_start_run_returns_404_for_missing_card(self) -> None:
         with self.assertRaises(HTTPException) as ctx:
@@ -2385,6 +2597,28 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
         self.assertEqual("reviewer_infrastructure_error", report.reviewer["mode"])
         self.assertTrue(any(issue.code == "reviewer_infrastructure_error" for issue in report.issues))
 
+    def test_validation_merge_manager_brief_writes_reviewer_summary(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="validator-brief-reviewer-") as tmpdir:
+            path = Path(tmpdir) / "manager_brief.json"
+            atomic_write_json(path, {"final_report": "done"})
+            report = ExecutorValidationReport(
+                status="warn",
+                summary="reviewer warning",
+                issues=[],
+                reviewer={
+                    "mode": "reviewer_worker",
+                    "verdict": "warn",
+                    "summary": "needs more evidence",
+                },
+            )
+
+            ExecutorValidationService._merge_manager_brief(path, report)
+
+            brief = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual("done", brief["final_report"])
+        self.assertEqual("reviewer_worker", brief["reviewer"]["mode"])
+        self.assertEqual("needs more evidence", brief["reviewer"]["summary"])
+
     def test_validation_reports_directory_code_artifact_without_crashing(self) -> None:
         with tempfile.TemporaryDirectory(prefix="validator-dir-artifact-") as tmpdir:
             root = Path(tmpdir)
@@ -2461,6 +2695,93 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
         self.assertTrue(result["syntax"]["ok"])
         self.assertEqual(["data/input.tsv", "results/output.tsv"], result["referenced_declared_paths"])
         self.assertEqual(["placeholder"], result["suspicious_markers"])
+
+    def test_reviewer_defaults_allow_more_than_twenty_turns(self) -> None:
+        worker = ExecutorReviewerWorker(Settings(_env_file=None))
+
+        self.assertGreaterEqual(worker._max_review_turns(), 20)
+
+    def test_reviewer_tools_do_not_expose_python_only_checker(self) -> None:
+        tool_names = {tool["name"] for tool in ExecutorReviewerWorker._tools()}
+
+        self.assertNotIn("check_python_code", tool_names)
+        self.assertIn("analyze_code_artifact", tool_names)
+
+    def test_read_review_file_uses_larger_window_for_code_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reviewer-code-window-") as tmpdir:
+            root = Path(tmpdir)
+            run_id = "run_code_window"
+            script = root / "scripts" / "generated" / run_id / "analysis.R"
+            script.parent.mkdir(parents=True)
+            script.write_text("# R script\n" + ("x <- 1\n" * 3000), encoding="utf-8")
+            packet = TaskPacket.model_validate(
+                {
+                    "task_id": run_id,
+                    "project_id": "test-project",
+                    "card_id": "card_review",
+                    "goal": "Review executor output.",
+                    "worker_instructions": "Run analysis.",
+                }
+            )
+            manifest = Manifest.model_validate(
+                {
+                    "run_id": run_id,
+                    "status": "success",
+                    "summary": "done",
+                    "code_artifacts": [{"path": f"scripts/generated/{run_id}/analysis.R", "language": "r"}],
+                }
+            )
+            worker = ExecutorReviewerWorker(Settings(_env_file=None))
+
+            result = worker._read_review_file(root, packet, manifest, f"scripts/generated/{run_id}/analysis.R")
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["truncated"])
+        self.assertGreater(result["preview_limit_bytes"], 16_000)
+
+    def test_reviewer_warns_to_submit_near_turn_limit(self) -> None:
+        worker = ExecutorReviewerWorker(
+            Settings(_env_file=None, deepseek_api_key=SecretStr("test-key"), reviewer_max_turns=3)
+        )
+        calls: list[dict[str, Any]] = []
+
+        def fake_post_messages(*, messages: list[dict], tools: list[dict], api_key: str) -> dict:
+            calls.append({"messages": copy.deepcopy(messages), "tools": tools, "api_key": api_key})
+            return {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"tool_{len(calls)}",
+                        "name": "list_review_files",
+                        "input": {},
+                    }
+                ]
+            }
+
+        worker._post_messages = fake_post_messages  # type: ignore[method-assign]
+        with tempfile.TemporaryDirectory(prefix="reviewer-final-submit-") as tmpdir:
+            result = worker.review(
+                root=Path(tmpdir),
+                packet=TaskPacket.model_validate(
+                    {
+                        "task_id": "run_submit_warning",
+                        "project_id": "test-project",
+                        "card_id": "card_review",
+                        "goal": "Review executor output.",
+                        "worker_instructions": "Run analysis.",
+                    }
+                ),
+                manifest=Manifest.model_validate({"run_id": "run_submit_warning", "status": "success", "summary": "done"}),
+                deterministic_issues=[],
+            )
+
+        self.assertEqual("reviewer_worker_max_turns", result["mode"])
+        self.assertTrue(
+            any(
+                "final_submit_required" in json.dumps(call["messages"], ensure_ascii=False)
+                for call in calls[1:]
+            )
+        )
 
     def test_reviewer_allowed_files_are_limited_to_run_delivery_bundle(self) -> None:
         run_id = "run_review_scope"
@@ -2634,6 +2955,75 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
         retry_message = calls[1]["messages"][-1]["content"][0]["content"]
         self.assertIn("invalid_submit_executor_review_schema", retry_message)
         self.assertIn("schema_errors", retry_message)
+
+    def test_reviewer_writes_trace_files_with_protocol_summary(self) -> None:
+        worker = ExecutorReviewerWorker(get_settings())
+        calls: list[dict[str, Any]] = []
+
+        def fake_post_messages(*, messages: list[dict], tools: list[dict], api_key: str) -> dict:
+            calls.append({"messages": copy.deepcopy(messages), "tools": tools, "api_key": api_key})
+            if len(calls) == 1:
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tool_bad",
+                            "name": "submit_executor_review",
+                            "input": {"verdict": "maybe", "summary": 123},
+                        }
+                    ]
+                }
+            return {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool_good",
+                        "name": "submit_executor_review",
+                        "input": {
+                            "verdict": "pass",
+                            "summary": "Valid final review.",
+                            "issues": [],
+                            "repair_hints": [],
+                            "inspected_files": ["runs/run_trace/manifest.json"],
+                        },
+                    }
+                ]
+            }
+
+        worker._post_messages = fake_post_messages  # type: ignore[method-assign]
+        original_key = worker.settings.deepseek_api_key
+        worker.settings.deepseek_api_key = SecretStr("test-key")
+        try:
+            with tempfile.TemporaryDirectory(prefix="reviewer-trace-") as tmpdir:
+                root = Path(tmpdir)
+                result = worker.review(
+                    root=root,
+                    packet=TaskPacket.model_validate(
+                        {
+                            "task_id": "run_trace",
+                            "project_id": "test-project",
+                            "card_id": "card_review",
+                            "goal": "Review executor output.",
+                            "worker_instructions": "Run analysis.",
+                        }
+                    ),
+                    manifest=Manifest.model_validate({"run_id": "run_trace", "status": "success", "summary": "done"}),
+                    deterministic_issues=[],
+                )
+                trace_jsonl = root / "runs" / "run_trace" / "reviewer_trace.jsonl"
+                trace_json = root / "runs" / "run_trace" / "reviewer_trace.json"
+                self.assertTrue(trace_jsonl.exists())
+                self.assertTrue(trace_json.exists())
+                lines = [line for line in trace_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()]
+                payload = json.loads(trace_json.read_text(encoding="utf-8"))
+        finally:
+            worker.settings.deepseek_api_key = original_key
+
+        self.assertEqual("pass", result["verdict"])
+        self.assertEqual(2, len(lines))
+        self.assertEqual(1, payload["summary"]["submit_schema_failures"])
+        self.assertEqual("invalid_submit_executor_review_schema", payload["summary"]["last_protocol_error_code"])
+        self.assertEqual("runs/run_trace/reviewer_trace.jsonl", result["reviewer"]["trace_path"])
 
     def test_first_valid_final_review_is_not_overwritten_by_later_submit(self) -> None:
         worker = ExecutorReviewerWorker(get_settings())

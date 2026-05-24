@@ -71,6 +71,25 @@
         },
         "runtime_bindings": {
           "$ref": "#/$defs/RuntimeBindings"
+        },
+        "script_asset_requirements": {
+          "items": {
+            "$ref": "#/$defs/ExecutorScriptAssetRequirement"
+          },
+          "title": "Script Asset Requirements",
+          "type": "array"
+        },
+        "script_asset_bindings": {
+          "items": {
+            "$ref": "#/$defs/ExecutorScriptAssetBinding"
+          },
+          "title": "Script Asset Bindings",
+          "type": "array"
+        },
+        "template_metadata": {
+          "additionalProperties": true,
+          "title": "Template Metadata",
+          "type": "object"
         }
       },
       "title": "ExecutorContext",
@@ -110,6 +129,114 @@
         "path"
       ],
       "title": "ExecutorReference",
+      "type": "object"
+    },
+    "ExecutorScriptAssetBinding": {
+      "properties": {
+        "requirement_id": {
+          "title": "Requirement Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "bound_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bound At"
+        }
+      },
+      "required": [
+        "requirement_id"
+      ],
+      "title": "ExecutorScriptAssetBinding",
+      "type": "object"
+    },
+    "ExecutorScriptAssetRequirement": {
+      "properties": {
+        "requirement_id": {
+          "title": "Requirement Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "expected_asset_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Asset Type"
+        },
+        "optional": {
+          "default": false,
+          "title": "Optional",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "requirement_id",
+        "label"
+      ],
+      "title": "ExecutorScriptAssetRequirement",
       "type": "object"
     },
     "ExecutorToolPolicy": {

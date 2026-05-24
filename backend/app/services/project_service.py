@@ -71,6 +71,8 @@ class ProjectService:
         for child in sorted(self.settings.data_root.iterdir()):
             if not child.is_dir():
                 continue
+            if child.name.startswith("_"):
+                continue
             try:
                 snapshot = self.get_project_snapshot(child.name)
                 projects.append(snapshot["summary"])

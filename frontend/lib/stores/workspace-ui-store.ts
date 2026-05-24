@@ -28,6 +28,7 @@ export const EMPTY_ARTIFACT_PREVIEW_STATE: ArtifactPreviewStoreState = {
 interface WorkspaceUiState {
   currentChatSessionIdByProject: Record<string, string | null | undefined>;
   selectedCardByProject: Record<string, string | null | undefined>;
+  cardInteractionOrderByProject: Record<string, string[] | undefined>;
   selectedWorkerByProject: Record<string, Record<string, string | undefined>>;
   globalPythonRuntimeByProject: Record<string, string | undefined>;
   selectedPythonRuntimeByProject: Record<string, Record<string, string | undefined>>;
@@ -69,6 +70,7 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
     (set) => ({
       currentChatSessionIdByProject: {},
       selectedCardByProject: {},
+      cardInteractionOrderByProject: {},
       selectedWorkerByProject: {},
       globalPythonRuntimeByProject: {},
       selectedPythonRuntimeByProject: {},
@@ -95,10 +97,19 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
       setSelectedCard: (projectId, cardId) =>
         set((state) => {
           if (state.selectedCardByProject[projectId] === cardId) return state;
+          const priorOrder = state.cardInteractionOrderByProject[projectId] ?? [];
+          const nextOrder =
+            cardId && cardId.trim()
+              ? [...priorOrder.filter((id) => id !== cardId), cardId]
+              : priorOrder;
           return {
             selectedCardByProject: {
               ...state.selectedCardByProject,
               [projectId]: cardId,
+            },
+            cardInteractionOrderByProject: {
+              ...state.cardInteractionOrderByProject,
+              [projectId]: nextOrder,
             },
           };
         }),
@@ -305,6 +316,7 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
       partialize: (state) => ({
         currentChatSessionIdByProject: state.currentChatSessionIdByProject,
         selectedCardByProject: state.selectedCardByProject,
+        cardInteractionOrderByProject: state.cardInteractionOrderByProject,
         selectedWorkerByProject: state.selectedWorkerByProject,
         globalPythonRuntimeByProject: state.globalPythonRuntimeByProject,
         selectedPythonRuntimeByProject: state.selectedPythonRuntimeByProject,

@@ -50,13 +50,21 @@ class FlowService:
                 for dep_id in dependency_ids
                 if dep_id in card_map and card_map[dep_id].status != "accepted"
             ]
+            missing_script_binding_ids = self._missing_script_asset_binding_ids(card)
             can_start = (
                 card.status in {"planned", "failed", "stale", "superseded"}
                 and not missing_asset_ids
                 and not nonvalid_asset_ids
                 and not unmet_dependency_ids
+                and not missing_script_binding_ids
             )
-            block_reasons = self._block_reasons(card, missing_asset_ids, nonvalid_asset_ids, unmet_dependency_ids)
+            block_reasons = self._block_reasons(
+                card,
+                missing_asset_ids,
+                nonvalid_asset_ids,
+                unmet_dependency_ids,
+                missing_script_binding_ids,
+            )
             work_items.append(
                 {
                     "card_id": card.card_id,
@@ -69,6 +77,7 @@ class FlowService:
                     "depends_on_card_ids": dependency_ids,
                     "blocked_by_card_ids": unmet_dependency_ids,
                     "blocked_by_asset_ids": missing_asset_ids + nonvalid_asset_ids,
+                    "missing_script_asset_requirement_ids": missing_script_binding_ids,
                     "planned_input_asset_ids": [
                         asset_id for asset_id in required_asset_ids if asset_id not in asset_map and asset_id in timeline["producer_by_asset"]
                     ],
@@ -163,6 +172,7 @@ class FlowService:
         missing_asset_ids: list[str],
         nonvalid_asset_ids: list[str],
         unmet_dependency_ids: list[str],
+        missing_script_binding_ids: list[str],
     ) -> list[str]:
         reasons: list[str] = []
         if card.status == "proposed":
@@ -177,7 +187,25 @@ class FlowService:
             reasons.append("required_assets_not_valid")
         if unmet_dependency_ids:
             reasons.append("upstream_cards_not_accepted")
+        if missing_script_binding_ids:
+            reasons.append("missing_script_asset_bindings")
         return reasons
+
+    @staticmethod
+    def _missing_script_asset_binding_ids(card: Card) -> list[str]:
+        context = card.executor_context
+        if context is None:
+            return []
+        bound_ids = {
+            binding.requirement_id
+            for binding in context.script_asset_bindings
+            if binding.requirement_id and (binding.asset_id or binding.path)
+        }
+        return [
+            requirement.requirement_id
+            for requirement in context.script_asset_requirements
+            if requirement.requirement_id and not requirement.optional and requirement.requirement_id not in bound_ids
+        ]
 
     @staticmethod
     def _edge_id(source_id: str, target_id: str, asset_id: str, edge_type: str) -> str:

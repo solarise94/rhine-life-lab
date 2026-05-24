@@ -14,16 +14,19 @@ from pydantic import BaseModel, Field, ValidationError
 from app.core.config import Settings
 from app.models.runs import Manifest, TaskPacket, ValidationIssue
 from app.services.manager_planner import DeepSeekManagerPlanner, ManagerPlanningError
-from app.services.utils import resolve_within
+from app.services.utils import atomic_write_json, resolve_within, utc_now
 
 
 MAX_REVIEW_PREVIEW_BYTES = 16_000
-MAX_REVIEW_TURNS = 8
+MAX_REVIEW_CODE_BYTES = 200_000
+MAX_REVIEW_EXECUTION_RECORD_BYTES = 80_000
+DEFAULT_MAX_REVIEW_TURNS = 24
 
 
 REVIEWER_SYSTEM_PROMPT = """You are Blueprint's read-only Executor Reviewer agent.
 
-Your job is to decide whether the executor's preserved code and output assets satisfy the task contract.
+Your job is to audit the executor's execution method, preserved scripts, and self-reported summary.
+Decide whether the run is backed by real, contract-following execution evidence.
 
 Rules:
 - You may only inspect files through the provided tools.
@@ -31,8 +34,17 @@ Rules:
 - Do not create or modify files.
 - Use submit_executor_review exactly once when you have enough evidence.
 - If submit_executor_review returns a protocol error, fix the listed fields and call submit_executor_review again.
-- Fail if the executor appears to fake outputs, skip declared inputs, or implement logic inconsistent with the task.
+- Review the script contract, not the scientific merit of the biological/statistical conclusion.
+- Treat agent self-reports as evidence: if the executor admits missing dependencies, shortcuts, skipped inputs, failed commands, or fallback/synthetic outputs, reflect that in the verdict.
+- Fail if the executor appears to fake outputs, skip declared inputs, use placeholder/synthetic/demo logic, or implement logic inconsistent with the task.
 - Warn for incomplete evidence that does not prove failure.
+- Prefer the shortest successful review path: list_review_files, inspect task/manifest/execution report/script evidence first, optionally inspect one representative output shape, then submit_executor_review.
+- Do not inspect raw input data unless script/manifest evidence is insufficient to judge whether the declared input path was used.
+- Do not deeply read every table, report, figure, SVG, or raw data asset. Output assets are secondary evidence for existence/shape only.
+- Do not make environment policy decisions. Missing packages, missing R/Python runtime, or blocked network are executor capability findings, not reviewer remediation work.
+- Do not keep exploring after you already have enough evidence for a verdict.
+- If the previous tool_result reports a protocol_error, your next tool call must correct that protocol error.
+- inspected_files in submit_executor_review must contain real file paths you actually inspected.
 """
 
 
@@ -73,6 +85,18 @@ class ExecutorReviewerWorker:
                 "mode": "reviewer_worker_skipped",
             }
 
+        trace_jsonl = root / "runs" / packet.task_id / "reviewer_trace.jsonl"
+        trace_json = root / "runs" / packet.task_id / "reviewer_trace.json"
+        turns: list[dict[str, Any]] = []
+        summary = {
+            "turns": 0,
+            "tool_calls_total": 0,
+            "submit_attempts": 0,
+            "submit_schema_failures": 0,
+            "missing_tool_call_turns": 0,
+            "last_protocol_error_code": None,
+            "model": self.settings.reviewer_model or self.settings.manager_model,
+        }
         messages = [
             {
                 "role": "user",
@@ -89,13 +113,10 @@ class ExecutorReviewerWorker:
             }
         ]
         tools = self._tools()
-        transcript: list[dict[str, Any]] = []
-        for _turn in range(MAX_REVIEW_TURNS):
-            response_payload = self._post_messages(messages=messages, tools=tools, api_key=api_key)
-            tool_uses = self._tool_uses(response_payload)
-            transcript.append({"assistant_content": response_payload.get("content", [])})
-            if not tool_uses:
-                messages.append({"role": "assistant", "content": response_payload.get("content", [])})
+        max_review_turns = self._max_review_turns()
+        final_submit_warning_sent = False
+        for turn_index in range(max_review_turns):
+            if not final_submit_warning_sent and turn_index >= max(1, max_review_turns - 3):
                 messages.append(
                     {
                         "role": "user",
@@ -103,32 +124,95 @@ class ExecutorReviewerWorker:
                             {
                                 "type": "text",
                                 "text": json.dumps(
-                                    self._protocol_error(
-                                        code="missing_tool_call",
-                                        message="Reviewer must use tools and finish with submit_executor_review.",
-                                        repair_hint="Inspect evidence if needed, then call submit_executor_review with verdict, summary, issues, repair_hints, and inspected_files.",
-                                    ),
+                                    {
+                                        "review_protocol": "final_submit_required",
+                                        "message": (
+                                            "You are near the reviewer turn limit. Stop exploring. "
+                                            "Your next tool call must be submit_executor_review using only the evidence already inspected."
+                                        ),
+                                    },
                                     ensure_ascii=False,
                                 ),
                             }
                         ],
                     }
                 )
+                final_submit_warning_sent = True
+            response_payload = self._post_messages(messages=messages, tools=tools, api_key=api_key)
+            tool_uses = self._tool_uses(response_payload)
+            turn_record: dict[str, Any] = {
+                "turn_index": turn_index + 1,
+                "request_model": self.settings.reviewer_model or self.settings.manager_model,
+                "assistant_content": response_payload.get("content", []),
+                "tool_uses": [],
+                "tool_results": [],
+                "protocol_errors": [],
+                "final_review_candidate": None,
+                "accepted_final_review": False,
+                "timestamp": utc_now(),
+            }
+            if not tool_uses:
+                summary["missing_tool_call_turns"] += 1
+                protocol_error = self._protocol_error(
+                    code="missing_tool_call",
+                    message="Reviewer must use tools and finish with submit_executor_review.",
+                    repair_hint="Inspect evidence if needed, then call submit_executor_review with verdict, summary, issues, repair_hints, and inspected_files.",
+                )
+                turn_record["protocol_errors"].append(protocol_error["protocol_error"])
+                messages.append({"role": "assistant", "content": response_payload.get("content", [])})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": json.dumps(protocol_error, ensure_ascii=False),
+                            }
+                        ],
+                    }
+                )
+                turns.append(turn_record)
+                self._write_trace(trace_jsonl, trace_json, turns, summary)
                 continue
             messages.append({"role": "assistant", "content": response_payload.get("content", [])})
             result_blocks = []
             final: dict[str, Any] | None = None
             for tool_use in tool_uses:
+                turn_record["tool_uses"].append(
+                    {
+                        "tool_use_id": tool_use.get("id"),
+                        "name": tool_use.get("name"),
+                        "input": tool_use.get("input"),
+                    }
+                )
+                summary["tool_calls_total"] += 1
                 if tool_use.get("name") == "submit_executor_review":
+                    summary["submit_attempts"] += 1
                     verdict, protocol_error = self._validate_final_review(tool_use)
                     if verdict is not None:
                         if final is None:
                             final = verdict
+                            turn_record["final_review_candidate"] = verdict
+                            turn_record["accepted_final_review"] = True
                         result = {"ok": True, "accepted": True, "message": "Executor review accepted."}
                     else:
                         result = protocol_error
+                        turn_record["protocol_errors"].append(protocol_error.get("protocol_error"))
+                        summary["submit_schema_failures"] += 1
+                        summary["last_protocol_error_code"] = protocol_error.get("protocol_error", {}).get("code")
                 else:
                     result = self._handle_tool(root, packet, manifest, tool_use)
+                    if isinstance(result, dict) and result.get("protocol_error"):
+                        turn_record["protocol_errors"].append(result.get("protocol_error"))
+                        summary["last_protocol_error_code"] = result.get("protocol_error", {}).get("code")
+                turn_record["tool_results"].append(
+                    {
+                        "tool_use_id": tool_use["id"],
+                        "ok": result.get("ok") if isinstance(result, dict) else None,
+                        "content": result,
+                        "error": result.get("error") if isinstance(result, dict) else None,
+                    }
+                )
                 result_blocks.append(
                     {
                         "type": "tool_result",
@@ -137,14 +221,22 @@ class ExecutorReviewerWorker:
                     }
                 )
             messages.append({"role": "user", "content": result_blocks})
+            turns.append(turn_record)
+            self._write_trace(trace_jsonl, trace_json, turns, summary)
             if final is not None:
                 final["mode"] = "reviewer_worker"
-                final["turns"] = len(transcript)
+                final["turns"] = len(turns)
+                final["reviewer"] = {
+                    **summary,
+                    "turns": len(turns),
+                    "trace_path": f"runs/{packet.task_id}/reviewer_trace.jsonl",
+                }
+                self._write_trace(trace_jsonl, trace_json, turns, summary)
                 return final
 
         return {
             "verdict": "fail",
-            "summary": f"Reviewer failed to submit a valid executor review within {MAX_REVIEW_TURNS} tool turns.",
+            "summary": f"Reviewer failed to submit a valid executor review within {max_review_turns} tool turns.",
             "issues": [
                 {
                     "severity": "error",
@@ -154,13 +246,19 @@ class ExecutorReviewerWorker:
                 }
             ],
             "mode": "reviewer_worker_max_turns",
+            "reviewer": {
+                **summary,
+                "turns": len(turns),
+                "trace_path": f"runs/{packet.task_id}/reviewer_trace.jsonl",
+            },
         }
 
     def _post_messages(self, *, messages: list[dict[str, Any]], tools: list[dict[str, Any]], api_key: str) -> dict[str, Any]:
-        resolved_model = DeepSeekManagerPlanner.resolve_tool_model(self.settings.manager_model)
+        configured_model = self.settings.reviewer_model or self.settings.manager_model
+        resolved_model = DeepSeekManagerPlanner.resolve_tool_model(configured_model)
         payload = {
             "model": resolved_model,
-            "max_tokens": self.settings.manager_max_tokens,
+            "max_tokens": self.settings.reviewer_max_tokens or self.settings.manager_max_tokens,
             "temperature": self.settings.manager_temperature,
             "system": REVIEWER_SYSTEM_PROMPT,
             "messages": messages,
@@ -186,7 +284,7 @@ class ExecutorReviewerWorker:
                 DeepSeekManagerPlanner._build_http_error_message(
                     status_code=exc.code,
                     detail=detail,
-                    configured_model=self.settings.manager_model,
+                    configured_model=configured_model,
                     resolved_model=resolved_model,
                 )
             ) from exc
@@ -196,6 +294,18 @@ class ExecutorReviewerWorker:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ManagerPlanningError("Reviewer DeepSeek returned invalid JSON at the HTTP layer.") from exc
+
+    def _max_review_turns(self) -> int:
+        return max(1, int(self.settings.reviewer_max_turns or DEFAULT_MAX_REVIEW_TURNS))
+
+    @staticmethod
+    def _write_trace(trace_jsonl: Path, trace_json: Path, turns: list[dict[str, Any]], summary: dict[str, Any]) -> None:
+        trace_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        trace_jsonl.write_text(
+            "".join(json.dumps(turn, ensure_ascii=False) + "\n" for turn in turns),
+            encoding="utf-8",
+        )
+        atomic_write_json(trace_json, {"summary": {**summary, "turns": len(turns)}, "turns": turns})
 
     @staticmethod
     def _tools() -> list[dict[str, Any]]:
@@ -218,16 +328,6 @@ class ExecutorReviewerWorker:
             {
                 "name": "inspect_table",
                 "description": "Return row/column counts and headers for an allowed TSV/CSV output or input file.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "check_python_code",
-                "description": "Run py_compile on an allowed Python code artifact.",
                 "input_schema": {
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
@@ -321,7 +421,8 @@ class ExecutorReviewerWorker:
         path = self._resolve_allowed(root, packet, manifest, relative_path)
         if not path.is_file():
             return {"ok": False, "error": "Path is not a file.", "path": relative_path}
-        data = path.read_bytes()[:MAX_REVIEW_PREVIEW_BYTES]
+        preview_limit = self._review_preview_limit(packet, manifest, relative_path)
+        data = path.read_bytes()[:preview_limit]
         if b"\x00" in data:
             return {
                 "ok": False,
@@ -342,9 +443,29 @@ class ExecutorReviewerWorker:
             "ok": True,
             "path": relative_path,
             "size_bytes": path.stat().st_size,
-            "truncated": path.stat().st_size > MAX_REVIEW_PREVIEW_BYTES,
+            "truncated": path.stat().st_size > preview_limit,
+            "preview_limit_bytes": preview_limit,
             "content": text,
         }
+
+    @staticmethod
+    def _review_preview_limit(packet: TaskPacket, manifest: Manifest, relative_path: str) -> int:
+        declared_code_paths = {item.path for item in manifest.code_artifacts}
+        if relative_path in declared_code_paths:
+            return MAX_REVIEW_CODE_BYTES
+        execution_record_paths = {
+            f"runs/{packet.task_id}/task_packet.json",
+            f"runs/{packet.task_id}/manifest.json",
+            f"runs/{packet.task_id}/adapter_contract.json",
+            f"runs/{packet.task_id}/manager_brief.json",
+            f"runs/{packet.task_id}/commands.log",
+            f"runs/{packet.task_id}/transcript.md",
+            f"runs/{packet.task_id}/filesystem_audit.json",
+            f"runs/{packet.task_id}/sandbox_plan.json",
+        }
+        if relative_path in execution_record_paths:
+            return MAX_REVIEW_EXECUTION_RECORD_BYTES
+        return MAX_REVIEW_PREVIEW_BYTES
 
     def _inspect_table(self, root: Path, packet: TaskPacket, manifest: Manifest, relative_path: str) -> dict[str, Any]:
         path = self._resolve_allowed(root, packet, manifest, relative_path)
@@ -487,7 +608,44 @@ class ExecutorReviewerWorker:
         deterministic_issues: list[ValidationIssue],
     ) -> dict[str, Any]:
         return {
-            "review_goal": "Judge whether executor code and outputs satisfy the task contract.",
+            "review_goal": (
+                "Audit whether the executor's execution method, preserved scripts, and self-report prove "
+                "that the card contract was followed."
+            ),
+            "review_scope": {
+                "primary": [
+                    "task contract and expected outputs",
+                    "manifest summary, commands, transcript, filesystem audit, and manager brief",
+                    "declared code artifacts and their references to declared inputs/outputs",
+                    "executor self-reported warnings, missing dependencies, failed commands, shortcuts, or fallbacks",
+                ],
+                "secondary": [
+                    "one representative table/header or output existence check when needed",
+                    "created asset metadata from manifest",
+                ],
+                "out_of_scope": [
+                    "deep inspection of raw input data",
+                    "scientific judgment of whether the biological/statistical conclusion is interesting",
+                    "environment remediation or dependency installation decisions",
+                    "reading every report, figure, SVG, table, or raw file",
+                ],
+            },
+            "review_strategy": [
+                "Call list_review_files first.",
+                "Select a minimal evidence set before reading: manifest/task packet, agent execution report, declared code artifacts, and at most one representative output shape if needed.",
+                "Read execution records and scripts before output assets.",
+                "Use analyze_code_artifact for declared scripts, then read the script only if static evidence is insufficient.",
+                "Use inspect_table for output shape instead of reading large output tables when possible.",
+                "Do not read raw input data unless script evidence cannot show whether declared inputs were referenced.",
+                "As soon as you can justify a verdict, call submit_executor_review.",
+                "If a tool_result reports a protocol_error, fix that error on the next tool call.",
+            ],
+            "verdict_guidance": [
+                "pass: preserved script and execution records credibly show the contract was executed and expected outputs were produced.",
+                "warn: evidence is incomplete or environment/runtime issues limited confidence, but there is no clear contract violation.",
+                "fail: script/report evidence shows fake, placeholder, synthetic, skipped, or materially non-contract execution.",
+            ],
+            "required_submit_fields": ["verdict", "summary", "issues", "repair_hints", "inspected_files"],
             "task": {
                 "run_id": packet.task_id,
                 "card_id": packet.card_id,

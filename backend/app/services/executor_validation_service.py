@@ -247,4 +247,7 @@ class ExecutorValidationService:
                 logger.exception("Failed to parse manager_brief before merging executor validation: %s", path)
                 brief = {"manager_brief_parse_error": str(exc)}
         brief["executor_validation"] = report.model_dump()
+        reviewer = report.reviewer if isinstance(report.reviewer, dict) else {}
+        if reviewer:
+            brief["reviewer"] = reviewer
         atomic_write_json(path, brief)

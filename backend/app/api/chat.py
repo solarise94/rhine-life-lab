@@ -4,7 +4,13 @@ import re
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import get_chat_job_service, get_manager_service, get_patch_apply_service, get_project_service
+from app.api.deps import (
+    get_chat_job_service,
+    get_manager_service,
+    get_patch_apply_service,
+    get_project_service,
+    get_runtime_dependency_job_service,
+)
 from app.models.chat import ChatRequest
 from app.models.graph import Asset
 from app.models.patches import GraphPatch
@@ -13,6 +19,7 @@ from app.services.manager_planner import ManagerPlanningError
 from app.services.manager_service import ManagerService
 from app.services.patch_apply import PatchApplyService
 from app.services.project_service import ProjectService
+from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
 from app.services.utils import sha256_file, utc_now
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["chat"])
@@ -73,6 +80,36 @@ def get_chat_job(project_id: str, job_id: str, chat_job_service: ChatJobService 
         "status": job.status,
         "response": job.response.model_dump() if job.response else None,
         "error": job.error,
+    }
+
+
+@router.get("/runtime-dependency-jobs/{job_id}")
+def get_runtime_dependency_job(
+    project_id: str,
+    job_id: str,
+    runtime_dependency_job_service: RuntimeDependencyJobService = Depends(get_runtime_dependency_job_service),
+) -> dict:
+    job = runtime_dependency_job_service.get(job_id)
+    if not job or job.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Runtime dependency job not found")
+    result = job.result or {}
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "payload": job.payload,
+        "result": result or None,
+        "error": job.error,
+        "ok": result.get("ok") if result else None,
+        "message": result.get("message") if result else None,
+        "runtime": result.get("runtime") if result else job.payload.get("runtime"),
+        "resolved_runtime": result.get("resolved_runtime") if result else None,
+        "packages": result.get("packages") if result else job.payload.get("packages"),
+        "manager": result.get("manager") if result else job.payload.get("manager"),
+        "stdout_tail": result.get("stdout_tail") if result else None,
+        "stderr_tail": result.get("stderr_tail") if result else None,
     }
 
 

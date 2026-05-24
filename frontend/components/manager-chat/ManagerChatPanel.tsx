@@ -35,6 +35,14 @@ interface ToolUseState {
   status: ToolState;
 }
 
+interface PendingDependencyInstallJob {
+  jobId: string;
+  sourceMessageId: string;
+  toolCallId?: string;
+  runtime?: string;
+  packages?: string[];
+}
+
 interface MessageTimelineItem {
   id: string;
   kind: TimelineItemKind;
@@ -243,7 +251,6 @@ function normalizeSessionMessages(messages: ChatSessionMessageRecord[]): ChatMes
             kind: "thinking",
             content: message.thinking,
             status: "done",
-            endedAt: Date.now(),
           });
         }
         if (message.content) {
@@ -377,6 +384,7 @@ export function ManagerChatPanel({
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState("");
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>("medium");
+  const [pendingDependencyJobs, setPendingDependencyJobs] = useState<PendingDependencyInstallJob[]>([]);
   const chatSessionQuery = useChatSession(projectId, sessionId ?? undefined, Boolean(sessionId));
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
@@ -398,6 +406,7 @@ export function ManagerChatPanel({
   const currentSessionIdRef = useRef<string | null>(sessionId ?? null);
   const hydratedSessionIdRef = useRef<string | null>(null);
   const lastSavedSignatureRef = useRef("[]");
+  const notifiedDependencyJobsRef = useRef<Set<string>>(new Set());
 
   const attachments = useWorkspaceUiStore((s) => s.attachmentsByProject[projectId] ?? EMPTY_ATTACHMENTS);
   const scriptPreference = useWorkspaceUiStore((s) => s.scriptPreferenceByProject?.[projectId] ?? "auto");
@@ -527,6 +536,8 @@ export function ManagerChatPanel({
     setMentionState(null);
     setMentionIndex(0);
     setEffortMenuOpen(false);
+    setPendingDependencyJobs([]);
+    notifiedDependencyJobsRef.current = new Set();
     setMessages([]);
   }, [sessionId]);
 
@@ -592,6 +603,113 @@ export function ManagerChatPanel({
         });
     });
   }, [messages]);
+
+  useEffect(() => {
+    if (!pendingDependencyJobs.length) {
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      const jobs = [...pendingDependencyJobs];
+      const responses = await Promise.all(
+        jobs.map(async (job) => {
+          try {
+            const status = await api.getRuntimeDependencyJob(projectId, job.jobId);
+            return { job, status };
+          } catch (nextError) {
+            const message = nextError instanceof Error ? nextError.message : "Failed to load dependency job status.";
+            return {
+              job,
+              status: {
+                job_id: job.jobId,
+                status: "failed" as const,
+                message,
+                error: message,
+                runtime: job.runtime,
+                packages: job.packages,
+              },
+            };
+          }
+        }),
+      );
+      if (cancelled) {
+        return;
+      }
+      const completed = new Set<string>();
+      responses.forEach(({ job, status }) => {
+        if (status.status !== "succeeded" && status.status !== "failed") {
+          return;
+        }
+        completed.add(job.jobId);
+        updateMessage(job.sourceMessageId, (current) => {
+          const timeline = current.timeline ?? [];
+          const existing = timeline.find((item) => item.id === job.toolCallId);
+          const summary =
+            status.message ||
+            (status.status === "succeeded"
+              ? `后台环境依赖任务已完成：${status.runtime || job.runtime || "runtime"}`
+              : `后台环境依赖任务失败：${status.runtime || job.runtime || "runtime"}`);
+          return {
+            ...current,
+            timeline: upsertTimelineItem(
+              timeline,
+              {
+                id: job.toolCallId || timelineItemId("tool", undefined, `depjob_${job.jobId}`),
+                kind: "tool",
+                label: status.status === "succeeded" ? "已完成环境依赖任务" : "环境依赖任务失败",
+                toolName: "install_runtime_dependencies",
+                content: summary,
+                status: status.status === "succeeded" ? "done" : "error",
+                startedAt: existing?.startedAt ?? Date.now(),
+                endedAt: Date.now(),
+              },
+              (item) => item.id === job.toolCallId,
+            ),
+            tools: (current.tools ?? []).map((tool) =>
+              tool.id === job.toolCallId || (tool.toolName === "install_runtime_dependencies" && !job.toolCallId)
+                ? {
+                    ...tool,
+                    label: status.status === "succeeded" ? "已完成环境依赖任务" : "环境依赖任务失败",
+                    status: status.status === "succeeded" ? "done" : "error",
+                  }
+                : tool,
+            ),
+          };
+        });
+        if (!notifiedDependencyJobsRef.current.has(job.jobId)) {
+          const packageNames = status.packages ?? job.packages ?? [];
+          const packageText = packageNames.length ? `（${packageNames.slice(0, 4).join(", ")}${packageNames.length > 4 ? "..." : ""}）` : "";
+          const content =
+            status.status === "succeeded"
+              ? `后台环境依赖任务已完成：${status.runtime || job.runtime || "runtime"} ${packageText}`.trim()
+              : `后台环境依赖任务失败：${status.runtime || job.runtime || "runtime"}。${status.message || status.error || ""}`.trim();
+          const messageId = createMessageId();
+          setMessages((current) => [
+            ...current,
+            {
+              id: messageId,
+              role: "manager",
+              content,
+              state: "done",
+              timeline: [{ id: `${messageId}_text`, kind: "text", content, status: "done" }],
+            },
+          ]);
+          notifiedDependencyJobsRef.current.add(job.jobId);
+        }
+      });
+      if (completed.size > 0) {
+        setPendingDependencyJobs((current) => current.filter((job) => !completed.has(job.jobId)));
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [pendingDependencyJobs, projectId]);
 
   function createMessageId() {
     if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -796,19 +914,20 @@ export function ManagerChatPanel({
           {
             const itemId = timelineItemId("thinking", event.content_index, `${timeline.length}`, event.assistant_turn_index);
             const existing = timeline.find((item) => item.id === itemId);
+            const nextTimeline = timeline.filter((item) => item.id !== "thinking_hb");
             return {
               ...current,
               thinkingState: "running",
               thinking: current.thinking ?? "",
               state: current.content ? "streaming" : "thinking",
               timeline: upsertTimelineItem(
-                timeline,
+                nextTimeline,
                 {
                   id: itemId,
                   kind: "thinking",
                   content: existing?.content ?? "",
                   status: "running",
-                  startedAt: existing?.startedAt ?? Date.now(),
+                  startedAt: existing?.startedAt ?? event.started_at ?? Date.now(),
                   endedAt: undefined,
                 },
                 (item) => item.id === itemId,
@@ -861,8 +980,8 @@ export function ManagerChatPanel({
                   kind: "thinking",
                   content,
                   status: "done",
-                  startedAt: existing?.startedAt ?? Date.now(),
-                  endedAt: Date.now(),
+                  startedAt: existing?.startedAt ?? event.started_at ?? Date.now(),
+                  endedAt: event.ended_at ?? Date.now(),
                 },
                 (item) => item.id === itemId,
               ),
@@ -871,7 +990,7 @@ export function ManagerChatPanel({
         case "heartbeat":
           {
             const hbContent = current.thinking || event.message || "Manager 正在生成回复…";
-            const runningThinkingIndex = timeline.findIndex((item) => item.kind === "thinking" && item.status === "running");
+            const runningThinkingIndex = timeline.findIndex((item) => item.kind === "thinking" && item.status === "running" && item.id !== "thinking_hb");
             if (runningThinkingIndex >= 0) {
               const nextTimeline = [...timeline];
               nextTimeline[runningThinkingIndex] = {
@@ -888,21 +1007,24 @@ export function ManagerChatPanel({
               };
             }
             if (!current.content) {
+              const existingHb = timeline.find((item) => item.id === "thinking_hb");
               return {
                 ...current,
                 thinkingState: current.state === "done" ? current.thinkingState : "running",
                 thinking: hbContent,
                 state: current.content ? current.state : "thinking",
-                timeline: [
-                  ...timeline,
+                timeline: upsertTimelineItem(
+                  timeline,
                   {
                     id: "thinking_hb",
                     kind: "thinking",
                     content: hbContent,
                     status: "running",
-                    startedAt: Date.now(),
+                    startedAt: existingHb?.startedAt ?? Date.now(),
+                    endedAt: undefined,
                   },
-                ],
+                  (item) => item.id === "thinking_hb",
+                ),
               };
             }
             return {
@@ -989,6 +1111,34 @@ export function ManagerChatPanel({
                   status: event.is_error ? "error" : "done",
                   startedAt: existing?.startedAt ?? Date.now(),
                   endedAt: Date.now(),
+                },
+                (item) => item.id === itemId,
+              ),
+            };
+          }
+        case "tool_report":
+          {
+            const fallbackIndex = lastTimelineIndex(
+              timeline,
+              (item) => item.kind === "tool" && (!event.tool_name || item.toolName === event.tool_name),
+            );
+            const itemId =
+              event.tool_call_id ||
+              (fallbackIndex >= 0 ? timeline[fallbackIndex].id : timelineItemId("tool", undefined, `${event.tool_name || "unknown"}_${timeline.length}`));
+            const existing = timeline.find((item) => item.id === itemId);
+            return {
+              ...current,
+              timeline: upsertTimelineItem(
+                timeline,
+                {
+                  id: itemId,
+                  kind: "tool",
+                  label: existing?.label || event.tool_name || "Tool",
+                  toolName: event.tool_name,
+                  content: event.summary || existing?.content || "",
+                  status: existing?.status ?? "done",
+                  startedAt: existing?.startedAt ?? Date.now(),
+                  endedAt: existing?.endedAt,
                 },
                 (item) => item.id === itemId,
               ),
@@ -1237,6 +1387,29 @@ export function ManagerChatPanel({
               endedAt: Date.now(),
             });
             return;
+          }
+          if (event.type === "tool_report" && event.tool_name === "install_runtime_dependencies") {
+            const details = event.details ?? {};
+            const jobId = typeof details.job_id === "string" ? details.job_id : "";
+            if (jobId) {
+              setPendingDependencyJobs((current) => {
+                if (current.some((item) => item.jobId === jobId)) {
+                  return current;
+                }
+                return [
+                  ...current,
+                  {
+                    jobId,
+                    sourceMessageId: managerMessageId,
+                    toolCallId: event.tool_call_id,
+                    runtime: typeof details.runtime === "string" ? details.runtime : undefined,
+                    packages: Array.isArray(details.packages)
+                      ? details.packages.filter((item): item is string => typeof item === "string")
+                      : undefined,
+                  },
+                ];
+              });
+            }
           }
           applyStreamEvent(managerMessageId, event);
           if (event.type === "error") {
@@ -1493,8 +1666,11 @@ export function ManagerChatPanel({
       const label = item.label || (item.status === "running" ? "正在执行工具" : "已完成工具调用");
       return (
         <div key={item.id} className={`manager-tool-divider ${item.status ?? "done"}`}>
-          <span className="manager-tool-divider-label">{label}</span>
-          <span className="manager-tool-divider-line" />
+          <div className="manager-tool-divider-main">
+            <span className="manager-tool-divider-label">{label}</span>
+            <span className="manager-tool-divider-line" />
+          </div>
+          {item.content ? <div className="manager-tool-report">{item.content}</div> : null}
         </div>
       );
     }
