@@ -38,6 +38,7 @@ from app.services.runtime_dependency_job_service import RuntimeDependencyJobServ
 from app.services.runtime_approval_service import RuntimeApprovalService
 from app.services.utils import atomic_write_json
 from app.services.worker_service import WorkerService, _redact_command_for_log
+from app.workers import agent_cli_executor
 from app.workers.base import PermissionRequest, WorkerAdapter, WorkerLaunchSpec
 from app.workers.shell_worker import ShellWorkerAdapter
 
@@ -2498,6 +2499,62 @@ time.sleep(5)
         self.assertEqual("reviewed", run_record.status)
         events = self.project_service.graph_store("test-project").load_run_events(run["run_id"])
         self.assertTrue(any(event.event_type == "timeout_manifest_recovered" for event in events))
+
+    def test_agent_cli_wrapper_syncs_run_local_generated_scripts_before_manifest_validation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wrapper-script-sync-") as tmpdir:
+            project_root = Path(tmpdir)
+            run_id = "run_script_sync"
+            run_dir = project_root / "runs" / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (project_root / "results" / "card_review" / run_id).mkdir(parents=True, exist_ok=True)
+            packet = {
+                "task_id": run_id,
+                "expected_outputs": [
+                    expected_output_spec(
+                        "report",
+                        f"results/card_review/{run_id}/report.md",
+                        artifact_class="document",
+                        accepted_formats=["md"],
+                    )
+                ],
+            }
+            atomic_write_json(run_dir / "task_packet.json", packet)
+            (project_root / "results" / "card_review" / run_id / "report.md").write_text("# report\n", encoding="utf-8")
+            local_script = run_dir / "scripts" / "generated" / run_id / "analysis.py"
+            local_script.parent.mkdir(parents=True, exist_ok=True)
+            local_script.write_text("print('run local script')\n", encoding="utf-8")
+            atomic_write_json(
+                run_dir / "manifest.candidate.json",
+                {
+                    "run_id": run_id,
+                    "status": "success",
+                    "summary": "run-local script only",
+                    "created_assets": [
+                        {
+                            "role": "report",
+                            "path": f"results/card_review/{run_id}/report.md",
+                            "artifact_class": "document",
+                            "format": "md",
+                        }
+                    ],
+                    "code_artifacts": [
+                        {
+                            "path": f"scripts/generated/{run_id}/analysis.py",
+                            "language": "python",
+                        }
+                    ],
+                    "commands_executed": [f"python3 runs/{run_id}/scripts/generated/{run_id}/analysis.py"],
+                    "validation_evidence": {"input_conclusion": "No external inputs."},
+                },
+            )
+
+            errors = agent_cli_executor._promote_candidate_manifest(run_dir=run_dir)
+
+            self.assertEqual([], errors)
+            synced_script = project_root / "scripts" / "generated" / run_id / "analysis.py"
+            self.assertTrue(synced_script.exists())
+            self.assertEqual("print('run local script')\n", synced_script.read_text(encoding="utf-8"))
+            self.assertTrue((run_dir / "manifest.json").exists())
 
     def test_filesystem_audit_violation_marks_run_failed(self) -> None:
         script = """

@@ -15,6 +15,7 @@ import {
   ProjectSummary,
   ProjectRuntimePreferences,
   ReportExportResponse,
+  DiagnosticExportResponse,
   ReportSection,
   LibraryEntry,
   LibraryDetailResponse,
@@ -471,6 +472,11 @@ export const api = {
   },
   exportReportHtml(projectId: string) {
     return request<ReportExportResponse>(`/projects/${projectId}/report/export-html`, { method: "POST" });
+  },
+  exportDiagnostics(projectId: string, maxRuns = 8) {
+    return request<DiagnosticExportResponse>(`/projects/${projectId}/diagnostics/export?max_runs=${maxRuns}`, {
+      method: "POST",
+    });
   },
   getLibrary(kind: "skill" | "mcp") {
     return request<LibraryListResponse>(`/library/${kind === "skill" ? "skills" : "mcp"}`);

@@ -2,6 +2,7 @@ from functools import lru_cache
 
 from app.services.chat_session_service import ChatSessionService
 from app.services.app_config_service import AppConfigService
+from app.services.diagnostic_bundle_service import DiagnosticBundleService
 from app.services.manager_service import ManagerService
 from app.services.chat_job_service import ChatJobService
 from app.services.flow_service import FlowService
@@ -108,6 +109,14 @@ def get_app_config_service() -> AppConfigService:
 @lru_cache
 def get_library_registry_service() -> LibraryRegistryService:
     return LibraryRegistryService(
+        get_project_service(),
+        get_app_config_service(),
+    )
+
+
+@lru_cache
+def get_diagnostic_bundle_service() -> DiagnosticBundleService:
+    return DiagnosticBundleService(
         get_project_service(),
         get_app_config_service(),
     )

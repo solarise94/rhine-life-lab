@@ -96,6 +96,12 @@ export function useUpdateProjectRuntimePreferencesMutation(projectId: string) {
   });
 }
 
+export function useExportDiagnosticsMutation(projectId: string) {
+  return useMutation({
+    mutationFn: ({ maxRuns }: { maxRuns?: number } = {}) => api.exportDiagnostics(projectId, maxRuns ?? 8),
+  });
+}
+
 export function useChatSessions(projectId: string) {
   return useQuery({
     queryKey: queryKeys.chatSessions(projectId),

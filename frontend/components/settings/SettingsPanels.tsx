@@ -4,13 +4,14 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   useAppSettings,
+  useExportDiagnosticsMutation,
   useLibrary,
   useRefreshLibraryMutation,
   useResummarizeLibraryItemMutation,
   useUpdateAppSettingsMutation,
   useUpdateProjectRuntimePreferencesMutation,
 } from "@/lib/hooks";
-import { ProjectState, PythonRuntime, RRuntime } from "@/lib/types";
+import { DiagnosticExportResponse, ProjectState, PythonRuntime, RRuntime } from "@/lib/types";
 
 type ScriptPreference = "auto" | "prefer_python" | "prefer_r" | "prefer_mixed";
 
@@ -118,6 +119,7 @@ export function SettingsPanels({
   const appSettingsQuery = useAppSettings();
   const updateAppSettingsMutation = useUpdateAppSettingsMutation();
   const updateRuntimeMutation = useUpdateProjectRuntimePreferencesMutation(projectId);
+  const exportDiagnosticsMutation = useExportDiagnosticsMutation(projectId);
 
   const [deepseekKey, setDeepseekKey] = useState("");
   const [tavilyKey, setTavilyKey] = useState("");
@@ -139,6 +141,7 @@ export function SettingsPanels({
   const [scriptPreference, setScriptPreference] = useState<ScriptPreference>(project.runtime_preferences.script_preference);
   const [pythonRuntime, setPythonRuntime] = useState(formatRuntimeLabel(project.runtime_preferences.python_runtime));
   const [rRuntime, setRRuntime] = useState(formatRuntimeLabel(project.runtime_preferences.r_runtime));
+  const [diagnosticInfo, setDiagnosticInfo] = useState<DiagnosticExportResponse | null>(null);
 
   const runtimeSummary = useMemo(() => {
     const script =
@@ -198,6 +201,17 @@ export function SettingsPanels({
       setStatus("项目运行时偏好已保存。");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "运行时偏好保存失败。");
+    }
+  }
+
+  async function exportDiagnostics() {
+    setStatus(null);
+    try {
+      const response = await exportDiagnosticsMutation.mutateAsync({ maxRuns: 8 });
+      setDiagnosticInfo(response);
+      setStatus("诊断包已生成。");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "诊断包导出失败。");
     }
   }
 
@@ -314,6 +328,33 @@ export function SettingsPanels({
           </button>
         </div>
         {status ? <div className="settings-status">{status}</div> : null}
+      </section>
+
+      <section className="settings-section">
+        <div className="settings-section-header">
+          <div>
+            <h3>Diagnostics</h3>
+            <p>导出脱敏诊断包，包含会话、最近运行日志、错误摘要和配置概览，方便协作者回传排查。</p>
+          </div>
+        </div>
+        <div className="settings-actions">
+          <button type="button" className="settings-button" onClick={exportDiagnostics} disabled={exportDiagnosticsMutation.isPending}>
+            {exportDiagnosticsMutation.isPending ? "正在导出…" : "导出诊断包"}
+          </button>
+          {diagnosticInfo ? (
+            <a className="settings-button secondary" href={diagnosticInfo.download_url}>
+              下载诊断包
+            </a>
+          ) : null}
+        </div>
+        {diagnosticInfo ? (
+          <div className="settings-kv-list">
+            <div><strong>导出时间</strong><span>{diagnosticInfo.created_at}</span></div>
+            <div><strong>包含 runs</strong><span>{diagnosticInfo.run_count}</span></div>
+            <div><strong>包含 sessions</strong><span>{diagnosticInfo.session_count}</span></div>
+            <div><strong>保存路径</strong><span>{diagnosticInfo.path}</span></div>
+          </div>
+        ) : null}
       </section>
 
       <LibrarySection

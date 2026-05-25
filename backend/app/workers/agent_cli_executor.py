@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -463,6 +464,7 @@ def _promote_candidate_manifest(*, run_dir: Path) -> list[str]:
             packet = json.loads(packet_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             packet = None
+    _sync_run_generated_scripts(run_dir=run_dir, packet=packet)
     if candidate_path.exists():
         errors = _manifest_validation_errors(candidate_path, packet=packet, project_root=run_dir.parent.parent)
         if errors:
@@ -473,6 +475,24 @@ def _promote_candidate_manifest(*, run_dir: Path) -> list[str]:
     if manifest_path.exists():
         return _manifest_validation_errors(manifest_path, packet=packet, project_root=run_dir.parent.parent)
     return [f"{candidate_path.name} is missing; manifest.json is missing."]
+
+
+def _sync_run_generated_scripts(*, run_dir: Path, packet: dict[str, Any] | None) -> None:
+    run_id = str((packet or {}).get("task_id") or run_dir.name).strip()
+    if not run_id:
+        return
+    source_root = run_dir / "scripts" / "generated" / run_id
+    if not source_root.exists():
+        return
+    project_root = run_dir.parent.parent
+    target_root = project_root / "scripts" / "generated" / run_id
+    for source in source_root.rglob("*"):
+        if not source.is_file():
+            continue
+        relative = source.relative_to(source_root)
+        target = target_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
 
 
 def _has_blocking_dependency_issue(run_dir: Path) -> bool:

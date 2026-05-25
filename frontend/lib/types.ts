@@ -414,6 +414,14 @@ export interface ReportExportResponse {
   html?: string;
 }
 
+export interface DiagnosticExportResponse {
+  path: string;
+  download_url: string;
+  created_at: string;
+  run_count: number;
+  session_count: number;
+}
+
 export interface ProjectSnapshot {
   summary: ProjectSummary;
   project: ProjectState;
