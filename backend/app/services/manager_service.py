@@ -18,6 +18,7 @@ from app.services.manager_patch_compiler import ManagerPatchCompiler
 from app.services.manager_planner import DeepSeekManagerPlanner, ManagerPlanDraft
 from app.services.manager_planner import ManagerPlanningError
 from app.services.manager_tools import ManagerToolLayer
+from app.services.library_registry_service import LibraryRegistryService
 from app.services.patch_validator import PatchValidator
 from app.services.project_service import ProjectService
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
@@ -36,6 +37,7 @@ class ManagerService:
         tool_layer: ManagerToolLayer | None = None,
         worker_service: WorkerService | None = None,
         runtime_dependency_job_service: RuntimeDependencyJobService | None = None,
+        library_registry_service: LibraryRegistryService | None = None,
     ) -> None:
         self.project_service = project_service
         self.planner = planner or DeepSeekManagerPlanner()
@@ -47,6 +49,7 @@ class ManagerService:
             project_service=self.project_service,
             worker_service=worker_service,
             runtime_dependency_job_service=runtime_dependency_job_service,
+            library_registry_service=library_registry_service,
         )
 
     def chat(self, project_id: str, request: ChatRequest) -> ChatResponse:

@@ -87,13 +87,12 @@ def main() -> int:
         output_path = project_root / output.path_hint
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
-            _content_for_output(output.type, output.label or output.role, output.role, packet),
+            _content_for_output(output.artifact_class, output.label or output.role, output.role, packet),
             encoding="utf-8",
         )
         created_assets.append(
             CreatedAsset(
                 role=output.role,
-                type=output.type,
                 path=str(output_path.relative_to(project_root)),
                 description=f"Synthetic output for {output.label or output.role}.",
             )
@@ -146,7 +145,7 @@ def main() -> int:
         metrics={"synthetic_score": 0.91, "asset_count": len(created_assets)},
         key_findings=["Generated representative downstream result set."],
         recommended_graph_updates=[
-            {"op": "create_asset", "asset_type": asset.type, "role": asset.role}
+            {"op": "create_asset", "asset_type": asset.artifact_class or "binary", "role": asset.role}
             for asset in created_assets
         ],
         warnings=[],

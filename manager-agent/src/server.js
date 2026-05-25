@@ -80,39 +80,53 @@ Core model:
 - The blueprint is represented by cards. A card is the editable unit of the blueprint.
 - Data assets are referenced by asset_id. Card outputs are expected/planned assets; later card inputs can reuse those asset_ids.
 - Card step is the timeline layer. A card must be later than the assets it consumes.
+- The DAG is already visible in the UI. Do not narrate the full graph back to the user unless they explicitly ask for a graph recap.
 
 Available capabilities:
-- get_project_context reads current cards, modules, assets, runs, and claims.
-- list_data_assets reads materialized assets, planned outputs, workspace paths, producer/consumer relations, and timeline steps.
+- inspect_project_summary reads a compact project summary with card ids/titles/status/steps, active runs, blockers, and asset counts.
+- find_cards searches cards by query, status, step, or asset_id.
+- find_assets searches materialized and planned assets by role, artifact_class, format, producer card, status, or query.
+- get_card_detail reads one card body, executor_context, inputs, outputs, and recent runs.
+- get_asset_detail reads one asset detail when file preview, script binding, or manifest-level diagnosis is needed.
+- plan_card_write validates a proposed create/update card payload before writing when step, asset_id, or output contracts are uncertain.
+- get_project_context reads the full project context. Use it only when compact inspect/find/detail tools are insufficient.
+- list_data_assets reads the full data asset timeline. Use it only when compact inspect/find/detail tools are insufficient.
 - list_project_memory reads short-lived-to-long-term project preferences and corrections. It is not the source of project execution facts.
 - write_project_memory stores only explicit user preferences and corrections, such as "remember this", "default to this", or "do not do this again".
 - create_card, update_card, and delete_card directly modify blueprint cards after backend validation.
-- configure_card_execution directly updates card execution permissions/runtime bindings such as tool_policy.rscript and tool_policy.network.
+- configure_card_execution directly updates card execution permissions, selected skills, MCP servers, and runtime bindings such as tool_policy.rscript and tool_policy.network.
 - install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime when a card reports missing runtime dependencies.
 - get_runtime_dependency_install_status checks whether a previously started dependency installation job has finished.
 - start_card_run, stop_card_run, rerun_card, and review_card_run control card execution directly when execution should happen now.
 - cleanup_run_history removes old finished run execution files/caches when they are no longer needed; by default it preserves runs that own valid accepted assets.
 - search_card_templates, save_card_template, and instantiate_card_template manage reusable manager-only card templates.
 - read_result_asset reads a whitelisted result asset preview by asset_id.
+- list_skill_library and list_mcp_library browse id/name-only inventories.
+- search_skill_library and search_mcp_library return id/name-only matches.
+- get_skill_library_item and get_mcp_library_item read one registry entry in more detail only when the name is not enough.
 ${webCapabilityLines.join("\n")}
 
 Judgment:
-- Decide whether current project context is needed. If exact card ids, asset ids, steps, or current blueprint state matter, inspect the project first.
-- For broad workflow additions, inspect data assets/timeline before choosing steps and asset_ids.
+- Decide whether current project context is needed. If exact card ids, asset ids, steps, or current blueprint state matter, use inspect_project_summary or find_* first.
+- For broad workflow additions, use inspect_project_summary and find_assets before choosing steps and asset_ids.
 - For plotting style, report style, recurring user preferences, or previously corrected behavior, read project memory when relevant.
 - Treat the blueprint/cards/assets/runs as the source of project execution facts. Do not write blueprint facts into project memory.
+- Treat skills and MCP servers as optional ids for card execution, not as always-on built-in powers. Use list/search only when a card clearly benefits from reusable abilities, and prefer attaching by obvious id/name without reading details.
 - For simple conceptual questions, answer without tools.
-- For blueprint/card changes, use card tools directly once you have enough context. Do not describe a change as complete unless a write tool succeeded.
+- For blueprint/card changes, use find_cards/get_card_detail for existing cards and find_assets for inputs. Use card write tools directly once you have enough context. Do not describe a change as complete unless a write tool succeeded.
 - If a write tool returns ok:false, use the message/retry_hint to correct arguments and retry when the correction is clear. If it is not clear, inspect context or ask a focused question.
 ${webJudgmentLines.join("\n")}
 - Write project memory only when the user explicitly asks you to remember a durable preference, says a behavior should be the default, or corrects something you should avoid in future. Keep memory summaries short.
 - Do not ask the user to approve executor runtime permissions in a card prompt. Card agents cannot ask the user interactively. If a card needs Rscript or network access, use configure_card_execution on that card before telling the user it is ready.
 - Card executor agents run in a constrained runtime. They must not install missing R or Python packages on their own. If runtime packages are missing and a specific non-system runtime is selected, you may use install_runtime_dependencies with explicit package names to start a background install job, then check it with get_runtime_dependency_install_status when needed. If that fails or the missing dependency is a system tool, tell the user exactly what dependency must be prepared.
+- Search the skill/MCP library only when a card clearly may benefit from reusable execution abilities. The list/search tools are intentionally id/name-only; read one item detail only if the id/name is ambiguous.
 - If a task looks like a stable repeated workflow, search_card_templates before creating a new analysis card from scratch.
 - When a template requires script assets, ask the user which project script assets to bind before instantiate_card_template or before starting the card. Do not make card agents ask the user for bindings.
 - For multi-step workflow creation, you may create multiple cards in one conversation. Re-check the timeline when useful.
+- Use plan_card_write before create_card/update_card when output contracts, asset ids, or step ordering are uncertain. Skip it for obvious small edits.
 - Reuse existing card ids when updating existing work. Create new ids only for genuinely new cards.
 - Do not use or mention blueprint proposal, blueprint review, or approval flows. Card tools are the source of truth for blueprint edits.
+- Do not restate the full DAG in chat; focus on the selected card, immediate blockers, and the next action.
 - Respect selected_context.script_preference when creating analysis cards. It is a soft script-language preference, not a hard constraint.
 - Respect selected_context.python_runtime and selected_context.r_runtime as preferred execution runtimes when planning or updating analysis cards.
 - If script_preference is auto and a new bioinformatics card could reasonably be implemented in either Python or R, ask the user which script style they prefer when that choice materially affects the workflow.
@@ -125,11 +139,36 @@ Card fields:
 - Common status values: planned, proposed, accepted, cancelled, failed, stale, superseded.
 - Useful fields: step, why, inputs, outputs, key_findings, manager_review, next_actions, linked_modules, linked_runs, linked_assets, progress_note.
 - executor_context may include instruction_blocks for soft execution guidance such as script-language preference. Prefer configure_card_execution for tool_policy/runtime permission changes.
-- Inputs and outputs are arrays shaped like { label, asset_id?, status? }.
+- Inputs are arrays shaped like { label, asset_id?, status? }.
+- Outputs must be explicit contract objects shaped like { role, label, artifact_class, accepted_formats?, preferred_format?, asset_id?, status?, required?, description? }.
 - Prefer status "planned" for future work, "cancelled" for dormant/deleted cards, and "accepted" only for completed accepted work.`;
 }
 
 const TOOL_STATUS_LABELS = {
+  inspect_project_summary: {
+    active: "正在概览项目",
+    done: "已概览项目",
+  },
+  find_cards: {
+    active: "正在查找卡片",
+    done: "已查找卡片",
+  },
+  find_assets: {
+    active: "正在查找资产",
+    done: "已查找资产",
+  },
+  get_card_detail: {
+    active: "正在读取卡片",
+    done: "已读取卡片",
+  },
+  get_asset_detail: {
+    active: "正在读取资产",
+    done: "已读取资产",
+  },
+  plan_card_write: {
+    active: "正在预检卡片",
+    done: "已预检卡片",
+  },
   get_project_context: {
     active: "正在查看蓝图",
     done: "已查看蓝图",
@@ -193,6 +232,30 @@ const TOOL_STATUS_LABELS = {
   read_result_asset: {
     active: "正在读取结果文件",
     done: "已读取结果文件",
+  },
+  list_skill_library: {
+    active: "正在查看技能库",
+    done: "已查看技能库",
+  },
+  search_skill_library: {
+    active: "正在搜索技能库",
+    done: "已搜索技能库",
+  },
+  get_skill_library_item: {
+    active: "正在查看技能详情",
+    done: "已查看技能详情",
+  },
+  list_mcp_library: {
+    active: "正在查看 MCP 库",
+    done: "已查看 MCP 库",
+  },
+  search_mcp_library: {
+    active: "正在搜索 MCP 库",
+    done: "已搜索 MCP 库",
+  },
+  get_mcp_library_item: {
+    active: "正在查看 MCP 详情",
+    done: "已查看 MCP 详情",
   },
   search_card_templates: {
     active: "正在查询模板",
@@ -282,6 +345,124 @@ function textResult(text, details = {}, terminate = false) {
   };
 }
 
+function compactToolTextPayload(toolName, payload) {
+  if (!payload || typeof payload !== "object") {
+    return payload;
+  }
+  if (toolName === "get_project_context") {
+    return {
+      project: payload.project
+        ? {
+            project_id: payload.project.project_id,
+            name: payload.project.name,
+            current_goal: payload.project.current_goal,
+          }
+        : undefined,
+      counts: {
+        cards: Array.isArray(payload.cards) ? payload.cards.length : 0,
+        modules: Array.isArray(payload.modules) ? payload.modules.length : 0,
+        assets: Array.isArray(payload.assets) ? payload.assets.length : 0,
+        runs: Array.isArray(payload.runs) ? payload.runs.length : 0,
+        claims: Array.isArray(payload.claims) ? payload.claims.length : 0,
+      },
+      hint: "Full payload is stored in tool details. Prefer inspect_project_summary/find_cards/find_assets for routine planning.",
+    };
+  }
+  if (toolName === "list_data_assets") {
+    return {
+      project_id: payload.project_id,
+      counts: {
+        assets: Array.isArray(payload.assets) ? payload.assets.length : 0,
+        cards: Array.isArray(payload.cards) ? payload.cards.length : 0,
+        materialized_assets: Array.isArray(payload.materialized_assets) ? payload.materialized_assets.length : 0,
+        planned_assets: Array.isArray(payload.planned_assets) ? payload.planned_assets.length : 0,
+      },
+      duplicate_output_assets: payload.timeline?.duplicate_output_assets ?? [],
+      cycle_card_ids: payload.timeline?.cycle_card_ids ?? [],
+      hint: "Full payload is stored in tool details. Prefer find_assets for choosing specific asset ids.",
+    };
+  }
+  if (["create_card", "update_card", "delete_card", "configure_card_execution"].includes(toolName)) {
+    return {
+      ok: payload.ok ?? true,
+      card_id: payload.card_id ?? payload.card?.card_id,
+      card: payload.card ? compactCardForText(payload.card) : undefined,
+      updated_card_ids: payload.updated_card_ids,
+      message: payload.message,
+    };
+  }
+  if (payload.asset || payload.preview) {
+    return {
+      asset: payload.asset
+        ? {
+            asset_id: payload.asset.asset_id,
+            title: payload.asset.title,
+            status: payload.asset.status,
+            asset_type: payload.asset.asset_type,
+            path: payload.asset.path,
+          }
+        : undefined,
+      preview: payload.preview
+        ? {
+            kind: payload.preview.kind,
+            size_bytes: payload.preview.size_bytes,
+            truncated: payload.preview.truncated,
+          }
+        : undefined,
+    };
+  }
+  return payload;
+}
+
+function compactCardForText(card) {
+  if (!card || typeof card !== "object") {
+    return card;
+  }
+  return {
+    card_id: card.card_id,
+    title: card.title,
+    status: card.status,
+    card_type: card.card_type,
+    step: card.step,
+    summary: card.summary,
+    progress_note: card.progress_note,
+    inputs: Array.isArray(card.inputs)
+      ? card.inputs.map((item) => ({ label: item.label, asset_id: item.asset_id, status: item.status }))
+      : undefined,
+    outputs: Array.isArray(card.outputs)
+      ? card.outputs.map((item) => ({
+          role: item.role,
+          label: item.label,
+          artifact_class: item.artifact_class,
+          asset_id: item.asset_id,
+          status: item.status,
+        }))
+      : undefined,
+  };
+}
+
+function truncateText(value, maxLength = 180) {
+  if (typeof value !== "string") {
+    return value;
+  }
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length <= maxLength) {
+    return compact;
+  }
+  return `${compact.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function compactItems(items, mapItem, limit = 5) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+  return items.slice(0, Math.max(1, limit)).map((item) => mapItem(item));
+}
+
+function toolTextResult(toolName, payload, terminate = false) {
+  return textResult(JSON.stringify(compactToolTextPayload(toolName, payload), null, 2), payload, terminate);
+}
+
 function toolErrorResult(error, context = {}) {
   const message = error instanceof Error ? error.message : String(error);
   const payload = {
@@ -304,7 +485,7 @@ function retryHintForToolError(message) {
     return "Increase the card step to the minimum required by the error, then retry the same write tool.";
   }
   if (/input asset .*missing|asset_id/i.test(message)) {
-    return "Call list_data_assets to find the correct asset_id, or create an upstream card output first.";
+    return "Call find_assets to find the correct asset_id, or create an upstream card output first.";
   }
   if (/duplicate card_id/i.test(message)) {
     return "Use update_card for the existing card, or choose a new card_id for genuinely new work.";
@@ -313,7 +494,7 @@ function retryHintForToolError(message) {
     return "Reuse the existing planned asset_id as an input, or choose a distinct output asset_id.";
   }
   if (/card not found/i.test(message)) {
-    return "Call get_project_context to find the current card_id before retrying.";
+    return "Call find_cards to locate the card_id, then get_card_detail before retrying.";
   }
   if (/title is required|summary is required|required/i.test(message)) {
     return "Fill the required card fields and retry.";
@@ -383,6 +564,41 @@ function summarizeToolPayload(toolName, payload) {
   if (!payload || typeof payload !== "object") {
     return {};
   }
+  if (toolName === "inspect_project_summary") {
+    return {
+      cards: payload.counts?.cards,
+      materialized_assets: payload.counts?.materialized_assets,
+      planned_assets: payload.counts?.planned_assets,
+      blockers: payload.counts?.blockers,
+    };
+  }
+  if (toolName === "find_cards" || toolName === "find_assets") {
+    return {
+      items: Array.isArray(payload.items) ? payload.items.length : undefined,
+      total: payload.total,
+    };
+  }
+  if (toolName === "get_card_detail") {
+    return {
+      card_id: payload.card?.card_id,
+      status: payload.card?.status,
+      runs: Array.isArray(payload.runs) ? payload.runs.length : undefined,
+    };
+  }
+  if (toolName === "get_asset_detail") {
+    return {
+      asset_id: payload.asset?.asset_id,
+      preview_kind: payload.preview?.kind,
+    };
+  }
+  if (toolName === "plan_card_write") {
+    return {
+      ok: payload.ok,
+      card_id: payload.card?.card_id,
+      errors: Array.isArray(payload.errors) ? payload.errors.length : undefined,
+      recommended_step: payload.recommended_step,
+    };
+  }
   if (toolName === "get_project_context") {
     return {
       cards: Array.isArray(payload.cards) ? payload.cards.length : undefined,
@@ -400,12 +616,23 @@ function summarizeToolPayload(toolName, payload) {
   if (toolName === "list_project_memory") {
     return {
       memory_items: Array.isArray(payload.items) ? payload.items.length : undefined,
+      items: compactItems(payload.items, (item) => ({
+        memory_id: item.memory_id,
+        kind: item.kind,
+        summary: truncateText(item.summary, 160),
+      })),
     };
   }
   if (toolName === "write_project_memory") {
     return {
-      memory_id: payload.memory?.memory_id,
-      memory_kind: payload.memory?.kind,
+      ok: true,
+      memory: payload.memory
+        ? {
+            memory_id: payload.memory.memory_id,
+            kind: payload.memory.kind,
+            summary: truncateText(payload.memory.summary, 160),
+          }
+        : undefined,
       items_count: payload.items_count,
     };
   }
@@ -414,25 +641,33 @@ function summarizeToolPayload(toolName, payload) {
       job_id: payload.job_id,
       status: payload.status,
       runtime: payload.runtime,
-      packages: Array.isArray(payload.packages) ? payload.packages.length : undefined,
+      package_count: Array.isArray(payload.packages) ? payload.packages.length : undefined,
+      packages: compactItems(payload.packages, (item) => item, 5),
       background: payload.background,
       ok: payload.ok,
+      message: truncateText(payload.message, 180),
     };
   }
   if (toolName === "start_card_run" || toolName === "rerun_card") {
     return {
+      ok: payload.ok,
       run_id: payload.run_id,
       card_id: payload.card_id,
       status: payload.status,
       can_start: payload.can_start,
+      block_reasons: compactItems(payload.block_reasons, (item) => item, 4),
+      message: truncateText(payload.message, 180),
     };
   }
   if (toolName === "stop_card_run" || toolName === "review_card_run") {
     return {
+      ok: payload.ok,
       run_id: payload.run_id,
+      card_id: payload.card_id,
       status: payload.status,
       accepted: payload.accepted,
       stopped: payload.stopped,
+      message: truncateText(payload.message, 180),
     };
   }
   if (toolName === "cleanup_run_history") {
@@ -441,24 +676,110 @@ function summarizeToolPayload(toolName, payload) {
       skipped_count: payload.skipped_count,
       dry_run: payload.dry_run,
       ok: payload.ok,
+      cleaned: compactItems(payload.cleaned, (item) => ({
+        run_id: item.run_id,
+        card_id: item.card_id,
+        status: item.status,
+      })),
+      skipped: compactItems(payload.skipped, (item) => ({
+        run_id: item.run_id,
+        card_id: item.card_id,
+        status: item.status,
+        reason: truncateText(item.reason, 100),
+      })),
+      message: truncateText(payload.message, 180),
     };
   }
   if (toolName === "search_card_templates") {
     return {
       templates: Array.isArray(payload.items) ? payload.items.length : undefined,
       total: payload.total,
+      items: compactItems(payload.items, (item) => ({
+        template_id: item.template_id,
+        title: item.title,
+        card_type: item.card_type,
+        score: item.score,
+        tags: Array.isArray(item.tags) ? item.tags.slice(0, 4) : [],
+      })),
+    };
+  }
+  if (
+    toolName === "list_skill_library" ||
+    toolName === "list_mcp_library" ||
+    toolName === "search_skill_library" ||
+    toolName === "search_mcp_library"
+  ) {
+    return {
+      items: Array.isArray(payload.items) ? payload.items.length : undefined,
+      entries: compactItems(payload.items, (item) => ({
+        id: item.id,
+        name: item.name,
+        enabled: item.enabled,
+        score: item.score,
+      })),
+    };
+  }
+  if (toolName === "get_skill_library_item" || toolName === "get_mcp_library_item") {
+    return {
+      kind: payload.kind,
+      item: payload.item
+        ? {
+            id: payload.item.id,
+            name: payload.item.name,
+            enabled: payload.item.enabled,
+            summary_short: truncateText(payload.item.summary_short, 180),
+            supported_runtimes: Array.isArray(payload.item.supported_runtimes) ? payload.item.supported_runtimes.slice(0, 5) : [],
+          }
+        : undefined,
     };
   }
   if (toolName === "save_card_template") {
     return {
-      template_id: payload.template?.template_id,
-      card_type: payload.template?.card_type,
+      ok: payload.ok,
+      template: payload.template
+        ? {
+            template_id: payload.template.template_id,
+            title: payload.template.title,
+            card_type: payload.template.card_type,
+            source_card_id: payload.template.source_card_id,
+          }
+        : undefined,
     };
   }
   if (toolName === "instantiate_card_template") {
     return {
-      card_id: payload.card?.card_id,
-      card_status: payload.card?.status,
+      ok: payload.ok ?? true,
+      template_id: payload.template_id,
+      card: payload.card ? compactCardForText(payload.card) : undefined,
+    };
+  }
+  if (toolName === "web_search") {
+    return {
+      answer: truncateText(payload.answer || payload.summary, 280),
+      results: compactItems(
+        payload.results,
+        (item) => ({
+          title: truncateText(item.title, 120),
+          url: item.url,
+          score: item.score,
+          snippet: truncateText(item.content || item.snippet, 180),
+        }),
+        4,
+      ),
+    };
+  }
+  if (toolName === "web_extract") {
+    return {
+      results: compactItems(
+        payload.results,
+        (item) => ({
+          url: item.url,
+          title: truncateText(item.title, 120),
+          excerpt: truncateText(item.raw_content || item.content, 220),
+        }),
+        3,
+      ),
+      failed_results: Array.isArray(payload.failed_results) ? payload.failed_results.length : undefined,
     };
   }
   if (toolName === "create_card" || toolName === "update_card" || toolName === "delete_card") {
@@ -547,9 +868,154 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
   const { project_id: projectId, backend_api_base_url: baseUrl, internal_tool_token: token } = request;
   const tools = [
     {
+      name: "inspect_project_summary",
+      label: "Inspect project summary",
+      description: "Read compact project status: card ids/titles/status/steps, active runs, blockers, and asset counts. Prefer this before full project context.",
+      parameters: Type.Object({}),
+      execute: async (toolCallId, _params, signal) => {
+        const payload = await callLoggedTool(
+          "inspect_project_summary",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/inspect`,
+          {},
+          signal,
+        );
+        return toolTextResult("inspect_project_summary", payload);
+      },
+    },
+    {
+      name: "find_cards",
+      label: "Find cards",
+      description: "Find cards by query, status, step, or asset_id. Use when updating a named/selected analysis card without reading the full graph.",
+      parameters: Type.Object({
+        query: Type.Optional(Type.String()),
+        status: Type.Optional(Type.String()),
+        step: Type.Optional(Type.Number()),
+        asset_id: Type.Optional(Type.String()),
+        limit: Type.Optional(Type.Number()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        const payload = await callLoggedTool(
+          "find_cards",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/cards/find`,
+          {
+            method: "POST",
+            body: params,
+          },
+          signal,
+        );
+        return toolTextResult("find_cards", payload);
+      },
+    },
+    {
+      name: "find_assets",
+      label: "Find assets",
+      description: "Find materialized or planned assets by role, artifact_class, format, producer_card_id, status, or query. Use before choosing input/output asset ids.",
+      parameters: Type.Object({
+        query: Type.Optional(Type.String()),
+        role: Type.Optional(Type.String()),
+        artifact_class: Type.Optional(Type.String()),
+        format: Type.Optional(Type.String()),
+        producer_card_id: Type.Optional(Type.String()),
+        status: Type.Optional(Type.String()),
+        limit: Type.Optional(Type.Number()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        const payload = await callLoggedTool(
+          "find_assets",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/assets/find`,
+          {
+            method: "POST",
+            body: params,
+          },
+          signal,
+        );
+        return toolTextResult("find_assets", payload);
+      },
+    },
+    {
+      name: "get_card_detail",
+      label: "Get card detail",
+      description: "Read one card body with inputs, outputs, executor_context, instruction blocks, and recent runs. Use before precise update_card edits.",
+      parameters: Type.Object({
+        card_id: Type.String(),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        const payload = await callLoggedTool(
+          "get_card_detail",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/cards/${encodeURIComponent(params.card_id)}/detail`,
+          {},
+          signal,
+        );
+        return toolTextResult("get_card_detail", payload);
+      },
+    },
+    {
+      name: "get_asset_detail",
+      label: "Get asset detail",
+      description: "Read one asset detail/preview by exact asset_id. Use for script binding, result preview, or manifest-level diagnosis.",
+      parameters: Type.Object({
+        asset_id: Type.String(),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        const payload = await callLoggedTool(
+          "get_asset_detail",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/assets/${encodeURIComponent(params.asset_id)}/detail`,
+          {},
+          signal,
+        );
+        return toolTextResult("get_asset_detail", payload);
+      },
+    },
+    {
+      name: "plan_card_write",
+      label: "Plan card write",
+      description: "Validate a proposed create/update card payload without writing. Use when step ordering, asset ids, or output contracts are uncertain.",
+      parameters: Type.Object({
+        action: Type.Optional(Type.String({ description: "create or update" })),
+        card_id: Type.Optional(Type.String()),
+        card: Type.Record(Type.String(), Type.Any()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        const payload = await callLoggedTool(
+          "plan_card_write",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/cards/plan-write`,
+          {
+            method: "POST",
+            body: params,
+          },
+          signal,
+        );
+        return toolTextResult("plan_card_write", payload);
+      },
+    },
+    {
       name: "get_project_context",
       label: "Read project context",
-      description: "Read the current Blueprint project. The blueprint is represented by cards. Returns cards, modules, materialized assets, runs, and claims. Use when current ids or state matter.",
+      description: "Read the full Blueprint project. This is large; use inspect_project_summary, find_cards, find_assets, or get_card_detail first unless full graph data is required.",
       parameters: Type.Object({}),
       execute: async (toolCallId, _params, signal) => {
         const payload = await callLoggedTool(
@@ -562,13 +1028,13 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           {},
           signal,
         );
-        return textResult(JSON.stringify(payload, null, 2), payload);
+        return toolTextResult("get_project_context", payload);
       },
     },
     {
       name: "list_data_assets",
       label: "Read data assets timeline",
-      description: "Read materialized assets, planned card outputs, card timeline, producer/consumer relations, and workspace path mapping. Use when choosing input asset_ids, output asset_ids, file ids, or card step layers.",
+      description: "Read the full data asset timeline. This is large; use find_assets first unless full timeline data is required.",
       parameters: Type.Object({}),
       execute: async (toolCallId, _params, signal) => {
         const payload = await callLoggedTool(
@@ -581,7 +1047,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           {},
           signal,
         );
-        return textResult(JSON.stringify(payload, null, 2), payload);
+        return toolTextResult("list_data_assets", payload);
       },
     },
     {
@@ -608,7 +1074,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify(payload, null, 2), payload);
+          return toolTextResult("list_project_memory", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "list_project_memory_failed", tool_name: "list_project_memory" });
         }
@@ -640,7 +1106,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify({ ok: true, ...payload }, null, 2), { ok: true, ...payload });
+          return toolTextResult("write_project_memory", { ok: true, ...payload });
         } catch (error) {
           return toolErrorResult(error, { error_type: "write_project_memory_failed", tool_name: "write_project_memory" });
         }
@@ -649,7 +1115,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "create_card",
       label: "Create card",
-      description: "Create a new blueprint card directly. A card is a blueprint unit. Use inputs[].asset_id and outputs[].asset_id to connect the DAG; use step to place it in the timeline. Backend validation returns ok:false with retry hints when arguments need correction.",
+      description: "Create a new blueprint card directly. A card is a blueprint unit. Use inputs[].asset_id and outputs[].asset_id to connect the DAG; use step to place it in the timeline. outputs[] must be explicit output contracts, not only labels. Backend validation returns ok:false with retry hints when arguments need correction.",
       parameters: Type.Object({
         card_id: Type.String(),
         card_type: Type.String({ description: "Usually module or module_group." }),
@@ -658,8 +1124,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
         step: Type.Optional(Type.Number()),
         summary: Type.String(),
         why: Type.Optional(Type.String()),
-        inputs: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()), { description: "Array of { label, asset_id?, status? }. Use exact asset_id values from list_data_assets when known." })),
-        outputs: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()), { description: "Array of { label, asset_id?, status? }. These are expected/planned assets for downstream cards." })),
+        inputs: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()), { description: "Array of { label, asset_id?, status? }. Use exact asset_id values from find_assets when known." })),
+        outputs: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()), { description: "Array of explicit output contracts: { role, label, artifact_class, accepted_formats?, preferred_format?, asset_id?, status?, required?, description? }. artifact_class is required. accepted_formats is optional and may contain multiple formats." })),
         key_findings: Type.Optional(Type.Array(Type.String())),
         manager_review: Type.Optional(Type.String()),
         next_actions: Type.Optional(Type.Array(Type.String())),
@@ -684,7 +1150,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify({ ok: true, ...payload }, null, 2), { ok: true, ...payload });
+          return toolTextResult("create_card", { ok: true, ...payload });
         } catch (error) {
           return toolErrorResult(error, { error_type: "create_card_failed", tool_name: "create_card" });
         }
@@ -693,7 +1159,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "update_card",
       label: "Update card",
-      description: "Update an existing blueprint card directly. Use this for modifying blueprint content, status, step, inputs, outputs, or linked assets. Backend validation returns ok:false with retry hints when arguments need correction.",
+      description: "Update an existing blueprint card directly. Use this for modifying blueprint content, status, step, inputs, outputs, or linked assets. outputs[] must stay as explicit output contracts rather than label-only refs. Backend validation returns ok:false with retry hints when arguments need correction.",
       parameters: Type.Object({
         card_id: Type.String(),
         card_type: Type.Optional(Type.String({ description: "Usually module or module_group." })),
@@ -729,7 +1195,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify({ ok: true, ...payload }, null, 2), { ok: true, ...payload });
+          return toolTextResult("update_card", { ok: true, ...payload });
         } catch (error) {
           return toolErrorResult(error, { error_type: "update_card_failed", tool_name: "update_card" });
         }
@@ -738,7 +1204,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "delete_card",
       label: "Delete card",
-      description: "Cancel a blueprint card by exact card_id. This marks the card as cancelled instead of deleting historical records. Use get_project_context first if the exact card_id is uncertain.",
+      description: "Cancel a blueprint card by exact card_id. This marks the card as cancelled instead of deleting historical records. Use find_cards first if the exact card_id is uncertain.",
       parameters: Type.Object({
         card_id: Type.String(),
         reason: Type.Optional(Type.String()),
@@ -760,7 +1226,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify({ ok: true, ...payload }, null, 2), { ok: true, ...payload });
+          return toolTextResult("delete_card", { ok: true, ...payload });
         } catch (error) {
           return toolErrorResult(error, { error_type: "delete_card_failed", tool_name: "delete_card" });
         }
@@ -769,10 +1235,12 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "configure_card_execution",
       label: "Configure card execution",
-      description: "Update execution permissions and runtime bindings for one or more cards. Use this when cards need Rscript, network access, selected runtimes, or non-interactive permission policy changes. This merges into existing executor_context without rewriting the whole card.",
+      description: "Update execution permissions, selected skills, MCP servers, and runtime bindings for one or more cards. Use this when cards need Rscript, network access, selected runtimes, or non-interactive permission policy changes. This merges into existing executor_context without rewriting the whole card.",
       parameters: Type.Object({
         card_id: Type.Optional(Type.String()),
         card_ids: Type.Optional(Type.Array(Type.String())),
+        skills: Type.Optional(Type.Array(Type.String())),
+        mcp_servers: Type.Optional(Type.Array(Type.String())),
         tool_policy: Type.Optional(
           Type.Object({
             network: Type.Optional(Type.String({ description: "allow, deny, or prompt. Use allow when the card agent must access model APIs or download databases without asking the user." })),
@@ -808,7 +1276,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify({ ok: true, ...payload }, null, 2), { ok: true, ...payload });
+          return toolTextResult("configure_card_execution", { ok: true, ...payload });
         } catch (error) {
           return toolErrorResult(error, { error_type: "configure_card_execution_failed", tool_name: "configure_card_execution" });
         }
@@ -840,7 +1308,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify(payload, null, 2), payload);
+          return toolTextResult("install_runtime_dependencies", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "install_runtime_dependencies_failed", tool_name: "install_runtime_dependencies" });
         }
@@ -867,7 +1335,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify(payload, null, 2), payload);
+          return toolTextResult("get_runtime_dependency_install_status", payload);
         } catch (error) {
           return toolErrorResult(error, {
             error_type: "get_runtime_dependency_install_status_failed",
@@ -901,7 +1369,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify(payload, null, 2), payload);
+          return toolTextResult("start_card_run", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "start_card_run_failed", tool_name: "start_card_run" });
         }
@@ -931,7 +1399,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify(payload, null, 2), payload);
+          return toolTextResult("stop_card_run", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "stop_card_run_failed", tool_name: "stop_card_run" });
         }
@@ -962,7 +1430,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify(payload, null, 2), payload);
+          return toolTextResult("rerun_card", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "rerun_card_failed", tool_name: "rerun_card" });
         }
@@ -992,7 +1460,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify(payload, null, 2), payload);
+          return toolTextResult("review_card_run", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "review_card_run_failed", tool_name: "review_card_run" });
         }
@@ -1026,7 +1494,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify(payload, null, 2), payload);
+          return toolTextResult("cleanup_run_history", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "cleanup_run_history_failed", tool_name: "cleanup_run_history" });
         }
@@ -1057,7 +1525,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify(payload, null, 2), payload);
+          return toolTextResult("search_card_templates", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "search_card_templates_failed", tool_name: "search_card_templates" });
         }
@@ -1088,7 +1556,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify(payload, null, 2), payload);
+          return toolTextResult("save_card_template", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "save_card_template_failed", tool_name: "save_card_template" });
         }
@@ -1130,7 +1598,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             },
             signal,
           );
-          return textResult(JSON.stringify({ ok: true, ...payload }, null, 2), { ok: true, ...payload });
+          return toolTextResult("instantiate_card_template", { ok: true, ...payload });
         } catch (error) {
           return toolErrorResult(error, { error_type: "instantiate_card_template_failed", tool_name: "instantiate_card_template" });
         }
@@ -1154,7 +1622,141 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           {},
           signal,
         );
-        return textResult(JSON.stringify(payload, null, 2), payload);
+        return toolTextResult("read_result_asset", payload);
+      },
+    },
+    {
+      name: "list_skill_library",
+      label: "List skill library",
+      description: "Read installed skill ids and names only. Use this for cheap discovery before attaching an obvious skill id to a card.",
+      parameters: Type.Object({}),
+      execute: async (toolCallId, _params, signal) => {
+        const payload = await callLoggedTool(
+          "list_skill_library",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/skill-library`,
+          {},
+          signal,
+        );
+        return toolTextResult("list_skill_library", payload);
+      },
+    },
+    {
+      name: "search_skill_library",
+      label: "Search skill library",
+      description: "Search the skill library and return id/name-only matches. Use this only when a card clearly needs reusable skills.",
+      parameters: Type.Object({
+        query: Type.String(),
+        runtime: Type.Optional(Type.String()),
+        tags: Type.Optional(Type.Array(Type.String())),
+        top_k: Type.Optional(Type.Number()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        const payload = await callLoggedTool(
+          "search_skill_library",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/skill-library/search`,
+          {
+            method: "POST",
+            body: params,
+          },
+          signal,
+        );
+        return toolTextResult("search_skill_library", payload);
+      },
+    },
+    {
+      name: "get_skill_library_item",
+      label: "Get skill details",
+      description: "Read one skill library item with summary and compatibility details. Use only when id/name-only search is ambiguous.",
+      parameters: Type.Object({
+        skill_id: Type.String(),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        const payload = await callLoggedTool(
+          "get_skill_library_item",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/skill-library/${encodeURIComponent(params.skill_id)}`,
+          {},
+          signal,
+        );
+        return toolTextResult("get_skill_library_item", payload);
+      },
+    },
+    {
+      name: "list_mcp_library",
+      label: "List MCP library",
+      description: "Read MCP server ids and names only. Use this for cheap discovery before attaching an obvious MCP id to a card.",
+      parameters: Type.Object({}),
+      execute: async (toolCallId, _params, signal) => {
+        const payload = await callLoggedTool(
+          "list_mcp_library",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/mcp-library`,
+          {},
+          signal,
+        );
+        return toolTextResult("list_mcp_library", payload);
+      },
+    },
+    {
+      name: "search_mcp_library",
+      label: "Search MCP library",
+      description: "Search the MCP library and return id/name-only matches. Use only when a card clearly needs runtime tool providers beyond plain prompts.",
+      parameters: Type.Object({
+        query: Type.String(),
+        runtime: Type.Optional(Type.String()),
+        tags: Type.Optional(Type.Array(Type.String())),
+        top_k: Type.Optional(Type.Number()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        const payload = await callLoggedTool(
+          "search_mcp_library",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/mcp-library/search`,
+          {
+            method: "POST",
+            body: params,
+          },
+          signal,
+        );
+        return toolTextResult("search_mcp_library", payload);
+      },
+    },
+    {
+      name: "get_mcp_library_item",
+      label: "Get MCP details",
+      description: "Read one MCP library item with summary, supported runtimes, compatibility notes, and launch hint. Use only when id/name-only search is ambiguous.",
+      parameters: Type.Object({
+        entry_id: Type.String(),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        const payload = await callLoggedTool(
+          "get_mcp_library_item",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/mcp-library/${encodeURIComponent(params.entry_id)}`,
+          {},
+          signal,
+        );
+        return toolTextResult("get_mcp_library_item", payload);
       },
     },
   ];
@@ -1185,7 +1787,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             signal,
             runtimeConfig,
           );
-          return textResult(JSON.stringify(payload, null, 2), payload);
+          return toolTextResult("web_search", payload);
         },
       },
       {
@@ -1208,7 +1810,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             signal,
             runtimeConfig,
           );
-          return textResult(JSON.stringify(payload, null, 2), payload);
+          return toolTextResult("web_extract", payload);
         },
       },
     );
@@ -1538,6 +2140,7 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
   let streamedText = "";
   const thinkingBlocks = new Map();
   const thinkingStartedAt = new Map();
+  const completedThinkingBlocks = new Set();
   let assistantTurnIndex = -1;
   let currentAssistantTurnIndex = -1;
   let lastEmitAt = Date.now();
@@ -1625,6 +2228,7 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
             ? assistantEvent.content
             : thinkingBlocks.get(blockKey) || "";
         thinkingBlocks.set(blockKey, finalizedThinking);
+        completedThinkingBlocks.add(blockKey);
         const endedAt = Date.now();
         emit({
           type: "thinking_end",
@@ -1765,6 +2369,21 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     if (heartbeatId) {
       clearInterval(heartbeatId);
     }
+  }
+  for (const [blockKey, content] of thinkingBlocks.entries()) {
+    if (completedThinkingBlocks.has(blockKey)) {
+      continue;
+    }
+    const [turnIndexRaw, contentIndexRaw] = blockKey.split(":");
+    emit({
+      type: "thinking_end",
+      content: content || "",
+      content_index: Number(contentIndexRaw),
+      assistant_turn_index: Number(turnIndexRaw),
+      started_at: thinkingStartedAt.get(blockKey),
+      ended_at: Date.now(),
+    });
+    completedThinkingBlocks.add(blockKey);
   }
   const thinking = collectThinking(thinkingBlocks) || undefined;
   const text = streamedText.trim() || extractText(finalAssistantMessage).trim();

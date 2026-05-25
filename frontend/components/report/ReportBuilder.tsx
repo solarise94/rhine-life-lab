@@ -1,21 +1,25 @@
 "use client";
-
 import { ArrowDown, ArrowUp, FileText, Layers } from "lucide-react";
-import { ReportSection } from "@/lib/types";
+import { ReportExportResponse, ReportSection } from "@/lib/types";
 
 export function ReportBuilder({
   sections,
   onMove,
   onExport,
+  exportInfo,
   selectedSectionId,
   onSelect,
 }: {
   sections: ReportSection[];
   onMove: (itemId: string, direction: "up" | "down") => Promise<void>;
   onExport: () => Promise<void>;
+  exportInfo?: ReportExportResponse | null;
   selectedSectionId?: string;
   onSelect: (itemId: string) => void;
 }) {
+  const exportPath = exportInfo?.path ?? null;
+  const exportUrl = exportInfo?.content_url ?? null;
+  const exportReady = Boolean(exportPath && exportUrl);
   return (
     <section className="panel">
       <div className="panel-header">
@@ -25,12 +29,51 @@ export function ReportBuilder({
         </h3>
         <div className="proposal-actions">
           <span style={{ color: "var(--muted)", fontSize: 12 }}>{sections.length} sections</span>
-          <button className="btn success" onClick={onExport}>
+          <button type="button" className="btn success" onClick={onExport}>
             <FileText size={14} />
             导出 HTML
           </button>
+          <button
+            type="button"
+            className="btn secondary"
+            disabled={!exportReady}
+            onClick={() => {
+              if (!exportUrl) return;
+              window.open(exportUrl, "_blank", "noopener,noreferrer");
+            }}
+          >
+            打开
+          </button>
+          <button
+            type="button"
+            className="btn secondary"
+            disabled={!exportReady}
+            onClick={() => {
+              if (!exportUrl) return;
+              const link = document.createElement("a");
+              link.href = exportUrl;
+              link.download = "report.html";
+              document.body.appendChild(link);
+              link.click();
+              link.remove();
+            }}
+          >
+            下载
+          </button>
+          <button
+            type="button"
+            className="btn secondary"
+            disabled={!exportPath}
+            onClick={async () => {
+              if (!exportPath) return;
+              await navigator.clipboard.writeText(exportPath);
+            }}
+          >
+            复制路径
+          </button>
         </div>
       </div>
+      {exportPath ? <div style={{ padding: "0 16px 10px", color: "var(--muted)", fontSize: 12 }}>导出路径：{exportPath}</div> : null}
       <div className="panel-body">
         <div className="deck-container" style={{ gridTemplateColumns: "1fr", gap: 10 }}>
           {sections.length ? (

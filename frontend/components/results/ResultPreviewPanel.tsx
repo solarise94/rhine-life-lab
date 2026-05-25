@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { ChevronDown, ChevronUp, Download, Link2, MessageSquareText, X } from "lucide-react";
+import { X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AssetDetail } from "@/lib/types";
@@ -13,8 +12,6 @@ export function ResultPreviewPanel({
   loading = false,
   error,
   onClose,
-  onSendToManager,
-  onExplain,
 }: {
   detail?: AssetDetail;
   title?: string;
@@ -22,18 +19,12 @@ export function ResultPreviewPanel({
   loading?: boolean;
   error?: string;
   onClose?: () => void;
-  onSendToManager?: (detail: AssetDetail) => void;
-  onExplain?: (detail: AssetDetail) => void;
 }) {
-  const [showTech, setShowTech] = useState(false);
-
-  useEffect(() => {
-    setShowTech(false);
-  }, [detail?.asset.asset_id]);
+  const emptyPanelClassName = mode === "drawer" ? "artifact-preview-drawer-panel artifact-preview-drawer-panel-empty" : "panel";
 
   if (!detail) {
     return (
-      <section className={mode === "drawer" ? "artifact-preview-drawer-panel" : "panel"}>
+      <section className={emptyPanelClassName}>
         <div className="panel-header">
           <h3>{title}</h3>
           <div className="artifact-preview-header-meta">
@@ -55,12 +46,23 @@ export function ResultPreviewPanel({
   }
 
   const { asset, preview } = detail;
+  const panelClassName =
+    mode === "drawer"
+      ? `artifact-preview-drawer-panel artifact-preview-drawer-panel-${preview.kind}`
+      : "panel";
   return (
-    <section className={mode === "drawer" ? "artifact-preview-drawer-panel" : "panel"}>
+    <section
+      className={panelClassName}
+      onClick={(event) => {
+        if (mode === "drawer") {
+          event.stopPropagation();
+        }
+      }}
+    >
       <div className="panel-header">
         <h3>{asset.title}</h3>
         <div className="artifact-preview-header-meta">
-          <span>{preview.kind}</span>
+          <span>{asset.asset_type}</span>
           {onClose ? (
             <button type="button" className="artifact-preview-close" onClick={onClose} aria-label="关闭预览">
               <X size={14} />
@@ -69,50 +71,12 @@ export function ResultPreviewPanel({
         </div>
       </div>
       <div className="panel-body stack">
-        <div className="proposal-actions" style={{ marginTop: 0 }}>
-          {onSendToManager ? (
-            <button type="button" className="btn secondary" onClick={() => onSendToManager(detail)}>
-              <Link2 size={14} />
-              发送给 Manager
-            </button>
-          ) : null}
-          {onExplain ? (
-            <button type="button" className="btn secondary" onClick={() => onExplain(detail)}>
-              <MessageSquareText size={14} />
-              解释这个结果
-            </button>
-          ) : null}
-          {preview.content_url ? (
-            <a href={preview.content_url} target="_blank" rel="noreferrer" className="btn secondary">
-              <Download size={14} />
-              下载原文件
-            </a>
-          ) : null}
+        <div className="artifact-preview-summary">
+          <span>{preview.kind}</span>
+          {preview.size_bytes ? <span>{formatPreviewSize(preview.size_bytes)}</span> : null}
         </div>
-        <div
-          className="meta-block"
-          style={{ cursor: "pointer" }}
-          onClick={() => setShowTech(!showTech)}
-        >
-          <h4 style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}>
-            {showTech ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-            技术详情
-          </h4>
-        </div>
-        {showTech ? (
-          <div className="meta-block">
-            <div className="kv" style={{ fontSize: 12, color: "var(--muted)" }}>
-              <div>ID: {asset.asset_id}</div>
-              <div>Type: {asset.asset_type}</div>
-              <div>Status: {asset.status}</div>
-              <div>Path: {asset.path}</div>
-              <div>Size: {preview.size_bytes ?? 0} bytes</div>
-            </div>
-          </div>
-        ) : null}
         {preview.kind === "markdown" && preview.text ? (
           <div className="meta-block">
-            <h4>Markdown Preview</h4>
             <div className="manager-markdown">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{preview.text}</ReactMarkdown>
             </div>
@@ -120,13 +84,11 @@ export function ResultPreviewPanel({
         ) : null}
         {preview.kind === "text" ? (
           <div className="meta-block">
-            <h4>Text Preview</h4>
             <pre className="code-block">{preview.text}</pre>
           </div>
         ) : null}
         {preview.kind === "table" && preview.table ? (
           <div className="meta-block">
-            <h4>Table Preview</h4>
             <div className="table-preview">
               <table>
                 <thead>
@@ -151,14 +113,12 @@ export function ResultPreviewPanel({
         ) : null}
         {preview.kind === "image" && preview.content_url ? (
           <div className="meta-block">
-            <h4>Image Preview</h4>
             <img className="preview-image" src={preview.content_url} alt={asset.title} />
           </div>
         ) : null}
         {preview.kind === "binary" && preview.content_url ? (
           <div className="meta-block">
-            <h4>Binary Asset</h4>
-            <a href={preview.content_url} target="_blank" rel="noreferrer" className="btn secondary">
+            <a href={preview.content_url} target="_blank" rel="noreferrer" className="artifact-preview-open-link">
               打开原始文件
             </a>
           </div>
@@ -166,4 +126,14 @@ export function ResultPreviewPanel({
       </div>
     </section>
   );
+}
+
+function formatPreviewSize(sizeBytes: number) {
+  if (sizeBytes < 1024) {
+    return `${sizeBytes} B`;
+  }
+  if (sizeBytes < 1024 * 1024) {
+    return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }

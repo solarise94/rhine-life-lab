@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import dynamic from "next/dynamic";
 
@@ -8,22 +8,16 @@ import { ApiError, api } from "@/lib/api";
 import {
   useAdvancedGit,
   useAdvancedGraph,
-  useCancelRunMutation,
-  useCleanupRunMutation,
   useProjectFiles,
   useProjectReport,
   useProjectResults,
   useProjectSnapshot,
-  useRerunCardMutation,
   useReportExportMutation,
   useReportReorderMutation,
-  useResetCardRunStateMutation,
   useResultAsset,
   useReviewRunMutation,
-  useRunEvents,
-  useRuntimeApprovalDecisionMutation,
-  useRuntimeApprovals,
   useStartRunMutation,
+  useUpdateProjectRuntimePreferencesMutation,
   useWorkOrder,
   useWorkspaceRefresh,
 } from "@/lib/hooks";
@@ -36,13 +30,12 @@ import {
   EMPTY_SELECTED_WORKER_BY_CARD,
   useWorkspaceUiStore,
 } from "@/lib/stores/workspace-ui-store";
-import { Card, RunEvent } from "@/lib/types";
+import { Card, ReportExportResponse } from "@/lib/types";
 import { SideNav } from "./SideNav";
 import { ProjectHeader } from "./ProjectHeader";
 import { ManagerChatPanel } from "@/components/manager-chat/ManagerChatPanel";
 import { CardStream } from "@/components/cards/CardStream";
 import { CardDetailPanel } from "@/components/detail/CardDetailPanel";
-import { RunEventsPanel } from "@/components/detail/RunEventsPanel";
 import { ResultsGrid } from "@/components/results/ResultsGrid";
 import { ReportBuilder } from "@/components/report/ReportBuilder";
 import { FilesPanel } from "@/components/files/FilesPanel";
@@ -63,8 +56,12 @@ const AdvancedPanels = dynamic(
   () => import("@/components/advanced/AdvancedPanels").then((m) => m.AdvancedPanels),
   { ssr: false },
 );
+const SettingsPanels = dynamic(
+  () => import("@/components/settings/SettingsPanels").then((m) => m.SettingsPanels),
+  { ssr: false },
+);
 
-type View = "tasks" | "results" | "files" | "report" | "advanced";
+type View = "tasks" | "results" | "files" | "report" | "advanced" | "settings";
 const EMPTY_CARD_INTERACTION_ORDER: string[] = [];
 
 function formatRuntime(runtime?: string) {
@@ -118,15 +115,14 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const advancedGraphQuery = useAdvancedGraph(projectId, view === "advanced");
   const advancedGitQuery = useAdvancedGit(projectId, view === "advanced");
   const startRunMutation = useStartRunMutation(projectId);
-  const cancelRunMutation = useCancelRunMutation(projectId);
-  const cleanupRunMutation = useCleanupRunMutation(projectId);
-  const resetCardRunStateMutation = useResetCardRunStateMutation(projectId);
-  const rerunCardMutation = useRerunCardMutation(projectId);
   const reviewRunMutation = useReviewRunMutation(projectId);
+  const updateProjectRuntimePreferencesMutation = useUpdateProjectRuntimePreferencesMutation(projectId);
   const reorderReportMutation = useReportReorderMutation(projectId);
   const exportReportMutation = useReportExportMutation(projectId);
+  const [lastReportExport, setLastReportExport] = useState<ReportExportResponse | null>(null);
 
   const snapshot = projectQuery.data;
+  const projectRuntimePreferences = snapshot?.project.runtime_preferences;
   const defaultTaskCard = useMemo(
     () =>
       snapshot?.cards.find((item) => item.status !== "cancelled" && item.status !== "rejected") ??
@@ -159,12 +155,12 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   );
   const selectedAsset = allResultAssets.find((item) => item.asset_id === selectedAssetId) ?? allResultAssets[0];
   const selectedSection = reportQuery.data?.sections.find((item) => item.item_id === selectedSectionId) ?? reportQuery.data?.sections[0];
+  const effectiveGlobalPythonRuntime = globalPythonRuntime ?? projectRuntimePreferences?.python_runtime ?? undefined;
+  const effectiveGlobalRRuntime = globalRRuntime ?? projectRuntimePreferences?.r_runtime ?? undefined;
+  const effectiveScriptPreference = scriptPreference ?? projectRuntimePreferences?.script_preference ?? "auto";
 
   const previewAssetId = artifactPreview.source?.assetId;
   const resultAssetQuery = useResultAsset(projectId, previewAssetId, artifactPreview.open && Boolean(previewAssetId));
-  const runEventsQuery = useRunEvents(projectId, view === "tasks" ? selectedRunId : undefined, selectedRun?.status);
-  const runtimeApprovalsQuery = useRuntimeApprovals(projectId, view === "tasks" ? selectedRunId : undefined, selectedRun?.status);
-  const runtimeApprovalMutation = useRuntimeApprovalDecisionMutation(projectId, view === "tasks" ? selectedRunId : undefined);
 
   useEffect(() => {
     if (!defaultTaskCard || selectedCardId !== undefined) return;
@@ -184,6 +180,28 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   }, [configuredWorkers, projectId, selectedCard, selectedRun?.worker_type, selectedWorkerByProject, setSelectedWorker]);
 
   useEffect(() => {
+    if (!projectRuntimePreferences) return;
+    if (effectiveGlobalPythonRuntime !== (projectRuntimePreferences.python_runtime ?? undefined)) {
+      setGlobalPythonRuntime(projectId, projectRuntimePreferences.python_runtime ?? undefined);
+    }
+    if (effectiveGlobalRRuntime !== (projectRuntimePreferences.r_runtime ?? undefined)) {
+      setGlobalRRuntime(projectId, projectRuntimePreferences.r_runtime ?? undefined);
+    }
+    if (effectiveScriptPreference !== projectRuntimePreferences.script_preference) {
+      setScriptPreference(projectId, projectRuntimePreferences.script_preference);
+    }
+  }, [
+    effectiveGlobalPythonRuntime,
+    effectiveGlobalRRuntime,
+    effectiveScriptPreference,
+    projectId,
+    projectRuntimePreferences,
+    setGlobalPythonRuntime,
+    setGlobalRRuntime,
+    setScriptPreference,
+  ]);
+
+  useEffect(() => {
     if (view !== "results" || !allResultAssets.length || selectedAssetId) return;
     setSelectedAsset(projectId, allResultAssets[0].asset_id);
   }, [allResultAssets, projectId, selectedAssetId, setSelectedAsset, view]);
@@ -194,6 +212,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   }, [projectId, reportQuery.data, selectedSectionId, setSelectedSection, view]);
 
   useEffect(() => {
+    setLastReportExport(null);
+  }, [projectId]);
+
+  useEffect(() => {
     if (view !== "tasks" || activeRunCount === 0) return;
     const timer = window.setInterval(() => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.project(projectId) });
@@ -201,25 +223,6 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     }, 2_000);
     return () => window.clearInterval(timer);
   }, [activeRunCount, projectId, queryClient, view]);
-
-  useEffect(() => {
-    if (view !== "tasks" || !selectedRunId) return;
-    const wsUrl = api.getRunEventsWsUrl(projectId, selectedRunId);
-    if (!wsUrl) return;
-    const socket = new WebSocket(wsUrl);
-    socket.onerror = () => socket.close();
-    socket.onmessage = (event) => {
-      const payload = JSON.parse(event.data) as RunEvent;
-      queryClient.setQueryData(queryKeys.runEvents(projectId, selectedRunId), (previous: { items: RunEvent[] } | undefined) => {
-        const items = previous?.items ?? [];
-        if (items.some((item) => item.event_id === payload.event_id)) return previous;
-        return { items: [...items, payload] };
-      });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.project(projectId) });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.workOrder(projectId) });
-    };
-    return () => socket.close();
-  }, [projectId, queryClient, selectedRunId, view]);
 
   useEffect(() => {
     if (!notice) return;
@@ -251,6 +254,12 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
 
   function reportActionError(error: unknown, fallback: string) {
     setNotice(projectId, error instanceof Error ? error.message : fallback);
+  }
+
+  function persistRuntimePreference(payload: Parameters<typeof api.updateProjectRuntimePreferences>[1], fallback: string) {
+    void updateProjectRuntimePreferencesMutation
+      .mutateAsync(payload)
+      .catch((error) => reportActionError(error, fallback));
   }
 
   function handleOpenAssetPreview(assetId: string, source: "card" | "results" | "files", cardId?: string) {
@@ -291,13 +300,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     setNotice(projectId, null);
     setSelectedCard(projectId, card.card_id);
     const workerType = selectedWorkerByProject[card.card_id] ?? configuredWorkers[0]?.worker_type;
-    const pythonRuntime = selectedPythonRuntimeByProject[card.card_id] ?? globalPythonRuntime ?? "__system__";
-    const rRuntime = selectedRRuntimeByProject[card.card_id] ?? globalRRuntime ?? "__system__";
+    const pythonRuntime = selectedPythonRuntimeByProject[card.card_id] ?? effectiveGlobalPythonRuntime ?? "__system__";
+    const rRuntime = selectedRRuntimeByProject[card.card_id] ?? effectiveGlobalRRuntime ?? "__system__";
     try {
       const response = await startRunMutation.mutateAsync({ cardId: card.card_id, workerType, pythonRuntime, rRuntime });
-      if (response.latest_event) {
-        queryClient.setQueryData(queryKeys.runEvents(projectId, response.run_id), { items: [response.latest_event] });
-      }
       if (response.status === "cancelled") {
         setNotice(projectId, `Run ${response.run_id} 未启动：${response.worker_type} 的权限校验被拒绝。`);
       }
@@ -323,67 +329,6 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     }
   }
 
-  async function handleCancelRun() {
-    if (!selectedRunId) return;
-    setNotice(projectId, null);
-    try {
-      const response = await cancelRunMutation.mutateAsync({ runId: selectedRunId });
-      setNotice(projectId, `Run ${response.run_id} 已取消。`);
-    } catch (error) {
-      reportActionError(error, "取消 run 失败。");
-    }
-  }
-
-  async function handleCleanupRun() {
-    if (!selectedRunId) return;
-    setNotice(projectId, null);
-    try {
-      const response = await cleanupRunMutation.mutateAsync({ runId: selectedRunId });
-      setNotice(projectId, `Run ${response.run_id} 已清理归档。`);
-    } catch (error) {
-      reportActionError(error, "清理 run 失败。");
-    }
-  }
-
-  async function handleResetCardRunState() {
-    if (!selectedCard) return;
-    setNotice(projectId, null);
-    try {
-      const response = await resetCardRunStateMutation.mutateAsync({ cardId: selectedCard.card_id });
-      setNotice(projectId, `Card ${response.card_id} 已重置为 ${response.status}。`);
-    } catch (error) {
-      reportActionError(error, "重置 card 状态失败。");
-    }
-  }
-
-  async function handleRerunCard() {
-    if (!selectedCard) return;
-    setNotice(projectId, null);
-    const workerType = selectedWorkerByProject[selectedCard.card_id] ?? configuredWorkers[0]?.worker_type;
-    const pythonRuntime = selectedPythonRuntimeByProject[selectedCard.card_id] ?? globalPythonRuntime ?? "__system__";
-    const rRuntime = selectedRRuntimeByProject[selectedCard.card_id] ?? globalRRuntime ?? "__system__";
-    try {
-      const response = await rerunCardMutation.mutateAsync({ cardId: selectedCard.card_id, workerType, pythonRuntime, rRuntime });
-      if (response.latest_event) {
-        queryClient.setQueryData(queryKeys.runEvents(projectId, response.run_id), { items: [response.latest_event] });
-      }
-      setSelectedCard(projectId, selectedCard.card_id);
-      setNotice(projectId, null);
-    } catch (error) {
-      reportActionError(error, "重新运行 card 失败。");
-    }
-  }
-
-  async function handleApprovalDecision(requestId: string, approve: boolean) {
-    if (!selectedRunId) return;
-    try {
-      await runtimeApprovalMutation.mutateAsync({ requestId, approve });
-      setNotice(projectId, approve ? `已批准 ${requestId}` : `已拒绝 ${requestId}`);
-    } catch (error) {
-      reportActionError(error, approve ? "批准权限请求失败。" : "拒绝权限请求失败。");
-    }
-  }
-
   async function handleMoveReport(itemId: string, direction: "up" | "down") {
     const sections = reportQuery.data?.sections ?? [];
     const index = sections.findIndex((item) => item.item_id === itemId);
@@ -392,12 +337,21 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     const targetIndex = direction === "up" ? index - 1 : index + 1;
     if (targetIndex < 0 || targetIndex >= next.length) return;
     [next[index], next[targetIndex]] = [next[targetIndex], next[index]];
-    await reorderReportMutation.mutateAsync(next.map((item) => item.item_id).filter((value) => !value.startsWith("report_selected_")));
+    try {
+      await reorderReportMutation.mutateAsync(next.map((item) => item.item_id).filter((value) => !value.startsWith("report_selected_")));
+    } catch (error) {
+      reportActionError(error, "调整报告章节顺序失败。");
+    }
   }
 
   async function handleExportReport() {
-    const response = await exportReportMutation.mutateAsync();
-    setNotice(projectId, `报告已导出到 ${response.path}`);
+    try {
+      const response = await exportReportMutation.mutateAsync();
+      setLastReportExport(response);
+      setNotice(projectId, `报告已导出到 ${response.path}`);
+    } catch (error) {
+      reportActionError(error, "导出报告失败。");
+    }
   }
 
   const loading = projectQuery.isLoading || !snapshot;
@@ -448,8 +402,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           }}
           pythonRuntimes={snapshot.python_runtimes ?? []}
           rRuntimes={snapshot.r_runtimes ?? []}
-          globalPythonRuntime={globalPythonRuntime}
-          globalRRuntime={globalRRuntime}
+          globalPythonRuntime={effectiveGlobalPythonRuntime}
+          globalRRuntime={effectiveGlobalRRuntime}
           selectedPythonRuntimeByCard={selectedPythonRuntimeByProject}
           selectedRRuntimeByCard={selectedRRuntimeByProject}
           onSelectPythonRuntime={(card, runtime) => {
@@ -472,19 +426,24 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
         current={view}
         pythonRuntimes={snapshot.python_runtimes ?? []}
         rRuntimes={snapshot.r_runtimes ?? []}
-        globalPythonRuntime={globalPythonRuntime}
-        globalRRuntime={globalRRuntime}
-        scriptPreference={scriptPreference}
+        globalPythonRuntime={effectiveGlobalPythonRuntime}
+        globalRRuntime={effectiveGlobalRRuntime}
+        scriptPreference={effectiveScriptPreference}
         onSelectGlobalPythonRuntime={(runtime) => {
-          setGlobalPythonRuntime(projectId, runtime);
+          const normalizedRuntime = runtime === "__system__" ? undefined : runtime;
+          setGlobalPythonRuntime(projectId, normalizedRuntime);
+          persistRuntimePreference({ python_runtime: normalizedRuntime ?? null }, "保存 Python runtime 失败。");
           setNotice(projectId, `全局 Python runtime: ${formatRuntime(runtime)}。`);
         }}
         onSelectGlobalRRuntime={(runtime) => {
-          setGlobalRRuntime(projectId, runtime);
+          const normalizedRuntime = runtime === "__system__" ? undefined : runtime;
+          setGlobalRRuntime(projectId, normalizedRuntime);
+          persistRuntimePreference({ r_runtime: normalizedRuntime ?? null }, "保存 R runtime 失败。");
           setNotice(projectId, `全局 R runtime: ${formatRuntime(runtime)}。`);
         }}
         onSelectScriptPreference={(preference) => {
           setScriptPreference(projectId, preference);
+          persistRuntimePreference({ script_preference: preference }, "保存脚本偏好失败。");
           const label =
             preference === "prefer_python"
               ? "偏好 Python"
@@ -507,6 +466,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               ? "Uploads, data assets, and execution files"
               : view === "report"
               ? "Report assembly"
+              : view === "settings"
+              ? "Runtime, libraries, and API settings"
                 : "Graph and Git history"
             }
           />
@@ -564,6 +525,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 sections={reportQuery.data?.sections ?? []}
                 onMove={handleMoveReport}
                 onExport={handleExportReport}
+                exportInfo={lastReportExport}
                 selectedSectionId={selectedSection?.item_id}
                 onSelect={(itemId) => setSelectedSection(projectId, itemId)}
               />
@@ -577,8 +539,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 gitItems={advancedGitQuery.data?.items ?? []}
                 pythonRuntimes={snapshot.python_runtimes ?? []}
                 rRuntimes={snapshot.r_runtimes ?? []}
-                globalPythonRuntime={globalPythonRuntime}
-                globalRRuntime={globalRRuntime}
+                globalPythonRuntime={effectiveGlobalPythonRuntime}
+                globalRRuntime={effectiveGlobalRRuntime}
                 onSelectGlobalPythonRuntime={(runtime) => {
                   setGlobalPythonRuntime(projectId, runtime);
                   setNotice(projectId, `全局 Python runtime: ${formatRuntime(runtime)}。`);
@@ -595,6 +557,14 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 />
               ) : null}
             </div>
+          ) : null}
+          {view === "settings" ? (
+            <SettingsPanels
+              projectId={projectId}
+              project={snapshot.project}
+              pythonRuntimes={snapshot.python_runtimes ?? []}
+              rRuntimes={snapshot.r_runtimes ?? []}
+            />
           ) : null}
         </div>
 
@@ -632,8 +602,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 }}
                 pythonRuntimes={snapshot.python_runtimes ?? []}
                 rRuntimes={snapshot.r_runtimes ?? []}
-                globalPythonRuntime={globalPythonRuntime}
-                globalRRuntime={globalRRuntime}
+                globalPythonRuntime={effectiveGlobalPythonRuntime}
+                globalRRuntime={effectiveGlobalRRuntime}
                 selectedPythonRuntimeByCard={selectedPythonRuntimeByProject}
                 selectedRRuntimeByCard={selectedRRuntimeByProject}
                 onSelectPythonRuntime={(card, runtime) => {
@@ -671,6 +641,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     sections={reportQuery.data?.sections ?? []}
                     onMove={handleMoveReport}
                     onExport={handleExportReport}
+                    exportInfo={lastReportExport}
                     selectedSectionId={selectedSection?.item_id}
                     onSelect={(itemId) => setSelectedSection(projectId, itemId)}
                   />
@@ -697,8 +668,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     gitItems={advancedGitQuery.data?.items ?? []}
                     pythonRuntimes={snapshot.python_runtimes ?? []}
                     rRuntimes={snapshot.r_runtimes ?? []}
-                    globalPythonRuntime={globalPythonRuntime}
-                    globalRRuntime={globalRRuntime}
+                    globalPythonRuntime={effectiveGlobalPythonRuntime}
+                    globalRRuntime={effectiveGlobalRRuntime}
                     onSelectGlobalPythonRuntime={(runtime) => {
                       setGlobalPythonRuntime(projectId, runtime);
                       setNotice(projectId, `全局 Python runtime: ${formatRuntime(runtime)}。`);
@@ -716,12 +687,24 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   ) : null}
                 </>
               ) : null}
+              {view === "settings" ? (
+                <SettingsPanels
+                  projectId={projectId}
+                  project={snapshot.project}
+                  pythonRuntimes={snapshot.python_runtimes ?? []}
+                  rRuntimes={snapshot.r_runtimes ?? []}
+                />
+              ) : null}
             </div>
           ) : null}
         </div>
 
         {artifactPreview.open ? (
-          <div className="artifact-preview-drawer">
+          <div
+            className="artifact-preview-drawer"
+            onClick={() => closeArtifactPreview(projectId)}
+            role="presentation"
+          >
             <ResultPreviewPanel
               detail={resultAssetQuery.data}
               mode="drawer"
@@ -729,32 +712,6 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               loading={artifactPreview.loading}
               error={artifactPreview.error}
               onClose={() => closeArtifactPreview(projectId)}
-              onSendToManager={() => handleSendAssetToManager()}
-              onExplain={() => handleExplainAsset()}
-            />
-          </div>
-        ) : null}
-
-        {/* Run Events Panel - shown conditionally */}
-        {view === "tasks" && selectedRun ? (
-          <div style={{ marginTop: 16 }}>
-            <RunEventsPanel
-              card={selectedCard}
-              run={selectedRun}
-              events={runEventsQuery.data?.items ?? []}
-              approvals={runtimeApprovalsQuery.data?.items ?? []}
-              onApprove={(requestId) => handleApprovalDecision(requestId, true)}
-              onReject={(requestId) => handleApprovalDecision(requestId, false)}
-              onCancelRun={handleCancelRun}
-              onCleanupRun={handleCleanupRun}
-              onResetCard={handleResetCardRunState}
-              onRerunCard={handleRerunCard}
-              actionPending={
-                cancelRunMutation.isPending ||
-                cleanupRunMutation.isPending ||
-                resetCardRunStateMutation.isPending ||
-                rerunCardMutation.isPending
-              }
             />
           </div>
         ) : null}

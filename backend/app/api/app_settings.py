@@ -17,6 +17,7 @@ class UpdateAppSettingsRequest(BaseModel):
     manager_model: str | None = None
     executor_model: str | None = None
     reviewer_model: str | None = None
+    library_summarizer_model: str | None = None
     manager_websearch_enabled: bool | None = None
     tavily_api_key: str | None = None
     clear_tavily_api_key: bool = False

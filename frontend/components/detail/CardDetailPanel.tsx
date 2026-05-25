@@ -141,6 +141,9 @@ export function CardDetailPanel({
             <div className="meta-text">
               Skills: {Array.isArray(card.executor_context?.skills) && card.executor_context.skills.length ? card.executor_context.skills.join(", ") : "—"}
             </div>
+            <div className="meta-text">
+              MCP: {Array.isArray(card.executor_context?.mcp_servers) && card.executor_context.mcp_servers.length ? card.executor_context.mcp_servers.join(", ") : "—"}
+            </div>
           </div>
         </div>
       </div>

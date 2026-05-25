@@ -52,6 +52,13 @@
           "title": "Skills",
           "type": "array"
         },
+        "mcp_servers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Mcp Servers",
+          "type": "array"
+        },
         "instruction_blocks": {
           "items": {
             "type": "string"
@@ -270,53 +277,6 @@
       "title": "ExecutorToolPolicy",
       "type": "object"
     },
-    "ExpectedOutput": {
-      "properties": {
-        "role": {
-          "title": "Role",
-          "type": "string"
-        },
-        "type": {
-          "title": "Type",
-          "type": "string"
-        },
-        "path_hint": {
-          "title": "Path Hint",
-          "type": "string"
-        },
-        "label": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Label"
-        },
-        "asset_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Asset Id"
-        }
-      },
-      "required": [
-        "role",
-        "type",
-        "path_hint"
-      ],
-      "title": "ExpectedOutput",
-      "type": "object"
-    },
     "ManagerReportingContract": {
       "properties": {
         "transport": {
@@ -443,6 +403,102 @@
       "title": "RuntimeBindings",
       "type": "object"
     },
+    "TaskOutputSpec": {
+      "properties": {
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "artifact_class": {
+          "enum": [
+            "figure",
+            "table",
+            "document",
+            "model",
+            "archive",
+            "binary"
+          ],
+          "title": "Artifact Class",
+          "type": "string"
+        },
+        "accepted_formats": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Accepted Formats",
+          "type": "array"
+        },
+        "preferred_format": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Preferred Format"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "path_hint": {
+          "title": "Path Hint",
+          "type": "string"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        }
+      },
+      "required": [
+        "role",
+        "label",
+        "artifact_class",
+        "path_hint"
+      ],
+      "title": "TaskOutputSpec",
+      "type": "object"
+    },
     "TaskPacketAsset": {
       "properties": {
         "asset_id": {
@@ -550,58 +606,6 @@
       ],
       "title": "TaskPacketCardInput",
       "type": "object"
-    },
-    "TaskPacketCardOutput": {
-      "properties": {
-        "label": {
-          "title": "Label",
-          "type": "string"
-        },
-        "asset_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Asset Id"
-        },
-        "status": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Status"
-        },
-        "role": {
-          "title": "Role",
-          "type": "string"
-        },
-        "type": {
-          "title": "Type",
-          "type": "string"
-        },
-        "path_hint": {
-          "title": "Path Hint",
-          "type": "string"
-        }
-      },
-      "required": [
-        "label",
-        "role",
-        "type",
-        "path_hint"
-      ],
-      "title": "TaskPacketCardOutput",
-      "type": "object"
     }
   },
   "properties": {
@@ -661,14 +665,14 @@
     },
     "card_outputs": {
       "items": {
-        "$ref": "#/$defs/TaskPacketCardOutput"
+        "$ref": "#/$defs/TaskOutputSpec"
       },
       "title": "Card Outputs",
       "type": "array"
     },
     "expected_outputs": {
       "items": {
-        "$ref": "#/$defs/ExpectedOutput"
+        "$ref": "#/$defs/TaskOutputSpec"
       },
       "title": "Expected Outputs",
       "type": "array"

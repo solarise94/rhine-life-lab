@@ -29,6 +29,19 @@ def get_project_context(
     return manager_service.blueprint_tools.get_project_context(project_id)
 
 
+@router.get("/inspect")
+def inspect_project_summary(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.inspect_project_summary(project_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/data-assets")
 def list_data_assets(
     project_id: str,
@@ -38,6 +51,48 @@ def list_data_assets(
     _verify_internal_token(authorization)
     try:
         return manager_service.blueprint_tools.list_data_assets(project_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/cards/find")
+def find_cards(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.find_cards(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/assets/find")
+def find_assets(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.find_assets(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/cards/plan-write")
+def plan_card_write(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.plan_card_write(project_id, payload)
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -52,6 +107,20 @@ def create_card(
     _verify_internal_token(authorization)
     try:
         return manager_service.blueprint_tools.create_card(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/cards/{card_id}/detail")
+def get_card_detail(
+    project_id: str,
+    card_id: str,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.get_card_detail(project_id, card_id)
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -131,6 +200,20 @@ def set_tool_policy(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.get("/assets/{asset_id}/detail")
+def get_asset_detail(
+    project_id: str,
+    asset_id: str,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.get_asset_detail(project_id, asset_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/assets/{asset_id}")
 def read_result_asset(
     project_id: str,
@@ -141,6 +224,88 @@ def read_result_asset(
     _verify_internal_token(authorization)
     try:
         return manager_service.blueprint_tools.read_result_asset(project_id, asset_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/skill-library")
+def list_skill_library(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.list_skill_library(project_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/skill-library/search")
+def search_skill_library(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.search_skill_library(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/skill-library/{skill_id}")
+def get_skill_library_item(
+    project_id: str,
+    skill_id: str,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.get_skill_library_item(project_id, skill_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/mcp-library")
+def list_mcp_library(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.list_mcp_library(project_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/mcp-library/search")
+def search_mcp_library(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.search_mcp_library(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/mcp-library/{entry_id}")
+def get_mcp_library_item(
+    project_id: str,
+    entry_id: str,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.get_mcp_library_item(project_id, entry_id)
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

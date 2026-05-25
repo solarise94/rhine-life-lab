@@ -5,6 +5,7 @@ from app.services.app_config_service import AppConfigService
 from app.services.manager_service import ManagerService
 from app.services.chat_job_service import ChatJobService
 from app.services.flow_service import FlowService
+from app.services.library_registry_service import LibraryRegistryService
 from app.services.manifest_service import ManifestService
 from app.services.patch_apply import PatchApplyService
 from app.services.patch_validator import PatchValidator
@@ -40,6 +41,7 @@ def get_manager_service() -> ManagerService:
         get_project_service(),
         worker_service=get_worker_service(),
         runtime_dependency_job_service=get_runtime_dependency_job_service(),
+        library_registry_service=get_library_registry_service(),
     )
 
 
@@ -65,7 +67,12 @@ def get_runtime_approval_service() -> RuntimeApprovalService:
 
 @lru_cache
 def get_worker_service() -> WorkerService:
-    return WorkerService(get_project_service(), get_manifest_service(), get_runtime_approval_service())
+    return WorkerService(
+        get_project_service(),
+        get_manifest_service(),
+        get_runtime_approval_service(),
+        get_library_registry_service(),
+    )
 
 
 @lru_cache
@@ -96,3 +103,11 @@ def get_flow_service() -> FlowService:
 @lru_cache
 def get_app_config_service() -> AppConfigService:
     return AppConfigService()
+
+
+@lru_cache
+def get_library_registry_service() -> LibraryRegistryService:
+    return LibraryRegistryService(
+        get_project_service(),
+        get_app_config_service(),
+    )

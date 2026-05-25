@@ -79,7 +79,8 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         if not template:
             raise RuntimeError(f"Worker adapter {self.name} is not configured.")
         self._validate_executor_policy(packet)
-        contract_paths = self._write_contract_files(packet=packet, run_dir=run_dir)
+        library_paths = self._write_library_bindings(packet=packet, run_dir=run_dir)
+        contract_paths = self._write_contract_files(packet=packet, run_dir=run_dir, library_paths=library_paths)
         r_profile_path = self._write_runtime_r_profile(run_dir)
         mapping = {
             "task_packet_path": str(packet_path),
@@ -135,6 +136,11 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
                 packet.executor_context.executor_profile if packet.executor_context and packet.executor_context.executor_profile else ""
             ),
             "BLUEPRINT_EXECUTOR_SKILLS": json.dumps(packet.executor_context.skills if packet.executor_context else []),
+            "BLUEPRINT_EXECUTOR_MCP_SERVERS": json.dumps(packet.executor_context.mcp_servers if packet.executor_context else []),
+            "BLUEPRINT_EXECUTOR_SKILL_BINDINGS": str(library_paths["skill_bindings_path"]),
+            "BLUEPRINT_EXECUTOR_MCP_BINDINGS": str(library_paths["mcp_bindings_path"]),
+            "BLUEPRINT_EXECUTOR_MCP_CONFIG": str(library_paths["mcp_config_path"]),
+            "BLUEPRINT_PI_SKILL_PATHS": json.dumps(library_paths["skill_paths"]),
             "BLUEPRINT_RUNTIME_WORKING_DIR": packet.executor_context.runtime_bindings.working_dir if packet.executor_context else ".",
             "BLUEPRINT_MANAGER_REPORT_STDOUT_PREFIX": (
                 packet.manager_reporting_contract.stdout_prefix if packet.manager_reporting_contract else "BP_EVENT "
@@ -646,7 +652,13 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
                 f"Worker adapter {self.name} requires model/network access, but executor_context.tool_policy.network=deny."
             )
 
-    def _write_contract_files(self, *, packet: TaskPacket, run_dir: Path) -> dict[str, Path]:
+    def _write_contract_files(
+        self,
+        *,
+        packet: TaskPacket,
+        run_dir: Path,
+        library_paths: dict[str, object],
+    ) -> dict[str, Path]:
         executor_brief_path = run_dir / "executor_brief.md"
         executor_prompt_path = run_dir / "executor_prompt.md"
         adapter_contract_path = run_dir / "adapter_contract.json"
@@ -666,6 +678,9 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
                     "dependency_issue_path": "dependency_issue.json",
                     "dependency_report_tool_path": "report_dependency_issue.py",
                     "executor_validation_path": "executor_validation.json",
+                    "skill_bindings_path": str(Path(str(library_paths["skill_bindings_path"])).relative_to(run_dir)),
+                    "mcp_bindings_path": str(Path(str(library_paths["mcp_bindings_path"])).relative_to(run_dir)),
+                    "mcp_config_path": str(Path(str(library_paths["mcp_config_path"])).relative_to(run_dir)),
                     "stdout_prefix": packet.manager_reporting_contract.stdout_prefix if packet.manager_reporting_contract else "BP_EVENT ",
                     "allowed_paths": packet.allowed_paths,
                     "readonly_paths": packet.readonly_paths,
@@ -691,10 +706,10 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
                         "run_id",
                         "status",
                         "summary",
-                        "inputs_used",
                         "created_assets",
                         "code_artifacts",
                         "commands_executed",
+                        "validation_evidence",
                     ],
                     "manifest_status_values": ["success", "failed", "partial"],
                     "executor_tools": [
@@ -721,10 +736,11 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
                         "run_id": "string",
                         "status": "success | failed | partial",
                         "summary": "string",
-                        "inputs_used": "array of consumed task_packet.input_assets",
-                        "created_assets": "array of {role,type,path,label?,asset_id?,description?}",
+                        "created_assets": "array of {role,path,label?,asset_id?,description?,artifact_class?,format?}",
                         "code_artifacts": "array of {path,language?,purpose?,sha256?}",
-                        "validation_evidence": "object",
+                        "validation_evidence": {
+                            "input_conclusion": "short factual note about the declared inputs and whether they were used",
+                        },
                         "commands_executed": "array of strings",
                         "metrics": "object",
                         "key_findings": "array of strings",
@@ -744,6 +760,51 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "executor_prompt_path": executor_prompt_path,
             "adapter_contract_path": adapter_contract_path,
             "dependency_report_tool_path": dependency_report_tool_path,
+        }
+
+    def _write_library_bindings(self, *, packet: TaskPacket, run_dir: Path) -> dict[str, object]:
+        library_root = run_dir / "library"
+        skills_root = library_root / "skills"
+        skills_root.mkdir(parents=True, exist_ok=True)
+        skill_bindings = list(packet.executor_context.template_metadata.get("library_skill_bindings") or []) if packet.executor_context else []
+        mcp_bindings = list(packet.executor_context.template_metadata.get("library_mcp_bindings") or []) if packet.executor_context else []
+
+        copied_skill_paths: list[str] = []
+        for binding in skill_bindings:
+            source_path_value = binding.get("source_path")
+            skill_id = str(binding.get("id") or "skill")
+            if not source_path_value:
+                continue
+            source_path = Path(str(source_path_value))
+            if not source_path.exists():
+                continue
+            source_dir = source_path.parent if source_path.is_file() else source_path
+            destination_dir = skills_root / skill_id
+            if destination_dir.exists():
+                shutil.rmtree(destination_dir)
+            shutil.copytree(source_dir, destination_dir)
+            copied_skill_paths.append(str(destination_dir))
+            binding["run_path"] = str(destination_dir)
+
+        mcp_config_payload = {"mcpServers": {}}
+        for binding in mcp_bindings:
+            config = binding.get("config")
+            if isinstance(config, dict):
+                servers = config.get("mcpServers")
+                if isinstance(servers, dict):
+                    mcp_config_payload["mcpServers"].update(servers)
+
+        skill_bindings_path = library_root / "skill_bindings.json"
+        mcp_bindings_path = library_root / "mcp_bindings.json"
+        mcp_config_path = library_root / "mcp.json"
+        skill_bindings_path.write_text(json.dumps(skill_bindings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        mcp_bindings_path.write_text(json.dumps(mcp_bindings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        mcp_config_path.write_text(json.dumps(mcp_config_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return {
+            "skill_bindings_path": skill_bindings_path,
+            "mcp_bindings_path": mcp_bindings_path,
+            "mcp_config_path": mcp_config_path,
+            "skill_paths": copied_skill_paths,
         }
 
     @staticmethod
@@ -864,7 +925,10 @@ if __name__ == "__main__":
                 "## Expected Outputs",
             ]
         )
-        lines.extend(f"- {item.role}: {item.path_hint} ({item.type})" for item in packet.expected_outputs)
+        lines.extend(
+            f"- {item.role}: {item.path_hint} [{item.artifact_class}; accepted={', '.join(item.accepted_formats) if item.accepted_formats else 'any'}; preferred={item.preferred_format or 'auto'}]"
+            for item in packet.expected_outputs
+        )
         lines.extend(
             [
                 "",
@@ -883,8 +947,12 @@ if __name__ == "__main__":
                     "## Executor Context",
                     f"- Profile: {packet.executor_context.executor_profile or 'none'}",
                     f"- Skills: {', '.join(packet.executor_context.skills) if packet.executor_context.skills else 'none'}",
+                    f"- MCP servers: {', '.join(packet.executor_context.mcp_servers) if packet.executor_context.mcp_servers else 'none'}",
                     f"- Python runtime: {python_runtime}",
                     f"- R runtime: {r_runtime}",
+                    f"- Skill bindings file: runs/{packet.task_id}/library/skill_bindings.json",
+                    f"- MCP bindings file: runs/{packet.task_id}/library/mcp_bindings.json",
+                    f"- MCP config file: runs/{packet.task_id}/library/mcp.json",
                 ]
             )
             lines.extend(f"- Instruction: {item}" for item in packet.executor_context.instruction_blocks)
@@ -920,6 +988,8 @@ if __name__ == "__main__":
             "- If your launch environment provides BLUEPRINT_MANIFEST_CANDIDATE_PATH, write the candidate manifest there.",
             "- If required runtime dependencies are missing, do not install packages with pip, conda, install.packages, or BiocManager. "
             "Use the dependency report tool and stop the analysis until the runtime is fixed.",
+            "- After all result files, manager_brief.json, and manifest.candidate.json are written, exit immediately with success. "
+            "Do not keep chatting, inspecting files, or printing result contents.",
             "",
             "Task packet:",
             "- JSON path: task_packet.json",
@@ -942,7 +1012,10 @@ if __name__ == "__main__":
                 "Expected outputs:",
             ]
         )
-        lines.extend(f"- {item.role}: {item.path_hint} ({item.type})" for item in packet.expected_outputs)
+        lines.extend(
+            f"- {item.role}: {item.path_hint} [{item.artifact_class}; accepted={', '.join(item.accepted_formats) if item.accepted_formats else 'any'}; preferred={item.preferred_format or 'auto'}]"
+            for item in packet.expected_outputs
+        )
         if packet.executor_context:
             lines.extend(
                 [
@@ -950,6 +1023,10 @@ if __name__ == "__main__":
                     "Executor context:",
                     f"- Profile: {packet.executor_context.executor_profile or 'none'}",
                     f"- Skills: {', '.join(packet.executor_context.skills) if packet.executor_context.skills else 'none'}",
+                    f"- MCP servers: {', '.join(packet.executor_context.mcp_servers) if packet.executor_context.mcp_servers else 'none'}",
+                    f"- Skill bindings file: runs/{packet.task_id}/library/skill_bindings.json",
+                    f"- MCP bindings file: runs/{packet.task_id}/library/mcp_bindings.json",
+                    f"- MCP config file: runs/{packet.task_id}/library/mcp.json",
                 ]
             )
             lines.extend(f"- Instruction: {item}" for item in packet.executor_context.instruction_blocks)
@@ -957,6 +1034,12 @@ if __name__ == "__main__":
         dependency_tool_path = f"runs/{packet.task_id}/report_dependency_issue.py"
         lines.extend(
             [
+                "",
+                "Stdout discipline:",
+                "- Do not print tables, matrices, SVG, reports, JSON manifests, or file contents to stdout.",
+                "- Do not run cat/head/tail on large outputs for the user. The user will inspect files through Blueprint previews.",
+                "- Stdout should contain only short BP_EVENT progress updates or one concise final sentence with output paths.",
+                "- Once manifest.candidate.json validates in your own reasoning and manager_brief.json is written, stop the process.",
                 "",
                 "Runtime dependency policy:",
                 "- Probe required Python/R/system packages before doing expensive analysis.",
@@ -971,14 +1054,19 @@ if __name__ == "__main__":
             [
                 "",
                 "Output contract:",
-                "- manifest.json must include every consumed input in inputs_used.",
-                "- manifest.candidate.json must include every consumed input in inputs_used.",
-                "- manifest.candidate.json must declare every created asset in created_assets with role/type/path.",
+                "- manifest.candidate.json must declare every created asset in created_assets with role/path.",
                 "- manifest.candidate.json must declare preserved code in code_artifacts when assets are created.",
                 "- status must be exactly one of: success, failed, partial.",
                 "- Use created_assets, not outputs.",
                 "- Include summary and commands_executed.",
                 "- manager_brief.json should summarize final status for Manager; it must not mutate graph/card state.",
+                "",
+                "Input reporting rules:",
+                "- The declared inputs are already available in task_packet.json and will be forwarded to Reviewer.",
+                "- Record a short factual input conclusion in manifest.validation_evidence.input_conclusion.",
+                "- Do not restate the full input list in the manifest unless you have a concrete reason to do so.",
+                "- Do not use report_dependency_issue.py for input reporting or manifest completeness questions.",
+                "- Use report_dependency_issue.py only when a required runtime dependency is actually missing and you need to stop for environment repair.",
             ]
         )
         return "\n".join(lines) + "\n"

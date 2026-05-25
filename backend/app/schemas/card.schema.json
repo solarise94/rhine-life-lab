@@ -37,6 +37,97 @@
       "title": "CardAssetRef",
       "type": "object"
     },
+    "CardOutputSpec": {
+      "properties": {
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "artifact_class": {
+          "enum": [
+            "figure",
+            "table",
+            "document",
+            "model",
+            "archive",
+            "binary"
+          ],
+          "title": "Artifact Class",
+          "type": "string"
+        },
+        "accepted_formats": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Accepted Formats",
+          "type": "array"
+        },
+        "preferred_format": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Preferred Format"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        }
+      },
+      "required": [
+        "role",
+        "label",
+        "artifact_class"
+      ],
+      "title": "CardOutputSpec",
+      "type": "object"
+    },
     "ExecutorContext": {
       "properties": {
         "executor_profile": {
@@ -56,6 +147,13 @@
             "type": "string"
           },
           "title": "Skills",
+          "type": "array"
+        },
+        "mcp_servers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Mcp Servers",
           "type": "array"
         },
         "instruction_blocks": {
@@ -437,7 +535,7 @@
     },
     "outputs": {
       "items": {
-        "$ref": "#/$defs/CardAssetRef"
+        "$ref": "#/$defs/CardOutputSpec"
       },
       "title": "Outputs",
       "type": "array"

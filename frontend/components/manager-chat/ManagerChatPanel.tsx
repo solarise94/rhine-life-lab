@@ -154,6 +154,38 @@ function settleInterruptedTools(tools?: ToolUseState[]) {
   );
 }
 
+function settleRunningTimelineItems(
+  timeline: MessageTimelineItem[],
+  status: Extract<ToolState, "done" | "error">,
+) {
+  const endedAt = Date.now();
+  return timeline.map((item) =>
+    item.status === "running"
+      ? {
+          ...item,
+          status,
+          endedAt: item.endedAt ?? endedAt,
+        }
+      : item,
+  );
+}
+
+function settleCompletedTimelineTools(timeline: MessageTimelineItem[]) {
+  return timeline.map((item) =>
+    item.kind === "tool" && item.status === "running"
+      ? {
+          ...item,
+          status: "done" as const,
+          endedAt: item.endedAt ?? Date.now(),
+        }
+      : item,
+  );
+}
+
+function settleRunningTimelineText(timeline: MessageTimelineItem[]) {
+  return timeline.map((item) => (item.kind === "text" && item.status === "running" ? { ...item, status: "done" as const } : item));
+}
+
 function runtimeForChatContext(runtime?: string | null) {
   if (!runtime || runtime === "__system__") return null;
   return runtime;
@@ -1068,12 +1100,13 @@ export function ManagerChatPanel({
           {
             const itemId = event.tool_call_id || timelineItemId("tool", undefined, `${event.tool_name || "unknown"}_${timeline.length}`);
             const existing = timeline.find((item) => item.id === itemId);
+            const nextTimeline = settleRunningTimelineText(timeline);
             return {
               ...current,
               tools: upsertTool(current.tools || [], event),
               state: current.content ? "streaming" : "thinking",
               timeline: upsertTimelineItem(
-                timeline,
+                nextTimeline,
                 {
                   id: itemId,
                   kind: "tool",
@@ -1136,11 +1169,20 @@ export function ManagerChatPanel({
                   label: existing?.label || event.tool_name || "Tool",
                   toolName: event.tool_name,
                   content: event.summary || existing?.content || "",
-                  status: existing?.status ?? "done",
+                  status: existing?.status === "error" ? "error" : "done",
                   startedAt: existing?.startedAt ?? Date.now(),
-                  endedAt: existing?.endedAt,
+                  endedAt: existing?.endedAt ?? Date.now(),
                 },
                 (item) => item.id === itemId,
+              ),
+              tools: (current.tools ?? []).map((tool) =>
+                tool.id === itemId || (!event.tool_call_id && tool.toolName === event.tool_name)
+                  ? {
+                      ...tool,
+                      label: tool.label || event.tool_name || "Tool",
+                      status: tool.status === "error" ? "error" : "done",
+                    }
+                  : tool,
               ),
             };
           }
@@ -1170,7 +1212,7 @@ export function ManagerChatPanel({
               proposal: proposal || current.proposal,
               tokenUsage: normalizeTokenUsage(event.response?.metadata?.token_usage) ?? current.tokenUsage,
               timeline: (() => {
-                let nextTimeline = [...timeline];
+                let nextTimeline = settleCompletedTimelineTools([...timeline]);
                 if (event.response?.thinking?.trim()) {
                   const runningThinkingIndex = lastTimelineIndex(nextTimeline, (item) => item.kind === "thinking" && item.status === "running");
                   if (runningThinkingIndex >= 0) {
@@ -1218,8 +1260,16 @@ export function ManagerChatPanel({
                     });
                   }
                 }
-                return nextTimeline;
+                return settleCompletedTimelineTools(nextTimeline);
               })(),
+              tools: (current.tools ?? []).map((tool) =>
+                tool.status === "running"
+                  ? {
+                      ...tool,
+                      status: "done" as const,
+                    }
+                  : tool,
+              ),
             };
           }
         case "done":
@@ -1227,9 +1277,7 @@ export function ManagerChatPanel({
             ...current,
             state: current.state === "error" ? "error" : "done",
             thinkingState: current.thinkingState === "running" ? "done" : current.thinkingState,
-            timeline: timeline.map((item) =>
-              item.status === "running" ? { ...item, status: "done", endedAt: item.endedAt ?? Date.now() } : item,
-            ),
+            timeline: settleRunningTimelineItems(timeline, "done"),
           };
         case "error":
           return {
@@ -1237,9 +1285,7 @@ export function ManagerChatPanel({
             state: "error",
             thinkingState: current.thinkingState === "running" ? "error" : current.thinkingState,
             content: current.content || "请求失败。",
-            timeline: timeline.map((item) =>
-              item.status === "running" ? { ...item, status: "error", endedAt: item.endedAt ?? Date.now() } : item,
-            ),
+            timeline: settleRunningTimelineItems(timeline, "error"),
           };
         default:
           return current;
@@ -1434,6 +1480,7 @@ export function ManagerChatPanel({
           thinkingState: current.thinkingState === "running" ? "done" : current.thinkingState,
           content: current.content || "已停止本次生成。",
           thinking: current.thinking,
+          timeline: settleRunningTimelineItems(current.timeline ?? [], "done"),
         }));
         return;
       }

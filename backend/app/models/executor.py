@@ -46,6 +46,7 @@ class ExecutorScriptAssetBinding(BaseModel):
 class ExecutorContext(BaseModel):
     executor_profile: str | None = None
     skills: list[str] = Field(default_factory=list)
+    mcp_servers: list[str] = Field(default_factory=list)
     instruction_blocks: list[str] = Field(default_factory=list)
     references: list[ExecutorReference] = Field(default_factory=list)
     tool_policy: ExecutorToolPolicy = Field(default_factory=ExecutorToolPolicy)

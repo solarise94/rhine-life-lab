@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app.models.cards import Card, CardAssetRef
 from app.models.graph import Asset, Claim, GraphState, Module, ModuleRef, ReportItem, RunRecord
+from app.models.output_contracts import CardOutputSpec
 from app.models.patches import ApplyResult, GraphPatch
 from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.patch_validator import PatchValidator
@@ -131,7 +132,20 @@ class PatchApplyService:
                         card = self._require_card(cards, payload["card_id"], op.op)
                         if payload["asset_id"] not in card.linked_assets:
                             card.linked_assets.append(payload["asset_id"])
-                        card.outputs.append(CardAssetRef(label=payload["label"], asset_id=payload["asset_id"]))
+                        output = next((item for item in card.outputs if item.asset_id == payload["asset_id"]), None)
+                        if output is None and payload.get("role") and payload.get("label") and payload.get("artifact_class"):
+                            card.outputs.append(
+                                CardOutputSpec(
+                                    role=payload["role"],
+                                    label=payload["label"],
+                                    asset_id=payload["asset_id"],
+                                    artifact_class=payload["artifact_class"],
+                                    accepted_formats=list(payload.get("accepted_formats") or []),
+                                    preferred_format=payload.get("preferred_format"),
+                                    status="valid",
+                                    description=payload.get("description"),
+                                )
+                            )
                     elif op.op == "create_run":
                         graph.runs.append(RunRecord.model_validate(payload))
                     elif op.op == "attach_run_to_card":

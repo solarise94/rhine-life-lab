@@ -190,10 +190,10 @@ def _run_rna_prep(packet: TaskPacket, project_root: Path, run_dir: Path) -> int:
     )
 
     created_assets = [
-        CreatedAsset(role="rna_prep_filtered_counts", type="table", path=filtered_counts_rel, description="Filtered count matrix."),
-        CreatedAsset(role="rna_prep_sample_meta", type="table", path=sample_meta_rel, description="Sample metadata table."),
-        CreatedAsset(role="run_summary", type="markdown", path=summary_rel, description="RNA prep summary."),
-        CreatedAsset(role="run_preview", type="figure", path=preview_rel, description="RNA prep SVG preview."),
+        CreatedAsset(role="rna_prep_filtered_counts", path=filtered_counts_rel, description="Filtered count matrix."),
+        CreatedAsset(role="rna_prep_sample_meta", path=sample_meta_rel, description="Sample metadata table."),
+        CreatedAsset(role="run_summary", path=summary_rel, description="RNA prep summary."),
+        CreatedAsset(role="run_preview", path=preview_rel, description="RNA prep SVG preview."),
     ]
     manifest = Manifest(
         run_id=packet.task_id,
@@ -293,8 +293,7 @@ def _build_prompt(packet: TaskPacket, project_root: Path) -> str:
                 "artifacts": [
                     {
                         "role": "must exactly match expected_outputs.role",
-                        "path": "must exactly match expected_outputs.path_hint",
-                        "type": "must exactly match expected_outputs.type",
+                        "path": "must match one of the role's allowed output paths and file formats",
                         "description": "string",
                         "content": "complete UTF-8 file content to write",
                     }
@@ -302,9 +301,10 @@ def _build_prompt(packet: TaskPacket, project_root: Path) -> str:
             },
             "rules": [
                 "Return every expected output role exactly once.",
-                "For table outputs, write TSV content.",
-                "For markdown outputs, write concise markdown with assumptions and methods.",
-                "For figure outputs, write a valid standalone SVG.",
+                "Prefer expected_outputs.path_hint as the default output path.",
+                "For table outputs, write TSV or CSV text content using an allowed format.",
+                "For document outputs, write concise markdown, HTML, or text using an allowed format.",
+                "For figure outputs, prefer valid standalone SVG unless the contract explicitly prefers another format.",
                 "If the previews are insufficient for a scientific conclusion, state that limitation in warnings and findings.",
             ],
         },
@@ -331,12 +331,11 @@ def _write_outputs(packet: TaskPacket, project_root: Path, response: dict[str, A
             raise ValueError(f"Duplicate artifact role: {role}")
         seen.add(role)
         path = str(artifact.get("path") or "")
-        output_type = str(artifact.get("type") or "")
         content = artifact.get("content")
-        if path != expected_output.path_hint:
-            raise ValueError(f"Artifact path mismatch for {role}: expected {expected_output.path_hint}, got {path}")
-        if output_type != expected_output.type:
-            raise ValueError(f"Artifact type mismatch for {role}: expected {expected_output.type}, got {output_type}")
+        if path not in expected_output.allowed_path_hints():
+            raise ValueError(
+                f"Artifact path mismatch for {role}: expected one of {', '.join(expected_output.allowed_path_hints())}, got {path}"
+            )
         if not isinstance(content, str):
             raise ValueError(f"Artifact content for {role} must be a string.")
         output_path = project_root / path
@@ -345,7 +344,6 @@ def _write_outputs(packet: TaskPacket, project_root: Path, response: dict[str, A
         created.append(
             CreatedAsset(
                 role=role,
-                type=output_type,
                 path=path,
                 description=str(artifact.get("description") or expected_output.label or role),
             )

@@ -25,8 +25,10 @@ from app.models.executor import (
     RuntimeBindings,
 )
 from app.models.graph import Asset, Claim, Module, ReportItem, RunRecord
+from app.models.output_contracts import CardOutputSpec
 from app.models.runs import (
     ExpectedOutput,
+    Manifest,
     RunContext,
     RunEvent,
     TaskPacket,
@@ -34,8 +36,11 @@ from app.models.runs import (
     TaskPacketCardInput,
     TaskPacketCardOutput,
 )
+from app.services.app_config_service import AppConfigService
+from app.services.artifact_format_service import default_format_for_artifact_class
 from app.services.flow_service import FlowService
 from app.services.executor_validation_service import ExecutorValidationService
+from app.services.library_registry_service import LibraryRegistryService
 from app.services.manifest_service import ManifestService
 from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.project_service import ProjectService
@@ -118,10 +123,16 @@ class WorkerService:
         project_service: ProjectService,
         manifest_service: ManifestService,
         runtime_approval_service: RuntimeApprovalService,
+        library_registry_service: LibraryRegistryService | None = None,
     ) -> None:
         self.project_service = project_service
         self.manifest_service = manifest_service
         self.runtime_approval_service = runtime_approval_service
+        self.library_registry_service = library_registry_service or LibraryRegistryService(
+            project_service,
+            AppConfigService(project_service.settings),
+            project_service.settings,
+        )
         self.flow_service = FlowService(project_service)
         self.executor_validation_service = ExecutorValidationService(project_service)
         self.registry = build_worker_registry()
@@ -607,7 +618,7 @@ class WorkerService:
                 card=card,
                 created_assets=review_context.created_assets,
                 status="valid" if accept else "candidate",
-                input_asset_ids=[item.asset_id for item in manifest.inputs_used],
+                input_asset_ids=[item.asset_id for item in task_packet.input_assets],
             )
             if accept:
                 new_claim_ids = self._materialize_claims(
@@ -751,7 +762,18 @@ class WorkerService:
                     payload=dependency_issue_payload,
                 )
                 self._set_run_attention(project_id, run_id, card_id, dependency_issue_message)
-            if timed_out:
+            recovered_from_timeout = False
+            if timed_out and not dependency_issue_message and not audit_errors:
+                recovered_from_timeout, recovery_message = self._recover_manifest_candidate_after_timeout(project_id, run_id)
+                if recovered_from_timeout:
+                    self._append_event(
+                        project_id,
+                        run_id,
+                        card_id,
+                        event_type="timeout_manifest_recovered",
+                        message=recovery_message,
+                    )
+            if timed_out and not recovered_from_timeout:
                 message = dependency_issue_message or "执行超时，已终止。"
                 if audit_errors:
                     message = f"{message} {'; '.join(audit_errors)}"
@@ -762,7 +784,7 @@ class WorkerService:
                 self._commit_run_stage(project_id, run_id, "failed")
                 return
 
-            if return_code != 0:
+            if return_code != 0 and not recovered_from_timeout:
                 message = dependency_issue_message or f"执行器退出码 {return_code}。"
                 if audit_errors:
                     message = f"{message} {'; '.join(audit_errors)}"
@@ -878,6 +900,22 @@ class WorkerService:
         finally:
             self._processes.pop(run_id, None)
             self._threads.pop(run_id, None)
+
+    def _recover_manifest_candidate_after_timeout(self, project_id: str, run_id: str) -> tuple[bool, str]:
+        run_dir = self.project_service.project_path(project_id) / "runs" / run_id
+        manifest_path = run_dir / "manifest.json"
+        if manifest_path.exists():
+            return True, "执行器超时但 manifest.json 已存在，继续进入校验与 Reviewer。"
+        candidate_path = run_dir / "manifest.candidate.json"
+        if not candidate_path.exists():
+            return False, "manifest.candidate.json does not exist."
+        try:
+            payload = json.loads(candidate_path.read_text(encoding="utf-8"))
+            manifest = Manifest.model_validate(payload)
+        except Exception as exc:
+            return False, f"manifest.candidate.json is not valid: {exc}"
+        atomic_write_json(manifest_path, manifest.model_dump())
+        return True, "执行器超时但 manifest.candidate.json 已完整生成，已提升为 manifest.json 并继续进入校验与 Reviewer。"
 
     def _execute_run_guarded(
         self,
@@ -1167,54 +1205,35 @@ class WorkerService:
         ]
         output_refs = [
             item
-            for item in (card.outputs or [CardAssetRef(label="Run summary")])
+            for item in card.outputs
             if not (item.asset_id and asset_map.get(item.asset_id) and asset_map[item.asset_id].created_by_run)
         ]
         if not output_refs:
-            output_refs = [CardAssetRef(label="Run summary")]
+            raise HTTPException(
+                status_code=409,
+                detail=f"Card {card.card_id} has no explicit output contract. Define structured outputs before starting a run.",
+            )
         card_outputs: list[TaskPacketCardOutput] = []
         expected_outputs: list[ExpectedOutput] = []
-        for index, item in enumerate(output_refs, start=1):
-            role, output_type, path_hint = self._infer_output_spec(card.card_id, run_id, item, index)
-            card_outputs.append(
-                TaskPacketCardOutput(
-                    label=item.label,
-                    asset_id=item.asset_id,
-                    status=item.status,
-                    role=role,
-                    type=output_type,
-                    path_hint=path_hint,
-                )
+        for item in output_refs:
+            output_format = item.preferred_format or (item.accepted_formats[0] if item.accepted_formats else None)
+            path_hint = self._default_output_path_hint(card.card_id, run_id, item.role, item.artifact_class, output_format)
+            task_output = TaskPacketCardOutput(
+                role=item.role,
+                label=item.label,
+                artifact_class=item.artifact_class,
+                accepted_formats=list(item.accepted_formats),
+                preferred_format=item.preferred_format,
+                required=item.required,
+                description=item.description,
+                asset_id=item.asset_id,
+                status=item.status,
+                path_hint=path_hint,
             )
-            expected_outputs.append(
-                ExpectedOutput(
-                    role=role,
-                    type=output_type,
-                    path_hint=path_hint,
-                    label=item.label,
-                    asset_id=item.asset_id,
-                )
-            )
+            card_outputs.append(task_output)
+            expected_outputs.append(task_output.model_copy())
 
-        existing_roles = {item.role for item in expected_outputs}
-        if "run_summary" not in existing_roles:
-            expected_outputs.append(
-                ExpectedOutput(
-                    role="run_summary",
-                    type="markdown",
-                    path_hint=f"results/{card.card_id}/{run_id}/run_summary.md",
-                    label="Run summary",
-                )
-            )
-        if "run_preview" not in existing_roles:
-            expected_outputs.append(
-                ExpectedOutput(
-                    role="run_preview",
-                    type="figure",
-                    path_hint=f"results/{card.card_id}/{run_id}/run_preview.svg",
-                    label="Run preview",
-                )
-            )
+        expected_outputs.extend(self._system_expected_outputs(card.card_id, run_id))
 
         result_dir = f"results/{card.card_id}/{run_id}"
         return TaskPacket(
@@ -1241,9 +1260,9 @@ class WorkerService:
                 "Do not overwrite existing valid assets.",
                 f"Write outputs under {result_dir}/",
                 f"Write manifest to runs/{run_id}/manifest.json.",
-                "Declare every consumed input in manifest.inputs_used.",
                 "Do not modify graph/, .git/, or upstream input assets.",
                 f"Do not install missing runtime packages. If required packages/tools are unavailable, use runs/{run_id}/report_dependency_issue.py to report them and stop.",
+                "Record a short input conclusion in manifest.validation_evidence.input_conclusion for Reviewer instead of repeating the full input list.",
             ],
             worker_instructions=(
                 "You are a bioinformatics worker agent. Read task_packet.json, use the declared inputs, "
@@ -1296,8 +1315,8 @@ class WorkerService:
             if r_runtime:
                 context.runtime_bindings.r_env = r_runtime
                 context.runtime_bindings.env["BLUEPRINT_R_RUNTIME"] = r_runtime
-            return context
-        return default_context
+            return self._attach_library_bindings(project_id, context)
+        return self._attach_library_bindings(project_id, default_context)
 
     @staticmethod
     def _default_executor_context(
@@ -1341,6 +1360,8 @@ class WorkerService:
             context.executor_profile = override.executor_profile
         if "skills" in override.model_fields_set:
             context.skills = list(override.skills)
+        if "mcp_servers" in override.model_fields_set:
+            context.mcp_servers = list(override.mcp_servers)
         if "instruction_blocks" in override.model_fields_set:
             context.instruction_blocks = list(override.instruction_blocks)
         if "references" in override.model_fields_set:
@@ -1390,6 +1411,18 @@ class WorkerService:
             stdout_prefix="BP_EVENT ",
             file_path="runs/{run_id}/manager_updates.jsonl",
         )
+
+    def _attach_library_bindings(self, project_id: str, context: ExecutorContext) -> ExecutorContext:
+        runtime_name = context.runtime_bindings.conda_env or None
+        template_metadata = dict(context.template_metadata)
+        template_metadata["library_skill_bindings"] = self.library_registry_service.resolve_skill_bindings(context.skills)
+        template_metadata["library_mcp_bindings"] = self.library_registry_service.resolve_mcp_bindings(
+            project_id,
+            context.mcp_servers,
+            runtime=runtime_name,
+        )
+        context.template_metadata = template_metadata
+        return context
 
     def _save_manager_brief(self, project_id: str, run_id: str, event: ExecutorStructuredEvent) -> None:
         run_dir = self.project_service.project_path(project_id) / "runs" / run_id
@@ -1521,13 +1554,26 @@ class WorkerService:
         for index, item in enumerate(created_assets, start=1):
             asset_id = f"asset_{run_id}_{item['role']}_{index}"
             existing = next((asset for asset in root_graph.assets if asset.asset_id == asset_id), None)
+            artifact_class = item.get("artifact_class") or item.get("type") or "binary"
             if existing:
                 existing.status = status
+                existing.asset_type = artifact_class
+                existing.path = item["path"]
+                existing.summary = item.get("description") or existing.summary
+                existing.metadata = {
+                    **existing.metadata,
+                    "role": item["role"],
+                    "planned_asset_id": item.get("asset_id"),
+                    "format": item.get("format"),
+                    "sha256": item.get("sha256"),
+                    "size_bytes": item.get("size_bytes"),
+                }
+                existing.report_selected = artifact_class == "document"
                 asset = existing
             else:
                 asset = Asset(
                     asset_id=asset_id,
-                    asset_type=item["type"],
+                    asset_type=artifact_class,
                     title=f"{card.title} {item['role']}".strip(),
                     status=status,
                     created_by_run=run_id,
@@ -1537,10 +1583,11 @@ class WorkerService:
                     metadata={
                         "role": item["role"],
                         "planned_asset_id": item.get("asset_id"),
+                        "format": item.get("format"),
                         "sha256": item.get("sha256"),
                         "size_bytes": item.get("size_bytes"),
                     },
-                    report_selected=item["type"] == "markdown",
+                    report_selected=artifact_class == "document",
                 )
                 root_graph.assets.append(asset)
             assets.append(asset)
@@ -1602,15 +1649,11 @@ class WorkerService:
                 output.asset_id = real_asset.asset_id
                 output.status = real_asset.status
 
-        output_map = {item.asset_id for item in card.outputs if item.asset_id}
-        for asset in assets:
-            if asset.asset_id not in output_map:
-                card.outputs.append(CardAssetRef(label=asset.title, asset_id=asset.asset_id))
-
     @staticmethod
     def _current_output_assets_by_role(card: Card, assets: list[Asset], *, current_run_id: str) -> dict[str, Asset]:
         linked_asset_ids = set(card.linked_assets)
         input_asset_ids = {item.asset_id for item in card.inputs if item.asset_id}
+        declared_roles = {item.role for item in card.outputs}
         outputs_by_role: dict[str, Asset] = {}
         for asset in assets:
             if asset.asset_id not in linked_asset_ids:
@@ -1620,7 +1663,7 @@ class WorkerService:
             if asset.created_by_run == current_run_id:
                 continue
             role = str(asset.metadata.get("role") or asset.asset_id or "")
-            if role and asset.status == "valid":
+            if role and role in declared_roles and asset.status == "valid":
                 outputs_by_role[role] = asset
         return outputs_by_role
 
@@ -1869,20 +1912,37 @@ class WorkerService:
                     store.save_cards(cards)
 
     @staticmethod
-    def _infer_output_spec(card_id: str, run_id: str, output: CardAssetRef, index: int) -> tuple[str, str, str]:
-        raw_name = output.asset_id or output.label or f"output_{index:02d}"
-        lowered = raw_name.lower()
-        role = re.sub(r"[^a-z0-9]+", "_", lowered).strip("_") or f"output_{index:02d}"
-        if any(token in lowered for token in ("plot", "figure", "heatmap", "volcano", "preview", "image", "svg")):
-            output_type = "figure"
-            suffix = "svg"
-        elif any(token in lowered for token in ("summary", "report", "markdown", "readme", "note")):
-            output_type = "markdown"
-            suffix = "md"
-        elif lowered.endswith(".json") or "json" in lowered:
-            output_type = "json"
-            suffix = "json"
-        else:
-            output_type = "table"
-            suffix = "tsv"
-        return role, output_type, f"results/{card_id}/{run_id}/{role}.{suffix}"
+    def _default_output_path_hint(
+        card_id: str,
+        run_id: str,
+        role: str,
+        artifact_class: str,
+        output_format: str | None = None,
+    ) -> str:
+        extension = output_format or default_format_for_artifact_class(artifact_class)  # type: ignore[arg-type]
+        return f"results/{card_id}/{run_id}/{role}.{extension}"
+
+    @classmethod
+    def _system_expected_outputs(cls, card_id: str, run_id: str) -> list[ExpectedOutput]:
+        return [
+            ExpectedOutput(
+                role="run_summary",
+                label="Run summary",
+                artifact_class="document",
+                accepted_formats=["md", "html", "txt"],
+                preferred_format="md",
+                required=True,
+                description="System-generated run summary for manager review.",
+                path_hint=cls._default_output_path_hint(card_id, run_id, "run_summary", "document", "md"),
+            ),
+            ExpectedOutput(
+                role="run_preview",
+                label="Run preview",
+                artifact_class="figure",
+                accepted_formats=["svg", "png", "pdf"],
+                preferred_format="svg",
+                required=True,
+                description="System-generated preview asset for quick inspection.",
+                path_hint=cls._default_output_path_hint(card_id, run_id, "run_preview", "figure", "svg"),
+            ),
+        ]

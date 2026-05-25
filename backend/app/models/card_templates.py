@@ -9,12 +9,19 @@ from app.models.executor import (
     ExecutorScriptAssetBinding,
     ExecutorScriptAssetRequirement,
 )
+from app.models.output_contracts import ArtifactClass
 
 
 class TemplateIoBinding(BaseModel):
     label: str
+    role: str | None = None
+    artifact_class: ArtifactClass | None = None
+    accepted_formats: list[str] = Field(default_factory=list)
+    preferred_format: str | None = None
+    asset_id: str | None = None
     status: str | None = None
     required: bool = True
+    description: str | None = None
 
 
 class TemplateBundleFile(BaseModel):

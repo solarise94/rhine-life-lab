@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     manager_model: str = "deepseek-v4-pro"
     executor_model: str = "deepseek-v4-flash"
     reviewer_model: str = "deepseek-v4-flash"
+    library_summarizer_model: str = "deepseek-v4-flash"
     manager_backend: str = "pi"
     manager_temperature: float = 0.2
     manager_max_tokens: int = 2400

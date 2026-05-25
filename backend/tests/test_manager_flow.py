@@ -1,6 +1,7 @@
 import copy
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,68 @@ from app.services.utils import atomic_write_json
 from app.services.worker_service import WorkerService, _redact_command_for_log
 from app.workers.base import PermissionRequest, WorkerAdapter, WorkerLaunchSpec
 from app.workers.shell_worker import ShellWorkerAdapter
+
+
+TEST_DEFAULT_FORMATS = {
+    "figure": ["svg", "png", "pdf"],
+    "table": ["tsv", "csv"],
+    "document": ["md", "html", "txt"],
+    "model": ["rds", "h5ad"],
+    "archive": ["zip", "tar.gz"],
+    "binary": [],
+}
+
+
+def _output_role(label: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_") or "output"
+
+
+def output_contract(
+    label: str,
+    *,
+    role: str | None = None,
+    artifact_class: str = "table",
+    accepted_formats: list[str] | None = None,
+    preferred_format: str | None = None,
+    asset_id: str | None = None,
+    status: str | None = None,
+    required: bool = True,
+    description: str | None = None,
+) -> dict[str, Any]:
+    formats = list(accepted_formats) if accepted_formats is not None else list(TEST_DEFAULT_FORMATS.get(artifact_class, []))
+    return {
+        "role": role or _output_role(label),
+        "label": label,
+        "artifact_class": artifact_class,
+        "accepted_formats": formats,
+        "preferred_format": preferred_format or (formats[0] if formats else None),
+        "asset_id": asset_id,
+        "status": status,
+        "required": required,
+        "description": description,
+    }
+
+
+def expected_output_spec(
+    role: str,
+    path_hint: str,
+    *,
+    artifact_class: str = "table",
+    accepted_formats: list[str] | None = None,
+    preferred_format: str | None = None,
+    label: str | None = None,
+    asset_id: str | None = None,
+) -> dict[str, Any]:
+    formats = list(accepted_formats) if accepted_formats is not None else list(TEST_DEFAULT_FORMATS.get(artifact_class, []))
+    return {
+        "role": role,
+        "label": label or role,
+        "artifact_class": artifact_class,
+        "accepted_formats": formats,
+        "preferred_format": preferred_format or (formats[0] if formats else None),
+        "path_hint": path_hint,
+        "asset_id": asset_id,
+    }
 
 
 class AnswerOnlyPlanner:
@@ -125,6 +188,7 @@ class ManagerFlowTest(unittest.TestCase):
         self._original_executor_sandbox_mode = settings.executor_sandbox_mode
         self._original_executor_extra_ro_binds = settings.executor_extra_ro_binds
         self._original_executor_conda_base = settings.executor_conda_base
+        self._original_worker_timeout_seconds = settings.worker_timeout_seconds
         settings.deepseek_api_key = None
         settings.default_worker_type = "pi"
         settings.executor_sandbox_mode = "none"
@@ -165,6 +229,7 @@ class ManagerFlowTest(unittest.TestCase):
         settings.executor_sandbox_mode = self._original_executor_sandbox_mode
         settings.executor_extra_ro_binds = self._original_executor_extra_ro_binds
         settings.executor_conda_base = self._original_executor_conda_base
+        settings.worker_timeout_seconds = self._original_worker_timeout_seconds
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _add_single_submodule_group_fixture(self) -> tuple[str, str, str, str]:
@@ -217,7 +282,7 @@ class ManagerFlowTest(unittest.TestCase):
                     "summary": "Parent group card for runtime aggregation tests.",
                     "why": "Exercise group aggregation during executor lifecycle.",
                     "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
-                    "outputs": [{"label": "Runtime child output", "status": "planned"}],
+                    "outputs": [output_contract("Runtime child output", status="planned")],
                     "linked_modules": [group_module_id],
                 }
             )
@@ -232,7 +297,7 @@ class ManagerFlowTest(unittest.TestCase):
                     "summary": "Child card whose run state should bubble to the parent group.",
                     "why": "Exercise module-group synchronization.",
                     "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
-                    "outputs": [{"label": "Runtime child output"}],
+                    "outputs": [output_contract("Runtime child output")],
                     "linked_modules": [child_module_id],
                     "next_actions": ["开始执行"],
                 }
@@ -265,6 +330,105 @@ class ManagerFlowTest(unittest.TestCase):
 
         self.assertTrue(any(item["name"] == "__system__" and item["label"] == "System R" for item in runtimes))
 
+    def test_project_runtime_preferences_persist_to_snapshot_and_metadata(self) -> None:
+        prefs = self.project_service.update_project_runtime_preferences(
+            "test-project",
+            {
+                "script_preference": "prefer_r",
+                "python_runtime": "omicverse",
+                "r_runtime": "bioconductor",
+            },
+        )
+        self.assertEqual("prefer_r", prefs.script_preference)
+        self.assertEqual("omicverse", prefs.python_runtime)
+        self.assertEqual("bioconductor", prefs.r_runtime)
+
+        snapshot = self.project_service.get_project_snapshot("test-project")
+        self.assertEqual("prefer_r", snapshot["project"].runtime_preferences.script_preference)
+        self.assertEqual("omicverse", snapshot["project"].runtime_preferences.python_runtime)
+        self.assertEqual("bioconductor", snapshot["project"].runtime_preferences.r_runtime)
+        self.assertEqual("omicverse", snapshot["graph"].metadata["default_conda_env"])
+        self.assertEqual("bioconductor", snapshot["graph"].metadata["default_r_env"])
+
+    def test_configure_card_execution_can_set_skills_and_mcp_servers(self) -> None:
+        result = self.manager.blueprint_tools.configure_card_execution(
+            "test-project",
+            {
+                "card_id": "card_immune_module",
+                "skills": ["skill_a", "skill_b"],
+                "mcp_servers": ["omicverse"],
+            },
+        )
+        self.assertEqual(["card_immune_module"], result["updated_card_ids"])
+        snapshot = self.project_service.get_project_snapshot("test-project")
+        card = next(item for item in snapshot["cards"] if item.card_id == "card_immune_module")
+        self.assertEqual(["skill_a", "skill_b"], card.executor_context.skills)
+        self.assertEqual(["omicverse"], card.executor_context.mcp_servers)
+
+    def test_library_registry_manager_tools_support_list_search_and_detail(self) -> None:
+        skills = self.manager.blueprint_tools.list_skill_library("test-project")
+        self.assertEqual("skill", skills["kind"])
+        self.assertIn("items", skills)
+        if skills["items"]:
+            self.assertEqual({"id", "kind", "name", "enabled"}, set(skills["items"][0].keys()))
+        search = self.manager.blueprint_tools.search_mcp_library(
+            "test-project",
+            {"query": "omics runtime", "top_k": 5},
+        )
+        self.assertEqual("mcp", search["kind"])
+        self.assertTrue(search["items"])
+        self.assertEqual({"id", "kind", "name", "enabled", "score"}, set(search["items"][0].keys()))
+        detail = self.manager.blueprint_tools.get_mcp_library_item("test-project", "omicverse")
+        self.assertEqual("omicverse", detail["item"]["id"])
+        self.assertIn("summary_short", detail["item"])
+        self.assertEqual("test-project", detail["project_id"])
+
+    def test_manager_lightweight_project_tools_avoid_full_payloads(self) -> None:
+        summary = self.manager.blueprint_tools.inspect_project_summary("test-project")
+        self.assertIn("counts", summary)
+        self.assertTrue(summary["cards"])
+        self.assertIn("card_id", summary["cards"][0])
+        self.assertNotIn("executor_context", summary["cards"][0])
+
+        cards = self.manager.blueprint_tools.find_cards("test-project", {"query": "immune", "limit": 5})
+        self.assertTrue(cards["items"])
+        self.assertLessEqual(len(cards["items"]), 5)
+        self.assertNotIn("executor_context", cards["items"][0])
+
+        assets = self.manager.blueprint_tools.find_assets("test-project", {"query": "deg", "limit": 5})
+        self.assertTrue(assets["items"])
+        self.assertIn("asset_id", assets["items"][0])
+
+        card_id = cards["items"][0]["card_id"]
+        detail = self.manager.blueprint_tools.get_card_detail("test-project", card_id)
+        self.assertEqual(card_id, detail["card"]["card_id"])
+        self.assertIn("executor_context", detail["card"])
+
+        plan = self.manager.blueprint_tools.plan_card_write(
+            "test-project",
+            {
+                "action": "create",
+                "card": {
+                    "card_id": "planned_lightweight_card",
+                    "card_type": "module",
+                    "title": "Lightweight planned card",
+                    "status": "planned",
+                    "step": 2,
+                    "summary": "Exercise lightweight planning.",
+                    "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
+                    "outputs": [output_contract("Lightweight output", role="lightweight_output")],
+                },
+            },
+        )
+        self.assertTrue(plan["ok"])
+        self.assertEqual("planned_lightweight_card", plan["card"]["card_id"])
+        self.assertNotIn("timeline", plan)
+
+        created = self.manager.blueprint_tools.create_card("test-project", plan["card"] | {"outputs": plan["normalized_outputs"]})
+        self.assertTrue(created["ok"])
+        self.assertEqual("planned_lightweight_card", created["card_id"])
+        self.assertNotIn("timeline", created)
+
     def test_review_replaces_planned_output_asset_ids_with_materialized_assets(self) -> None:
         card = Card.model_validate(
             {
@@ -273,7 +437,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "title": "QC Replace Outputs",
                 "status": "needs_review",
                 "summary": "Create a planned output then replace it after review.",
-                "outputs": [{"label": "filtered counts", "asset_id": "planned_filtered_counts"}],
+                "outputs": [output_contract("filtered counts", role="filtered_counts", asset_id="planned_filtered_counts")],
             }
         )
         real_asset = Asset(
@@ -287,17 +451,15 @@ class ManagerFlowTest(unittest.TestCase):
         manifest_asset = CreatedAsset.model_validate(
             {
                 "role": "filtered_counts",
-                "type": "table",
                 "path": "results/qc/run_001/filtered_counts.tsv",
             }
         )
         expected_output = ExpectedOutput.model_validate(
-            {
-                "role": "filtered_counts",
-                "type": "table",
-                "path_hint": "results/qc/run_001/filtered_counts.tsv",
-                "asset_id": "planned_filtered_counts",
-            }
+            expected_output_spec(
+                "filtered_counts",
+                "results/qc/run_001/filtered_counts.tsv",
+                asset_id="planned_filtered_counts",
+            )
         )
 
         self.worker._sync_card_outputs(
@@ -320,7 +482,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "status": "accepted",
                 "summary": "QC",
                 "linked_assets": ["asset_old_counts"],
-                "outputs": [{"label": "counts", "asset_id": "asset_old_counts"}],
+                "outputs": [output_contract("counts", role="filtered_counts", asset_id="asset_old_counts")],
             }
         )
         consumer = Card.model_validate(
@@ -602,7 +764,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "summary": "基于 DEG 结果进行 GO BP 富集。",
                 "step": 2,
                 "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
-                "outputs": [{"label": "GO BP enrichment", "asset_id": "go_bp_result"}],
+                "outputs": [output_contract("GO BP enrichment", role="go_bp_enrichment", asset_id="go_bp_result")],
             },
         )
 
@@ -624,7 +786,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "step": 2,
                 "why": "解释差异基因的生物过程。",
                 "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
-                "outputs": [{"label": "GO BP enrichment"}],
+                "outputs": [output_contract("GO BP enrichment", role="go_bp_enrichment")],
                 "linked_modules": ["module_group_enrichment"],
                 "linked_assets": ["deg_table_v1"],
             },
@@ -646,7 +808,7 @@ class ManagerFlowTest(unittest.TestCase):
                     "title": "No Step",
                     "summary": "Should fail because step is explicit metadata now.",
                     "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
-                    "outputs": [{"label": "result", "asset_id": "no_step_result"}],
+                    "outputs": [output_contract("result", asset_id="no_step_result")],
                 },
             )
 
@@ -660,7 +822,7 @@ class ManagerFlowTest(unittest.TestCase):
                     "summary": "Should fail because input is unknown.",
                     "step": 1,
                     "inputs": [{"label": "missing", "asset_id": "missing_deg"}],
-                    "outputs": [{"label": "result", "asset_id": "missing_input_result"}],
+                    "outputs": [output_contract("result", asset_id="missing_input_result")],
                 },
             )
 
@@ -673,7 +835,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "summary": "Produce filtered counts.",
                 "step": 1,
                 "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
-                "outputs": [{"label": "filtered counts", "asset_id": "filtered_counts"}],
+                "outputs": [output_contract("filtered counts", role="filtered_counts", asset_id="filtered_counts")],
             },
         )
 
@@ -686,7 +848,7 @@ class ManagerFlowTest(unittest.TestCase):
                     "summary": "Consumes a planned upstream output.",
                     "step": 1,
                     "inputs": [{"label": "filtered counts", "asset_id": "filtered_counts"}],
-                    "outputs": [{"label": "downstream result", "asset_id": "downstream_result"}],
+                    "outputs": [output_contract("downstream result", asset_id="downstream_result")],
                 },
             )
 
@@ -699,7 +861,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "summary": "Produce filtered counts.",
                 "step": 1,
                 "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
-                "outputs": [{"label": "filtered counts", "asset_id": "filtered_counts"}],
+                "outputs": [output_contract("filtered counts", role="filtered_counts", asset_id="filtered_counts")],
             },
         )
         result = self.manager.blueprint_tools.update_card(
@@ -744,7 +906,7 @@ class ManagerFlowTest(unittest.TestCase):
                     "summary": "Duplicate card id.",
                     "step": 1,
                     "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
-                    "outputs": [{"label": "duplicate", "asset_id": "duplicate_output"}],
+                    "outputs": [output_contract("duplicate", asset_id="duplicate_output")],
                 },
             )
 
@@ -757,7 +919,7 @@ class ManagerFlowTest(unittest.TestCase):
                     "summary": "Duplicate a planned or materialized output.",
                     "step": 1,
                     "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
-                    "outputs": [{"label": "DEG", "asset_id": "deg_table_v1"}],
+                    "outputs": [output_contract("DEG", role="deg", asset_id="deg_table_v1")],
                 },
             )
 
@@ -769,7 +931,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "summary": "Creates a planned output asset.",
                 "step": 1,
                 "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
-                "outputs": [{"label": "planned result", "asset_id": "planned_duplicate_result"}],
+                "outputs": [output_contract("planned result", role="planned_result", asset_id="planned_duplicate_result")],
             },
         )
         with self.assertRaisesRegex(ManagerPlanningError, "Duplicate planned output asset_id values"):
@@ -781,7 +943,7 @@ class ManagerFlowTest(unittest.TestCase):
                     "summary": "Tries to create the same planned output asset.",
                     "step": 1,
                     "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
-                    "outputs": [{"label": "planned result", "asset_id": "planned_duplicate_result"}],
+                    "outputs": [output_contract("planned result", role="planned_result", asset_id="planned_duplicate_result")],
                 },
             )
 
@@ -817,7 +979,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "summary": "过滤低质量样本并输出 filtered counts。",
                 "step": 1,
                 "inputs": [{"label": "Raw counts", "asset_id": "raw_counts"}],
-                "outputs": [{"label": "Filtered counts", "asset_id": "filtered_counts"}],
+                "outputs": [output_contract("Filtered counts", role="filtered_counts", asset_id="filtered_counts")],
             },
         )
         manager.blueprint_tools.create_card(
@@ -828,7 +990,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "summary": "基于 filtered counts 输出 DEG 结果。",
                 "step": 2,
                 "inputs": [{"label": "Filtered counts", "asset_id": "filtered_counts"}],
-                "outputs": [{"label": "DEG results", "asset_id": "deseq2_results"}],
+                "outputs": [output_contract("DEG results", role="deseq2_results", asset_id="deseq2_results")],
             },
         )
         manager.blueprint_tools.create_card(
@@ -839,7 +1001,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "summary": "基于 DEG results 做 KEGG 富集。",
                 "step": 3,
                 "inputs": [{"label": "DEG results", "asset_id": "deseq2_results"}],
-                "outputs": [{"label": "KEGG results", "asset_id": "kegg_results"}],
+                "outputs": [output_contract("KEGG results", role="kegg_results", asset_id="kegg_results")],
             },
         )
 
@@ -939,7 +1101,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "summary": "Produce filtered counts.",
                 "step": 1,
                 "inputs": [{"label": "Raw counts", "asset_id": "raw_counts"}],
-                "outputs": [{"label": "Filtered counts", "asset_id": "filtered_counts"}],
+                "outputs": [output_contract("Filtered counts", role="filtered_counts", asset_id="filtered_counts")],
             },
         )
         manager.blueprint_tools.create_card(
@@ -950,7 +1112,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "summary": "Produce DEG results.",
                 "step": 2,
                 "inputs": [{"label": "Filtered counts", "asset_id": "filtered_counts"}],
-                "outputs": [{"label": "DEG results", "asset_id": "deseq2_results"}],
+                "outputs": [output_contract("DEG results", role="deseq2_results", asset_id="deseq2_results")],
             },
         )
 
@@ -1231,7 +1393,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "summary": "Stable reusable analysis card.",
                 "why": "Used to seed the template library.",
                 "inputs": [],
-                "outputs": [{"label": "Template output"}],
+                "outputs": [output_contract("Template output")],
                 "executor_context": {
                     "instruction_blocks": ["Prefer reusable scripts."],
                     "script_asset_requirements": [
@@ -1284,7 +1446,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "summary": "Simple card for manager run-control smoke.",
                 "why": "Verify manager start_card_run wrapper.",
                 "inputs": [],
-                "outputs": [{"label": "Result table"}],
+                "outputs": [output_contract("Result table", role="result_table")],
             },
         )
 
@@ -1415,7 +1577,16 @@ class ManagerFlowTest(unittest.TestCase):
         run_dir = project_root / "runs" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         store = self.project_service.graph_store("test-project")
-        card = next(item for item in store.load_cards() if item.card_id == "card_enrichment_group")
+        cards = store.load_cards()
+        card = next(item for item in cards if item.card_id == "card_enrichment_group")
+        card.executor_context = ExecutorContext.model_validate(
+            {
+                "skills": ["spatial-10x-converter"],
+                "mcp_servers": ["omicverse"],
+                "runtime_bindings": {"conda_env": "omicverse"},
+            }
+        )
+        store.save_cards(cards)
         packet = self.worker._task_packet("test-project", run_id, card, store.load_graph().assets, "shell")
         packet_path = run_dir / "task_packet.json"
         packet_path.write_text(json.dumps(packet.model_dump(), ensure_ascii=True), encoding="utf-8")
@@ -1432,10 +1603,14 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue((run_dir / "executor_brief.md").exists())
         self.assertTrue((run_dir / "executor_prompt.md").exists())
         self.assertTrue((run_dir / "adapter_contract.json").exists())
+        self.assertTrue((run_dir / "library" / "skill_bindings.json").exists())
+        self.assertTrue((run_dir / "library" / "mcp_bindings.json").exists())
+        self.assertTrue((run_dir / "library" / "mcp.json").exists())
         self.assertIn("BLUEPRINT_EXECUTOR_BRIEF", spec.environment)
         self.assertIn("BLUEPRINT_EXECUTOR_PROMPT", spec.environment)
         self.assertIn("BLUEPRINT_ADAPTER_CONTRACT", spec.environment)
         self.assertIn("BLUEPRINT_DEPENDENCY_REPORT_TOOL", spec.environment)
+        self.assertIn("BLUEPRINT_PI_SKILL_PATHS", spec.environment)
         self.assertIn("BLUEPRINT_ALLOWED_PATHS", spec.environment)
         self.assertTrue(any(request.target == "scripts/generated/" for request in spec.permission_requests))
         self.assertTrue((run_dir / "report_dependency_issue.py").exists())
@@ -1452,6 +1627,8 @@ class ManagerFlowTest(unittest.TestCase):
         prompt = (run_dir / "executor_prompt.md").read_text(encoding="utf-8")
         self.assertIn("Runtime dependency policy", prompt)
         self.assertIn("report_dependency_issue.py", prompt)
+        self.assertIn("validation_evidence.input_conclusion", prompt)
+        self.assertIn("Do not restate the full input list in the manifest", prompt)
 
     def test_dependency_report_tool_marks_run_failed_with_attention(self) -> None:
         adapter = ShellWorkerAdapter()
@@ -1673,7 +1850,7 @@ for item in packet["expected_outputs"]:
     output_path = project_root / item["path_hint"]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(f"generated:{item['role']}\\n", encoding="utf-8")
-    created_assets.append({"role": item["role"], "type": item["type"], "path": item["path_hint"]})
+    created_assets.append({"role": item["role"], "path": item["path_hint"]})
 code_path = project_root / "scripts" / "generated" / packet["task_id"] / "analysis.py"
 code_path.parent.mkdir(parents=True, exist_ok=True)
 code_path.write_text("print('repair test')\\n", encoding="utf-8")
@@ -1746,6 +1923,91 @@ candidate.write_text(json.dumps(manifest), encoding="utf-8")
                 ["executor_prompt.md", "manifest_repair_prompt.md"],
                 (run_dir / "seen_prompts.log").read_text(encoding="utf-8").splitlines(),
             )
+        finally:
+            settings.opencode_command = original_command
+
+    def test_agent_cli_wrapper_forwards_input_conclusion_to_review_context(self) -> None:
+        settings = self.project_service.settings
+        original_command = settings.opencode_command
+        project_root = self.project_service.project_path("test-project")
+        run_id = "run_wrapper_input_conclusion"
+        run_dir = project_root / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store = self.project_service.graph_store("test-project")
+        card = next(item for item in store.load_cards() if item.card_id == "card_enrichment_group")
+        packet = self.worker._task_packet("test-project", run_id, card, store.load_graph().assets, "opencode")
+        packet_path = run_dir / "task_packet.json"
+        packet_path.write_text(json.dumps(packet.model_dump(), ensure_ascii=True), encoding="utf-8")
+        stub_path = Path(self.tmpdir) / "agent_manifest_missing_inputs_stub.py"
+        stub_path.write_text(
+            """
+import json
+import os
+import sys
+from pathlib import Path
+
+packet = json.loads(Path(os.environ["BLUEPRINT_TASK_PACKET"]).read_text(encoding="utf-8"))
+run_dir = Path(os.environ["BLUEPRINT_RUN_DIR"])
+project_root = Path(os.environ["BLUEPRINT_PROJECT_ROOT"])
+candidate = Path(os.environ["BLUEPRINT_MANIFEST_CANDIDATE_PATH"])
+
+created_assets = []
+for item in packet["expected_outputs"]:
+    output_path = project_root / item["path_hint"]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(f"generated:{item['role']}\\n", encoding="utf-8")
+    created_assets.append({"role": item["role"], "path": item["path_hint"]})
+code_path = project_root / "scripts" / "generated" / packet["task_id"] / "analysis.py"
+code_path.parent.mkdir(parents=True, exist_ok=True)
+code_path.write_text("print('repair test')\\n", encoding="utf-8")
+manifest = {
+    "run_id": packet["task_id"],
+    "status": "success",
+    "summary": "Manifest missing some inputs on first pass.",
+    "created_assets": created_assets,
+    "validation_evidence": {
+        "input_conclusion": "Reviewed the declared inputs and used the relevant ones for this analysis.",
+    },
+    "code_artifacts": [{"path": str(code_path.relative_to(project_root)), "language": "python"}],
+    "commands_executed": ["agent-manifest-stub"],
+    "metrics": {},
+    "key_findings": [],
+    "recommended_graph_updates": [],
+    "warnings": [],
+}
+candidate.write_text(json.dumps(manifest), encoding="utf-8")
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        settings.opencode_command = f"{sys.executable} {stub_path} {{executor_prompt_path}}"
+        try:
+            spec = self.worker.registry["opencode"].build_launch_spec(
+                packet=packet,
+                packet_path=packet_path,
+                run_dir=run_dir,
+                project_root=project_root,
+                settings=settings,
+            )
+            env = {
+                **spec.environment,
+                "BLUEPRINT_TASK_PACKET": str(packet_path),
+                "BLUEPRINT_RUN_DIR": str(run_dir),
+                "BLUEPRINT_PROJECT_ROOT": str(project_root),
+                "BLUEPRINT_MANIFEST_CANDIDATE_PATH": str(run_dir / "manifest.candidate.json"),
+            }
+            result = subprocess.run(spec.command, cwd=spec.cwd, env=env, text=True, capture_output=True, check=False)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            manifest = Manifest.model_validate(json.loads((run_dir / "manifest.json").read_text(encoding="utf-8")))
+            self.assertEqual("success", manifest.status)
+            self.assertEqual("Reviewed the declared inputs and used the relevant ones for this analysis.", manifest.validation_evidence["input_conclusion"])
+            self.assertFalse((run_dir / "manifest_repair_prompt.md").exists())
+            prompt_text = (run_dir / "executor_prompt.md").read_text(encoding="utf-8")
+            self.assertIn("validation_evidence.input_conclusion", prompt_text)
+            self.assertIn("Do not restate the full input list in the manifest", prompt_text)
+            context = self.manifest_service.manifest_to_review_context("test-project", run_id)
+            self.assertEqual(len(packet.input_assets), len(context.declared_input_assets))
+            self.assertEqual("Reviewed the declared inputs and used the relevant ones for this analysis.", context.input_conclusion)
         finally:
             settings.opencode_command = original_command
 
@@ -1848,7 +2110,6 @@ for item in packet["expected_outputs"]:
     created_assets.append(
         {
             "role": item["role"],
-            "type": item["type"],
             "path": item["path_hint"],
             "description": f"generated {item['role']}",
         }
@@ -1997,7 +2258,7 @@ print('BP_EVENT {"type":"progress_update","stage":"provider","progress":10,"mess
         graph.assets.append(
             Asset(
                 asset_id="existing_valid_collision",
-                asset_type=colliding_output.type,
+                asset_type=colliding_output.artifact_class,
                 title="Existing valid output",
                 status="valid",
                 created_by_run="run_previous",
@@ -2018,7 +2279,6 @@ print('BP_EVENT {"type":"progress_update","stage":"provider","progress":10,"mess
             "created_assets": [
                 {
                     "role": item.role,
-                    "type": item.type,
                     "path": item.path_hint,
                     "description": f"generated {item.role}",
                 }
@@ -2082,7 +2342,6 @@ for item in packet["expected_outputs"]:
     created_assets.append(
         {
             "role": item["role"],
-            "type": item["type"],
             "path": item["path_hint"],
             "description": f"generated {item['role']}",
         }
@@ -2146,7 +2405,6 @@ for item in packet["expected_outputs"]:
     created_assets.append(
         {
             "role": item["role"],
-            "type": item["type"],
             "path": item["path_hint"],
             "description": f"generated {item['role']}",
         }
@@ -2182,6 +2440,65 @@ manifest = {
         events = self.project_service.graph_store("test-project").load_run_events(run["run_id"])
         self.assertTrue(any(event.event_type == "run_failed" and "validator exploded" in event.message for event in events))
 
+    def test_timeout_with_complete_manifest_candidate_continues_to_review(self) -> None:
+        script = """
+import json
+import sys
+import time
+from pathlib import Path
+
+packet = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+run_dir = Path(sys.argv[2])
+project_root = Path(sys.argv[3])
+code_path = project_root / "scripts" / "generated" / packet["task_id"] / "analysis.py"
+code_path.parent.mkdir(parents=True, exist_ok=True)
+code_path.write_text("print('analysis complete')\\n", encoding="utf-8")
+created_assets = []
+for item in packet["expected_outputs"]:
+    path = project_root / item["path_hint"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"generated:{item['role']}\\n", encoding="utf-8")
+    created_assets.append(
+        {
+            "role": item["role"],
+            "path": item["path_hint"],
+            "label": item.get("label"),
+            "description": f"generated {item['role']}",
+        }
+    )
+manifest = {
+    "run_id": packet["task_id"],
+    "status": "success",
+    "summary": "complete before timeout",
+    "inputs_used": packet["input_assets"],
+    "created_assets": created_assets,
+    "code_artifacts": [{"path": f"scripts/generated/{packet['task_id']}/analysis.py", "language": "python"}],
+    "commands_executed": ["timeout-recovery-test"],
+    "metrics": {},
+    "key_findings": ["completed before wrapper timeout"],
+    "recommended_graph_updates": [],
+    "warnings": [],
+}
+(run_dir / "manifest.candidate.json").write_text(json.dumps(manifest), encoding="utf-8")
+(run_dir / "manager_brief.json").write_text(json.dumps({"final_report": {"summary": "complete before timeout"}}), encoding="utf-8")
+print("complete")
+time.sleep(5)
+"""
+        self.worker.registry["timeout_recovery_stub"] = InlineCommandWorkerAdapter("timeout_recovery_stub", script)
+        settings = get_settings()
+        settings.worker_timeout_seconds = 1
+
+        run = self.worker.start_run("test-project", "card_enrichment_group", worker_type="timeout_recovery_stub")
+        self._wait_for_run("test-project", run["run_id"])
+
+        project_root = self.project_service.project_path("test-project")
+        self.assertTrue((project_root / "runs" / run["run_id"] / "manifest.json").exists())
+        snapshot = self.project_service.get_project_snapshot("test-project")
+        run_record = next(item for item in snapshot["graph"].runs if item.run_id == run["run_id"])
+        self.assertEqual("reviewed", run_record.status)
+        events = self.project_service.graph_store("test-project").load_run_events(run["run_id"])
+        self.assertTrue(any(event.event_type == "timeout_manifest_recovered" for event in events))
+
     def test_filesystem_audit_violation_marks_run_failed(self) -> None:
         script = """
 import json
@@ -2199,7 +2516,6 @@ for item in packet["expected_outputs"]:
     created_assets.append(
         {
             "role": item["role"],
-            "type": item["type"],
             "path": item["path_hint"],
             "description": f"generated {item['role']}",
         }
@@ -2320,7 +2636,7 @@ manifest = {
                 "summary": "Audit should be recorded when enabled.",
                 "step": 1,
                 "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
-                "outputs": [{"label": "result", "asset_id": "audited_result"}],
+                "outputs": [output_contract("result", asset_id="audited_result")],
             },
         )
 
@@ -2499,7 +2815,7 @@ manifest = {
                 run_id=run_id,
                 status="success",
                 summary="bad path",
-                created_assets=[CreatedAsset(role="bad", type="table", path="../outside.tsv")],
+                created_assets=[CreatedAsset(role="bad", path="../outside.tsv")],
             ).model_dump(),
         )
 
@@ -2580,7 +2896,7 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
                     run_id=run_id,
                     status="success",
                     summary="done",
-                    created_assets=[CreatedAsset(role="output", type="table", path="results/output.tsv")],
+                    created_assets=[CreatedAsset(role="output", path="results/output.tsv")],
                     code_artifacts=[{"path": f"scripts/generated/{run_id}/analyze.py", "language": "python"}],
                 ).model_dump(),
             )
@@ -2642,7 +2958,7 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
                     "run_id": run_id,
                     "status": "success",
                     "summary": "done",
-                    "created_assets": [{"role": "output", "type": "table", "path": "results/output.tsv"}],
+                    "created_assets": [{"role": "output", "path": "results/output.tsv"}],
                     "code_artifacts": [
                         {
                             "path": f"scripts/generated/{run_id}/",
@@ -2683,7 +2999,7 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
                     "run_id": run_id,
                     "status": "success",
                     "summary": "done",
-                    "created_assets": [{"role": "output", "type": "table", "path": "results/output.tsv"}],
+                    "created_assets": [{"role": "output", "path": "results/output.tsv"}],
                     "code_artifacts": [{"path": f"scripts/generated/{run_id}/analyze.py", "language": "python"}],
                 }
             )
@@ -2793,11 +3109,7 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
                 "goal": "Review executor output.",
                 "input_assets": [{"asset_id": "input", "path": "data/input.tsv", "type": "table"}],
                 "expected_outputs": [
-                    {
-                        "role": "output",
-                        "type": "table",
-                        "path_hint": f"results/card_review/{run_id}/output.tsv",
-                    }
+                    expected_output_spec("output", f"results/card_review/{run_id}/output.tsv")
                 ],
                 "allowed_paths": [
                     f"runs/{run_id}/",
@@ -2815,11 +3127,10 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
                 "created_assets": [
                     {
                         "role": "output",
-                        "type": "table",
                         "path": f"results/card_review/{run_id}/output.tsv",
                     },
-                    {"role": "output", "type": "table", "path": "graph/graph.json"},
-                    {"role": "undeclared", "type": "table", "path": f"results/card_review/{run_id}/extra.tsv"},
+                    {"role": "output", "path": "graph/graph.json"},
+                    {"role": "undeclared", "path": f"results/card_review/{run_id}/extra.tsv"},
                 ],
                 "code_artifacts": [
                     {"path": f"scripts/generated/{run_id}/analysis.py", "language": "python"},
@@ -2856,11 +3167,7 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
                     "card_id": "card_review",
                     "goal": "Review executor output.",
                     "expected_outputs": [
-                        {
-                            "role": "output",
-                            "type": "table",
-                            "path_hint": f"results/card_review/{run_id}/output.tsv",
-                        }
+                        expected_output_spec("output", f"results/card_review/{run_id}/output.tsv")
                     ],
                     "allowed_paths": [f"runs/{run_id}/", f"results/card_review/{run_id}/"],
                     "worker_instructions": "Run analysis.",
@@ -2871,7 +3178,7 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
                     "run_id": run_id,
                     "status": "success",
                     "summary": "done",
-                    "created_assets": [{"role": "output", "type": "table", "path": "graph/graph.json"}],
+                    "created_assets": [{"role": "output", "path": "graph/graph.json"}],
                 }
             )
             worker = ExecutorReviewerWorker(get_settings())
@@ -3095,7 +3402,7 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
                     "project_id": "test-project",
                     "card_id": "card_review",
                     "goal": "Review executor output.",
-                    "expected_outputs": [{"role": "plot", "type": "figure", "path_hint": "results/plot.png"}],
+                    "expected_outputs": [expected_output_spec("plot", "results/plot.png", artifact_class="figure")],
                     "allowed_paths": ["results/"],
                     "worker_instructions": "Run analysis.",
                 }
@@ -3105,7 +3412,7 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
                     "run_id": run_id,
                     "status": "success",
                     "summary": "done",
-                    "created_assets": [{"role": "plot", "type": "figure", "path": "results/plot.png"}],
+                    "created_assets": [{"role": "plot", "path": "results/plot.png"}],
                 }
             )
             worker = ExecutorReviewerWorker(get_settings())

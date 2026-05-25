@@ -106,4 +106,22 @@ class ReportService:
         payload = "\n".join(html)
         path = self.project_service.project_path(project_id) / "reports" / "report.html"
         path.write_text(payload, encoding="utf-8")
-        return {"path": str(path.relative_to(self.project_service.project_path(project_id))), "html": payload}
+        return {
+            "path": str(path.relative_to(self.project_service.project_path(project_id))),
+            "content_url": f"/api/projects/{project_id}/report/exported-html",
+            "html": payload,
+        }
+
+    def get_exported_html(self, project_id: str) -> dict:
+        path = self.project_service.project_path(project_id) / "reports" / "report.html"
+        if not path.exists():
+            return {
+                "path": "reports/report.html",
+                "content_url": f"/api/projects/{project_id}/report/exported-html",
+                "html": "",
+            }
+        return {
+            "path": str(path.relative_to(self.project_service.project_path(project_id))),
+            "content_url": f"/api/projects/{project_id}/report/exported-html",
+            "html": path.read_text(encoding="utf-8"),
+        }

@@ -11,14 +11,14 @@ import {
   FolderGit2,
   Files,
   Beaker,
-  KeyRound,
   MessageSquareText,
   Plus,
   Trash2,
+  Settings2,
 } from "lucide-react";
 
 import { api } from "@/lib/api";
-import { useAppSettings, useChatSessions, useProjects, useUpdateAppSettingsMutation } from "@/lib/hooks";
+import { useChatSessions, useProjects } from "@/lib/hooks";
 import { queryKeys } from "@/lib/query-keys";
 import { ScriptPreference, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 import { ChatSessionSummary, PythonRuntime, RRuntime } from "@/lib/types";
@@ -79,13 +79,7 @@ export function SideNav({
   const queryClient = useQueryClient();
   const sessionsQuery = useChatSessions(projectId);
   const projectsQuery = useProjects();
-  const appSettingsQuery = useAppSettings();
-  const updateAppSettingsMutation = useUpdateAppSettingsMutation();
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
-  const [apiSettingsOpen, setApiSettingsOpen] = useState(false);
-  const [deepseekKey, setDeepseekKey] = useState("");
-  const [tavilyKey, setTavilyKey] = useState("");
-  const [apiStatus, setApiStatus] = useState<string | null>(null);
   const currentChatSessionId = useWorkspaceUiStore((s) => s.currentChatSessionIdByProject[projectId]);
   const setCurrentChatSessionId = useWorkspaceUiStore((s) => s.setCurrentChatSessionId);
   const clearAttachments = useWorkspaceUiStore((s) => s.clearAttachments);
@@ -96,27 +90,6 @@ export function SideNav({
     [projectsQuery.data],
   );
   const currentProject = projects.find((project) => project.project_id === projectId);
-  const appSettings = appSettingsQuery.data;
-  const deepseekConfigured = Boolean(appSettings?.deepseek.api_key_configured);
-  const webSearchConfigured = Boolean(appSettings?.web_search.enabled && appSettings.web_search.api_key_configured);
-  const [managerModel, setManagerModel] = useState(appSettings?.deepseek.manager_model ?? "deepseek-v4-pro");
-  const [executorModel, setExecutorModel] = useState(appSettings?.deepseek.executor_model ?? "deepseek-v4-flash");
-  const [reviewerModel, setReviewerModel] = useState(appSettings?.deepseek.reviewer_model ?? "deepseek-v4-flash");
-  const [deepseekApiBaseUrl, setDeepseekApiBaseUrl] = useState(appSettings?.deepseek.api_base_url ?? "https://api.deepseek.com/anthropic");
-  const [piDeepseekBaseUrl, setPiDeepseekBaseUrl] = useState(appSettings?.deepseek.pi_base_url ?? "https://api.deepseek.com");
-  const [webSearchEnabled, setWebSearchEnabled] = useState(appSettings?.web_search.enabled ?? false);
-  const [tavilyBaseUrl, setTavilyBaseUrl] = useState(appSettings?.web_search.base_url ?? "https://api.tavily.com");
-
-  useEffect(() => {
-    if (!appSettings) return;
-    setManagerModel(appSettings.deepseek.manager_model);
-    setExecutorModel(appSettings.deepseek.executor_model);
-    setReviewerModel(appSettings.deepseek.reviewer_model);
-    setDeepseekApiBaseUrl(appSettings.deepseek.api_base_url);
-    setPiDeepseekBaseUrl(appSettings.deepseek.pi_base_url);
-    setWebSearchEnabled(appSettings.web_search.enabled);
-    setTavilyBaseUrl(appSettings.web_search.base_url);
-  }, [appSettings]);
 
   const createSessionMutation = useMutation({
     mutationFn: () => api.createChatSession(projectId),
@@ -202,28 +175,6 @@ export function SideNav({
     }
   }
 
-  async function saveApiSettings() {
-    setApiStatus(null);
-    try {
-      await updateAppSettingsMutation.mutateAsync({
-        deepseek_api_key: deepseekKey || null,
-        deepseek_api_base_url: deepseekApiBaseUrl,
-        pi_deepseek_base_url: piDeepseekBaseUrl,
-        manager_model: managerModel,
-        executor_model: executorModel,
-        reviewer_model: reviewerModel,
-        manager_websearch_enabled: webSearchEnabled,
-        tavily_api_key: tavilyKey || null,
-        tavily_base_url: tavilyBaseUrl,
-      });
-      setDeepseekKey("");
-      setTavilyKey("");
-      setApiStatus("API 设置已保存。");
-    } catch (error) {
-      setApiStatus(error instanceof Error ? error.message : "API 设置保存失败。");
-    }
-  }
-
   return (
     <aside className="side-nav">
       <div className="nav-brand">
@@ -295,132 +246,6 @@ export function SideNav({
         ) : null}
       </div>
 
-      <div className="nav-section-label">Runtime</div>
-      <div className="nav-runtime-panel">
-        <label className="nav-runtime-field">
-          <span>Python</span>
-          <select
-            value={globalPythonRuntime ?? "__system__"}
-            onChange={(event) => onSelectGlobalPythonRuntime?.(event.target.value)}
-            disabled={!pythonRuntimes.length}
-          >
-            {pythonRuntimes.map((item) => (
-              <option key={`${item.manager}:${item.name}`} value={item.name}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="nav-runtime-field">
-          <span>R</span>
-          <select
-            value={globalRRuntime ?? "__system__"}
-            onChange={(event) => onSelectGlobalRRuntime?.(event.target.value)}
-            disabled={!rRuntimes.length}
-          >
-            {rRuntimes.map((item) => (
-              <option key={`${item.manager}:${item.name}`} value={item.name}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="nav-runtime-field">
-          <span>脚本偏好</span>
-          <select
-            value={scriptPreference}
-            onChange={(event) => onSelectScriptPreference?.(event.target.value as ScriptPreference)}
-          >
-            <option value="auto">让 Manager 询问</option>
-            <option value="prefer_python">偏好 Python</option>
-            <option value="prefer_r">偏好 R</option>
-            <option value="prefer_mixed">按任务选择</option>
-          </select>
-        </label>
-      </div>
-
-      <div className="nav-section-label">API</div>
-      <div className="nav-api-panel">
-        <button
-          type="button"
-          className="nav-api-summary"
-          onClick={() => setApiSettingsOpen((value) => !value)}
-          title="配置 DeepSeek 和网页搜索 API"
-        >
-          <KeyRound size={14} />
-          <span>
-            <strong>Manager API</strong>
-            <em>
-              DeepSeek {deepseekConfigured ? "已配置" : "未配置"} · Search {webSearchConfigured ? "已开启" : "未开启"}
-            </em>
-          </span>
-          <ChevronDown size={14} />
-        </button>
-        {apiSettingsOpen ? (
-          <div className="nav-api-form">
-            <label className="nav-runtime-field">
-              <span>DeepSeek key</span>
-              <input
-                type="password"
-                value={deepseekKey}
-                onChange={(event) => setDeepseekKey(event.target.value)}
-                placeholder={deepseekConfigured ? "已配置，留空保持不变" : "输入 DeepSeek API key"}
-              />
-            </label>
-            <label className="nav-runtime-field">
-              <span>Manager model</span>
-              <input value={managerModel} onChange={(event) => setManagerModel(event.target.value)} />
-            </label>
-            <label className="nav-runtime-field">
-              <span>Executor model</span>
-              <input value={executorModel} onChange={(event) => setExecutorModel(event.target.value)} />
-            </label>
-            <label className="nav-runtime-field">
-              <span>Reviewer model</span>
-              <input value={reviewerModel} onChange={(event) => setReviewerModel(event.target.value)} />
-            </label>
-            <label className="nav-runtime-field">
-              <span>DeepSeek API base</span>
-              <input value={deepseekApiBaseUrl} onChange={(event) => setDeepseekApiBaseUrl(event.target.value)} />
-            </label>
-            <label className="nav-runtime-field">
-              <span>Pi DeepSeek base</span>
-              <input value={piDeepseekBaseUrl} onChange={(event) => setPiDeepseekBaseUrl(event.target.value)} />
-            </label>
-            <label className="nav-api-check">
-              <input
-                type="checkbox"
-                checked={webSearchEnabled}
-                onChange={(event) => setWebSearchEnabled(event.target.checked)}
-              />
-              <span>启用 Tavily web search</span>
-            </label>
-            <label className="nav-runtime-field">
-              <span>Tavily key</span>
-              <input
-                type="password"
-                value={tavilyKey}
-                onChange={(event) => setTavilyKey(event.target.value)}
-                placeholder={appSettings?.web_search.api_key_configured ? "已配置，留空保持不变" : "输入 Tavily API key"}
-              />
-            </label>
-            <label className="nav-runtime-field">
-              <span>Tavily base</span>
-              <input value={tavilyBaseUrl} onChange={(event) => setTavilyBaseUrl(event.target.value)} />
-            </label>
-            <button
-              type="button"
-              className="nav-api-save"
-              onClick={saveApiSettings}
-              disabled={updateAppSettingsMutation.isPending}
-            >
-              {updateAppSettingsMutation.isPending ? "保存中..." : "保存 API 设置"}
-            </button>
-            {apiStatus ? <div className="nav-api-status">{apiStatus}</div> : null}
-          </div>
-        ) : null}
-      </div>
-
       <div className="nav-section-label nav-session-label">
         <span>Sessions</span>
         <button
@@ -485,6 +310,13 @@ export function SideNav({
 
       <div className="nav-section-label">高级</div>
       <div className="nav-secondary">
+        <Link
+          href={`/projects/${projectId}/settings`}
+          className={`nav-link ${current === "settings" ? "active" : ""}`}
+        >
+          <Settings2 size={16} />
+          <span>工作台设置</span>
+        </Link>
         <Link
           href={`/projects/${projectId}/advanced`}
           className={`nav-link ${current === "advanced" ? "active" : ""}`}

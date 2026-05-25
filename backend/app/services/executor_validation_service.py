@@ -7,6 +7,7 @@ from typing import Any
 
 from app.core.config import Settings
 from app.models.runs import ExecutorValidationReport, Manifest, TaskPacket, ValidationIssue
+from app.services.artifact_format_service import detect_artifact_class
 from app.services.executor_reviewer_worker import ExecutorReviewerWorker
 from app.services.project_service import ProjectService
 from app.services.utils import atomic_write_json, resolve_within, sha256_file
@@ -172,7 +173,7 @@ class ExecutorValidationService:
                         path=asset.path,
                     )
                 )
-            if asset.type == "table" and self._looks_like_placeholder_table(path):
+            if detect_artifact_class(path) == "table" and self._looks_like_placeholder_table(path):
                 issues.append(
                     ValidationIssue(
                         severity="error",

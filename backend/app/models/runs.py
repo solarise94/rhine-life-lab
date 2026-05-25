@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from app.models.executor import ExecutorContext, ManagerReportingContract
+from app.models.output_contracts import CreatedAssetRecord, TaskOutputSpec
 
 
 ManifestStatus = Literal["success", "failed", "partial"]
@@ -18,29 +19,12 @@ class TaskPacketAsset(BaseModel):
     status: str | None = None
 
 
-class ExpectedOutput(BaseModel):
-    role: str
-    type: str
-    path_hint: str
-    label: str | None = None
-    asset_id: str | None = None
-
-
 class TaskPacketCardInput(BaseModel):
     label: str
     asset_id: str | None = None
     asset_path: str | None = None
     asset_type: str | None = None
     status: str | None = None
-
-
-class TaskPacketCardOutput(BaseModel):
-    label: str
-    asset_id: str | None = None
-    status: str | None = None
-    role: str
-    type: str
-    path_hint: str
 
 
 class RunContext(BaseModel):
@@ -58,6 +42,11 @@ class ExecutionPolicy(BaseModel):
     on_policy_violation: str = "fail_or_quarantine"
 
 
+ExpectedOutput = TaskOutputSpec
+TaskPacketCardOutput = TaskOutputSpec
+CreatedAsset = CreatedAssetRecord
+
+
 class TaskPacket(BaseModel):
     task_id: str
     project_id: str
@@ -67,8 +56,8 @@ class TaskPacket(BaseModel):
     goal: str
     input_assets: list[TaskPacketAsset] = Field(default_factory=list)
     card_inputs: list[TaskPacketCardInput] = Field(default_factory=list)
-    card_outputs: list[TaskPacketCardOutput] = Field(default_factory=list)
-    expected_outputs: list[ExpectedOutput] = Field(default_factory=list)
+    card_outputs: list[TaskOutputSpec] = Field(default_factory=list)
+    expected_outputs: list[TaskOutputSpec] = Field(default_factory=list)
     allowed_paths: list[str] = Field(default_factory=list)
     readonly_paths: list[str] = Field(default_factory=list)
     forbidden_paths: list[str] = Field(default_factory=list)
@@ -78,15 +67,6 @@ class TaskPacket(BaseModel):
     run_context: RunContext | None = None
     executor_context: ExecutorContext | None = None
     manager_reporting_contract: ManagerReportingContract | None = None
-
-
-class CreatedAsset(BaseModel):
-    role: str
-    type: str
-    path: str
-    label: str | None = None
-    asset_id: str | None = None
-    description: str | None = None
 
 
 class CodeArtifact(BaseModel):
@@ -116,7 +96,7 @@ class Manifest(BaseModel):
     status: ManifestStatus
     summary: str
     inputs_used: list[TaskPacketAsset] = Field(default_factory=list)
-    created_assets: list[CreatedAsset] = Field(default_factory=list)
+    created_assets: list[CreatedAssetRecord] = Field(default_factory=list)
     code_artifacts: list[CodeArtifact] = Field(default_factory=list)
     validation_evidence: dict[str, Any] = Field(default_factory=dict)
     commands_executed: list[str] = Field(default_factory=list)
@@ -130,6 +110,8 @@ class ManifestReviewContext(BaseModel):
     run_id: str
     summary: str
     status: ManifestStatus
+    declared_input_assets: list[dict[str, Any]] = Field(default_factory=list)
+    input_conclusion: str | None = None
     created_assets: list[dict[str, Any]] = Field(default_factory=list)
     code_artifacts: list[dict[str, Any]] = Field(default_factory=list)
     commands_executed: list[str] = Field(default_factory=list)

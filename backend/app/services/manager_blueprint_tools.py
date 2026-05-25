@@ -15,8 +15,11 @@ from app.models.card_templates import CardTemplate, TemplateBundle, TemplateBund
 from app.models.cards import Card, CardAssetRef
 from app.models.executor import ExecutorContext, ExecutorReference, ExecutorScriptAssetBinding
 from app.models.memory import ProjectMemoryItem
+from app.models.output_contracts import CardOutputSpec
 from app.models.runs import Manifest
+from app.services.app_config_service import AppConfigService
 from app.services.asset_timeline_service import AssetTimelineService
+from app.services.library_registry_service import LibraryRegistryService
 from app.services.manager_planner import ManagerPlanningError
 from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.project_service import ProjectService
@@ -45,6 +48,8 @@ class RuntimeBindingsPayload(BaseModel):
 class ConfigureCardExecutionPayload(BaseModel):
     card_id: str | None = None
     card_ids: list[str] = Field(default_factory=list)
+    skills: list[str] | None = None
+    mcp_servers: list[str] | None = None
     tool_policy: ToolPolicyPayload | None = None
     runtime_bindings: RuntimeBindingsPayload | None = None
     instruction_blocks: list[str] | None = None
@@ -118,6 +123,30 @@ class InstallRuntimeDependenciesPayload(BaseModel):
     timeout_seconds: int = 600
 
 
+class FindCardsPayload(BaseModel):
+    query: str = ""
+    status: str | None = None
+    step: int | None = None
+    asset_id: str | None = None
+    limit: int = 12
+
+
+class FindAssetsPayload(BaseModel):
+    query: str = ""
+    role: str | None = None
+    artifact_class: str | None = None
+    format: str | None = None
+    producer_card_id: str | None = None
+    status: str | None = None
+    limit: int = 12
+
+
+class PlanCardWritePayload(BaseModel):
+    action: str = "create"
+    card_id: str | None = None
+    card: dict[str, Any] = Field(default_factory=dict)
+
+
 class ManagerBlueprintTools:
     """Controlled tools exposed to the external manager agent runtime."""
 
@@ -126,10 +155,16 @@ class ManagerBlueprintTools:
         project_service: ProjectService,
         worker_service: WorkerService | None = None,
         runtime_dependency_job_service: RuntimeDependencyJobService | None = None,
+        library_registry_service: LibraryRegistryService | None = None,
     ) -> None:
         self.project_service = project_service
         self.worker_service = worker_service
         self.runtime_dependency_job_service = runtime_dependency_job_service
+        self.library_registry_service = library_registry_service or LibraryRegistryService(
+            project_service,
+            AppConfigService(project_service.settings),
+            project_service.settings,
+        )
         self.result_asset_service = ResultAssetService(project_service)
         self.asset_timeline_service = AssetTimelineService()
 
@@ -144,6 +179,163 @@ class ManagerBlueprintTools:
             "assets": [asset.model_dump() for asset in graph.assets],
             "runs": [run.model_dump() for run in graph.runs],
             "claims": [claim.model_dump() for claim in graph.claims],
+        }
+
+    def inspect_project_summary(self, project_id: str) -> dict:
+        snapshot = self.project_service.get_project_snapshot(project_id)
+        project = snapshot["project"]
+        graph = snapshot["graph"]
+        timeline = self.asset_timeline_service.build(project_id, snapshot)
+        timeline_cards = {item["card_id"]: item for item in timeline["cards"]}
+        runs_by_card = self._runs_by_card(graph.runs)
+        cards = [
+            self._compact_card(card, timeline_cards.get(card.card_id), runs_by_card.get(card.card_id, []))
+            for card in snapshot["cards"]
+        ]
+        status_counts: dict[str, int] = {}
+        for card in snapshot["cards"]:
+            status_counts[card.status] = status_counts.get(card.status, 0) + 1
+        materialized_assets = len(graph.assets)
+        planned_assets = len([asset for asset in timeline["assets"] if asset.get("planned")])
+        active_runs = [
+            self._compact_run(run)
+            for run in graph.runs
+            if run.status in {"queued", "running", "reviewing", "needs_approval"}
+        ]
+        blockers = self._project_blockers(snapshot, timeline)
+        return {
+            "project_id": project_id,
+            "project": {
+                "name": project.name,
+                "status": project.status,
+                "current_goal": project.current_goal,
+                "runtime_preferences": project.runtime_preferences.model_dump(),
+            },
+            "cards": cards,
+            "counts": {
+                "cards": len(cards),
+                "card_statuses": status_counts,
+                "materialized_assets": materialized_assets,
+                "planned_assets": planned_assets,
+                "active_runs": len(active_runs),
+                "blockers": len(blockers),
+            },
+            "active_runs": active_runs[:8],
+            "blockers": blockers[:12],
+            "timeline": {
+                "parallel_batches": timeline["parallel_batches"],
+                "cycle_card_ids": timeline["cycle_card_ids"],
+                "duplicate_output_assets": timeline["duplicate_output_assets"],
+            },
+        }
+
+    def find_cards(self, project_id: str, payload: dict) -> dict:
+        request = FindCardsPayload.model_validate(payload)
+        snapshot = self.project_service.get_project_snapshot(project_id)
+        timeline = self.asset_timeline_service.build(project_id, snapshot)
+        timeline_cards = {item["card_id"]: item for item in timeline["cards"]}
+        runs_by_card = self._runs_by_card(snapshot["graph"].runs)
+        query = self._normalize_query(request.query)
+        asset_id = str(request.asset_id or "").strip()
+        matches = []
+        for card in snapshot["cards"]:
+            if request.status and card.status != request.status:
+                continue
+            if request.step is not None and card.step != request.step:
+                continue
+            if asset_id and asset_id not in self._card_asset_ids(card):
+                continue
+            if query and query not in self._card_search_text(card):
+                continue
+            matches.append(self._compact_card(card, timeline_cards.get(card.card_id), runs_by_card.get(card.card_id, [])))
+        limit = max(1, min(int(request.limit or 12), 50))
+        return {
+            "project_id": project_id,
+            "items": matches[:limit],
+            "total": len(matches),
+            "query": request.query,
+        }
+
+    def find_assets(self, project_id: str, payload: dict) -> dict:
+        request = FindAssetsPayload.model_validate(payload)
+        snapshot = self.project_service.get_project_snapshot(project_id)
+        timeline = self.asset_timeline_service.build(project_id, snapshot)
+        materialized = {asset.asset_id: asset for asset in snapshot["graph"].assets}
+        query = self._normalize_query(request.query)
+        output_contracts = self._output_contracts_by_asset(snapshot["cards"])
+        matches: list[dict[str, Any]] = []
+        for record in timeline["assets"]:
+            asset_id = str(record.get("asset_id") or "")
+            contract = output_contracts.get(asset_id)
+            compact = self._compact_asset_record(record, materialized.get(asset_id), contract)
+            if not self._asset_matches(compact, query=query, request=request):
+                continue
+            matches.append(compact)
+        limit = max(1, min(int(request.limit or 12), 50))
+        return {
+            "project_id": project_id,
+            "items": matches[:limit],
+            "total": len(matches),
+            "query": request.query,
+        }
+
+    def get_card_detail(self, project_id: str, card_id: str) -> dict:
+        snapshot = self.project_service.get_project_snapshot(project_id)
+        card = next((item for item in snapshot["cards"] if item.card_id == card_id), None)
+        if not card:
+            raise ManagerPlanningError(f"Card not found: {card_id}")
+        timeline = self.asset_timeline_service.build(project_id, snapshot)
+        timeline_card = next((item for item in timeline["cards"] if item["card_id"] == card_id), None)
+        runs = [run for run in snapshot["graph"].runs if run.card_id == card_id]
+        return {
+            "project_id": project_id,
+            "card": card.model_dump(),
+            "timeline": timeline_card,
+            "runs": [self._compact_run(run) for run in runs[-8:]],
+        }
+
+    def get_asset_detail(self, project_id: str, asset_id: str) -> dict:
+        if not asset_id:
+            raise ManagerPlanningError("get_asset_detail requires asset_id.")
+        return self.result_asset_service.get_asset_detail(project_id, asset_id)
+
+    def plan_card_write(self, project_id: str, payload: dict) -> dict:
+        request = PlanCardWritePayload.model_validate(payload)
+        action = str(request.action or "create").strip().lower()
+        card_payload = dict(request.card or {})
+        if request.card_id and "card_id" not in card_payload:
+            card_payload["card_id"] = request.card_id
+        snapshot = self.project_service.get_project_snapshot(project_id)
+        replacing_card_id = card_payload.get("card_id") if action == "update" else None
+        try:
+            if action == "update":
+                existing = next((item for item in snapshot["cards"] if item.card_id == str(card_payload.get("card_id") or "")), None)
+                if not existing:
+                    raise ManagerPlanningError(f"Card not found: {card_payload.get('card_id') or request.card_id or ''}")
+                candidate = self._normalize_card_payload({**existing.model_dump(), **card_payload}, allow_missing_card_id=True)
+            else:
+                candidate = self._normalize_card_payload(card_payload, allow_missing_card_id=False)
+                if any(item.card_id == candidate.card_id for item in snapshot["cards"]):
+                    raise ManagerPlanningError(f"Duplicate card_id: {candidate.card_id}")
+            normalized, errors = self.asset_timeline_service.validate_card(snapshot, candidate, replacing_card_id=replacing_card_id)
+        except Exception as exc:
+            message = str(exc)
+            return {
+                "ok": False,
+                "project_id": project_id,
+                "action": action,
+                "errors": [message],
+                "retry_hints": [self._retry_hint_for_validation_error(message)],
+            }
+        return {
+            "ok": not errors,
+            "project_id": project_id,
+            "action": action,
+            "card": self._compact_card(normalized, None, []),
+            "normalized_outputs": [output.model_dump() for output in normalized.outputs],
+            "recommended_step": self._recommended_step(snapshot, normalized),
+            "errors": errors,
+            "retry_hints": [self._retry_hint_for_validation_error(error) for error in errors],
         }
 
     def list_data_assets(self, project_id: str) -> dict:
@@ -199,7 +391,7 @@ class ManagerBlueprintTools:
             store.save_graph(graph)
             store.save_cards(cards)
             self._audit_card_tool(project_id, "create_card", card.card_id, payload)
-        return {"card": card.model_dump(), "timeline": self.asset_timeline_service.build(project_id, self.project_service.get_project_snapshot(project_id))}
+        return {"ok": True, "card": card.model_dump(), "card_id": card.card_id}
 
     def update_card(self, project_id: str, payload: dict) -> dict:
         card_id = str(payload.get("card_id") or "").strip()
@@ -228,7 +420,7 @@ class ManagerBlueprintTools:
             store.save_graph(graph)
             store.save_cards(cards)
             self._audit_card_tool(project_id, "update_card", card_id, payload)
-        return {"card": updated.model_dump(), "timeline": self.asset_timeline_service.build(project_id, self.project_service.get_project_snapshot(project_id))}
+        return {"ok": True, "card": updated.model_dump(), "card_id": updated.card_id}
 
     def configure_card_execution(self, project_id: str, payload: dict) -> dict:
         request = ConfigureCardExecutionPayload.model_validate(payload)
@@ -253,6 +445,10 @@ class ManagerBlueprintTools:
                 if card.card_id not in card_ids:
                     continue
                 context = card.executor_context.model_copy(deep=True) if card.executor_context else ExecutorContext()
+                if request.skills is not None:
+                    context.skills = [str(item).strip() for item in request.skills if str(item).strip()]
+                if request.mcp_servers is not None:
+                    context.mcp_servers = [str(item).strip() for item in request.mcp_servers if str(item).strip()]
                 if "network" in tool_policy:
                     context.tool_policy.network = str(tool_policy["network"])
                 if "python" in tool_policy:
@@ -334,6 +530,64 @@ class ManagerBlueprintTools:
         if not asset_id:
             raise ManagerPlanningError("read_result_asset requires asset_id.")
         return self.result_asset_service.get_asset_detail(project_id, asset_id)
+
+    def list_skill_library(self, project_id: str) -> dict:
+        payload = self.library_registry_service.list_entries("skill", minimal=True)
+        payload["project_id"] = project_id
+        return payload
+
+    def list_mcp_library(self, project_id: str) -> dict:
+        payload = self.library_registry_service.list_entries("mcp", minimal=True)
+        payload["project_id"] = project_id
+        return payload
+
+    def search_skill_library(self, project_id: str, payload: dict) -> dict:
+        query = str(payload.get("query") or payload.get("q") or "").strip()
+        runtime = str(payload.get("runtime") or "").strip() or None
+        tags = [str(item).strip() for item in payload.get("tags") or [] if str(item).strip()]
+        top_k = int(payload.get("top_k") or payload.get("limit") or 8)
+        result = self.library_registry_service.search_entries(
+            "skill",
+            query=query,
+            runtime=runtime,
+            tags=tags,
+            top_k=top_k,
+            minimal=True,
+        )
+        result["project_id"] = project_id
+        return result
+
+    def search_mcp_library(self, project_id: str, payload: dict) -> dict:
+        query = str(payload.get("query") or payload.get("q") or "").strip()
+        runtime = str(payload.get("runtime") or "").strip() or None
+        tags = [str(item).strip() for item in payload.get("tags") or [] if str(item).strip()]
+        top_k = int(payload.get("top_k") or payload.get("limit") or 8)
+        result = self.library_registry_service.search_entries(
+            "mcp",
+            query=query,
+            runtime=runtime,
+            tags=tags,
+            top_k=top_k,
+            minimal=True,
+        )
+        result["project_id"] = project_id
+        return result
+
+    def get_skill_library_item(self, project_id: str, skill_id: str) -> dict:
+        try:
+            payload = self.library_registry_service.get_entry("skill", skill_id)
+        except ValueError as exc:
+            raise ManagerPlanningError(str(exc)) from exc
+        payload["project_id"] = project_id
+        return payload
+
+    def get_mcp_library_item(self, project_id: str, entry_id: str) -> dict:
+        try:
+            payload = self.library_registry_service.get_entry("mcp", entry_id)
+        except ValueError as exc:
+            raise ManagerPlanningError(str(exc)) from exc
+        payload["project_id"] = project_id
+        return payload
 
     def install_runtime_dependencies(self, project_id: str, payload: dict) -> dict:
         if self.runtime_dependency_job_service is None:
@@ -761,7 +1015,7 @@ class ManagerBlueprintTools:
         if not card_id and not allow_missing_card_id:
             raise ManagerPlanningError("card_id is required.")
         inputs = [item if isinstance(item, CardAssetRef) else CardAssetRef.model_validate(item) for item in payload.get("inputs") or []]
-        outputs = [item if isinstance(item, CardAssetRef) else CardAssetRef.model_validate(item) for item in payload.get("outputs") or []]
+        outputs = [item if isinstance(item, CardOutputSpec) else CardOutputSpec.model_validate(item) for item in payload.get("outputs") or []]
         card_payload = {
             "card_id": card_id,
             "card_type": payload.get("card_type") or "module",
@@ -1077,7 +1331,17 @@ class ManagerBlueprintTools:
                     for item in card.inputs
                 ],
                 outputs_schema=[
-                    TemplateIoBinding(label=item.label, status=item.status, required=True)
+                    TemplateIoBinding(
+                        label=item.label,
+                        role=item.role,
+                        artifact_class=item.artifact_class,
+                        accepted_formats=list(item.accepted_formats),
+                        preferred_format=item.preferred_format,
+                        asset_id=item.asset_id,
+                        status=item.status,
+                        required=item.required,
+                        description=item.description,
+                    )
                     for item in card.outputs
                 ],
                 executor_context=context,
@@ -1085,7 +1349,7 @@ class ManagerBlueprintTools:
                 runtime_bindings=context.runtime_bindings.model_dump(),
                 instruction_blocks=list(context.instruction_blocks),
                 prompt_blocks=list(context.instruction_blocks),
-                expected_artifacts=[item.role for item in manifest.created_assets] if manifest else [item.label for item in card.outputs],
+                expected_artifacts=[item.role for item in manifest.created_assets] if manifest else [item.role for item in card.outputs],
                 success_signals=list(card.key_findings or (manifest.key_findings if manifest else [])),
                 failure_signals=list(manifest.warnings if manifest else []),
                 bundle=bundle,
@@ -1186,7 +1450,21 @@ class ManagerBlueprintTools:
             "summary": template.spec.summary_template,
             "why": template.spec.why_template,
             "inputs": request.input_bindings or [{"label": item.label, "status": item.status} for item in template.spec.inputs_schema],
-            "outputs": request.output_bindings or [{"label": item.label, "status": item.status} for item in template.spec.outputs_schema],
+            "outputs": request.output_bindings
+            or [
+                {
+                    "role": item.role,
+                    "label": item.label,
+                    "artifact_class": item.artifact_class,
+                    "accepted_formats": list(item.accepted_formats),
+                    "preferred_format": item.preferred_format,
+                    "asset_id": None,
+                    "status": "planned",
+                    "required": item.required,
+                    "description": item.description,
+                }
+                for item in template.spec.outputs_schema
+            ],
             "key_findings": [],
             "manager_review": f"Instantiated from card template {template.template_id}.",
             "next_actions": next_actions,
@@ -1215,6 +1493,214 @@ class ManagerBlueprintTools:
                 )
             )
         return references
+
+    @staticmethod
+    def _runs_by_card(runs) -> dict[str, list[Any]]:
+        grouped: dict[str, list[Any]] = {}
+        for run in runs:
+            grouped.setdefault(run.card_id, []).append(run)
+        return grouped
+
+    @staticmethod
+    def _compact_run(run) -> dict[str, Any]:
+        return {
+            "run_id": run.run_id,
+            "card_id": run.card_id,
+            "status": run.status,
+            "title": run.title,
+            "summary": run.summary,
+            "started_at": run.started_at,
+            "finished_at": run.finished_at,
+            "needs_manager_attention": run.needs_manager_attention,
+        }
+
+    @classmethod
+    def _compact_card(cls, card: Card, timeline_card: dict[str, Any] | None, runs: list[Any]) -> dict[str, Any]:
+        active_run = next((run for run in reversed(runs) if run.status in {"queued", "running", "reviewing", "needs_approval"}), None)
+        latest_run = runs[-1] if runs else None
+        required_asset_ids = timeline_card.get("required_asset_ids", []) if timeline_card else [item.asset_id for item in card.inputs if item.asset_id]
+        produced_asset_ids = (
+            timeline_card.get("produced_asset_ids", [])
+            if timeline_card
+            else [item.asset_id for item in card.outputs if item.asset_id]
+        )
+        return {
+            "card_id": card.card_id,
+            "title": card.title,
+            "status": card.status,
+            "card_type": card.card_type,
+            "step": card.step,
+            "summary": card.summary,
+            "progress_note": card.progress_note,
+            "required_asset_ids": required_asset_ids,
+            "produced_asset_ids": produced_asset_ids,
+            "depends_on_card_ids": timeline_card.get("depends_on_card_ids", []) if timeline_card else [],
+            "active_run": cls._compact_run(active_run) if active_run else None,
+            "latest_run": cls._compact_run(latest_run) if latest_run else None,
+            "blockers": cls._card_blockers(card, required_asset_ids),
+        }
+
+    @staticmethod
+    def _card_blockers(card: Card, required_asset_ids: list[str]) -> list[str]:
+        blockers: list[str] = []
+        if card.status in {"failed", "rejected"}:
+            blockers.append(f"card_status:{card.status}")
+        if card.progress_note and re.search(r"\b(missing|failed|blocked|缺少|失败|阻塞)\b", card.progress_note, re.I):
+            blockers.append(card.progress_note)
+        if any(item.asset_id is None for item in card.inputs):
+            blockers.append("input_without_asset_id")
+        if not required_asset_ids and card.inputs:
+            blockers.append("input_asset_not_resolved")
+        return blockers
+
+    @classmethod
+    def _project_blockers(cls, snapshot: dict[str, Any], timeline: dict[str, Any]) -> list[dict[str, Any]]:
+        asset_ids = {str(asset.get("asset_id")) for asset in timeline["assets"] if asset.get("asset_id")}
+        blockers: list[dict[str, Any]] = []
+        for card in snapshot["cards"]:
+            missing_inputs = [item.asset_id for item in card.inputs if item.asset_id and item.asset_id not in asset_ids]
+            card_blockers = cls._card_blockers(card, [item.asset_id for item in card.inputs if item.asset_id])
+            if missing_inputs:
+                card_blockers.append(f"missing_inputs:{', '.join(missing_inputs)}")
+            if card.card_id in timeline["cycle_card_ids"]:
+                card_blockers.append("dependency_cycle")
+            if card_blockers:
+                blockers.append({"card_id": card.card_id, "title": card.title, "blockers": card_blockers})
+        for asset_id in timeline["duplicate_output_assets"]:
+            blockers.append({"asset_id": asset_id, "blockers": ["duplicate_output_asset_id"]})
+        return blockers
+
+    @staticmethod
+    def _normalize_query(value: str | None) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+    @classmethod
+    def _card_search_text(cls, card: Card) -> str:
+        values = [
+            card.card_id,
+            card.title,
+            card.status,
+            card.summary,
+            card.why,
+            card.progress_note or "",
+            " ".join(card.key_findings),
+            " ".join(card.next_actions),
+            " ".join(item.label for item in card.inputs),
+            " ".join(item.asset_id or "" for item in card.inputs),
+            " ".join(item.label for item in card.outputs),
+            " ".join(item.role for item in card.outputs),
+            " ".join(item.asset_id or "" for item in card.outputs),
+        ]
+        return cls._normalize_query(" ".join(values))
+
+    @staticmethod
+    def _card_asset_ids(card: Card) -> set[str]:
+        return {
+            item
+            for item in [*[input_ref.asset_id for input_ref in card.inputs], *[output.asset_id for output in card.outputs]]
+            if item
+        }
+
+    @staticmethod
+    def _output_contracts_by_asset(cards: list[Card]) -> dict[str, CardOutputSpec]:
+        contracts: dict[str, CardOutputSpec] = {}
+        for card in cards:
+            for output in card.outputs:
+                if output.asset_id:
+                    contracts[output.asset_id] = output
+        return contracts
+
+    @staticmethod
+    def _asset_format(path: str | None) -> str | None:
+        if not path:
+            return None
+        lowered = path.lower()
+        for suffix in (".tar.gz", ".tsv.gz", ".csv.gz"):
+            if lowered.endswith(suffix):
+                return suffix[1:]
+        suffix = Path(path).suffix.lower().lstrip(".")
+        return suffix or None
+
+    @classmethod
+    def _compact_asset_record(
+        cls,
+        record: dict[str, Any],
+        materialized_asset,
+        contract: CardOutputSpec | None,
+    ) -> dict[str, Any]:
+        path = materialized_asset.path if materialized_asset else record.get("path")
+        asset_format = cls._asset_format(path)
+        return {
+            "asset_id": record.get("asset_id"),
+            "title": materialized_asset.title if materialized_asset else record.get("title"),
+            "status": materialized_asset.status if materialized_asset else record.get("status"),
+            "asset_type": materialized_asset.asset_type if materialized_asset else record.get("asset_type"),
+            "artifact_class": contract.artifact_class if contract else None,
+            "role": contract.role if contract else None,
+            "accepted_formats": list(contract.accepted_formats) if contract else [],
+            "preferred_format": contract.preferred_format if contract else None,
+            "format": asset_format,
+            "path": path,
+            "summary": materialized_asset.summary if materialized_asset else record.get("summary"),
+            "producer_card_id": record.get("producer_card_id"),
+            "producer_run_id": record.get("producer_run_id"),
+            "consumer_card_ids": record.get("consumer_card_ids") or [],
+            "materialized": bool(record.get("materialized")),
+            "planned": bool(record.get("planned")),
+            "step": record.get("step"),
+        }
+
+    @classmethod
+    def _asset_matches(cls, asset: dict[str, Any], *, query: str, request: FindAssetsPayload) -> bool:
+        if request.role and asset.get("role") != request.role:
+            return False
+        if request.artifact_class and asset.get("artifact_class") != request.artifact_class:
+            return False
+        if request.format:
+            expected = str(request.format).strip().lower().lstrip(".")
+            formats = {str(asset.get("format") or "").lower(), *[str(item).lower() for item in asset.get("accepted_formats") or []]}
+            if expected not in formats:
+                return False
+        if request.producer_card_id and asset.get("producer_card_id") != request.producer_card_id:
+            return False
+        if request.status and asset.get("status") != request.status:
+            return False
+        if query:
+            haystack = cls._normalize_query(
+                " ".join(
+                    str(asset.get(key) or "")
+                    for key in ["asset_id", "title", "status", "asset_type", "artifact_class", "role", "format", "summary", "producer_card_id"]
+                )
+            )
+            if query not in haystack:
+                return False
+        return True
+
+    @staticmethod
+    def _recommended_step(snapshot: dict[str, Any], card: Card) -> int:
+        timeline = AssetTimelineService().build(snapshot["project"].project_id, snapshot)
+        asset_by_id = {item["asset_id"]: item for item in timeline["assets"]}
+        min_step = 1
+        for input_ref in card.inputs:
+            if not input_ref.asset_id:
+                continue
+            asset = asset_by_id.get(input_ref.asset_id)
+            if asset:
+                min_step = max(min_step, int(asset.get("step") or 0) + 1)
+        return min_step
+
+    @staticmethod
+    def _retry_hint_for_validation_error(message: str) -> str:
+        lowered = message.lower()
+        if "step too early" in lowered:
+            return "Increase card.step to at least the required downstream step."
+        if "missing" in lowered and "asset" in lowered:
+            return "Use find_assets to choose an existing asset_id, or create an upstream card output first."
+        if "duplicate" in lowered:
+            return "Choose a unique card_id or output asset_id."
+        if "required" in lowered:
+            return "Fill the required card fields before calling create_card or update_card."
+        return "Inspect the referenced card or asset, then retry with corrected arguments."
 
     @staticmethod
     def _slugged_template_id(title: str) -> str:

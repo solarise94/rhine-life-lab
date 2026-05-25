@@ -13,10 +13,16 @@ import {
   ProjectSnapshot,
   ProjectState,
   ProjectSummary,
+  ProjectRuntimePreferences,
+  ReportExportResponse,
   ReportSection,
+  LibraryEntry,
+  LibraryDetailResponse,
+  LibraryListResponse,
   RunEvent,
   StartRunResponse,
   UpdateAppSettingsPayload,
+  UpdateProjectRuntimePreferencesPayload,
   RuntimeApprovalDecision,
   WorkOrder,
 } from "./types";
@@ -167,6 +173,15 @@ export const api = {
   },
   getProject(projectId: string) {
     return request<ProjectSnapshot>(`/projects/${projectId}`);
+  },
+  getProjectRuntimePreferences(projectId: string) {
+    return request<{ runtime_preferences: ProjectRuntimePreferences }>(`/projects/${projectId}/runtime-preferences`);
+  },
+  updateProjectRuntimePreferences(projectId: string, payload: UpdateProjectRuntimePreferencesPayload) {
+    return request<{ runtime_preferences: ProjectRuntimePreferences }>(`/projects/${projectId}/runtime-preferences`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
   },
   getAssetFlow(projectId: string) {
     return request<AssetFlow>(`/projects/${projectId}/asset-flow`);
@@ -455,7 +470,44 @@ export const api = {
     });
   },
   exportReportHtml(projectId: string) {
-    return request<{ path: string; html: string }>(`/projects/${projectId}/report/export-html`, { method: "POST" });
+    return request<ReportExportResponse>(`/projects/${projectId}/report/export-html`, { method: "POST" });
+  },
+  getLibrary(kind: "skill" | "mcp") {
+    return request<LibraryListResponse>(`/library/${kind === "skill" ? "skills" : "mcp"}`);
+  },
+  searchLibrary(
+    kind: "skill" | "mcp",
+    params: { q: string; runtime?: string; tags?: string[]; top_k?: number },
+  ) {
+    const query = new URLSearchParams();
+    query.set("q", params.q);
+    if (params.runtime) query.set("runtime", params.runtime);
+    for (const tag of params.tags ?? []) {
+      query.append("tags", tag);
+    }
+    if (params.top_k) query.set("top_k", String(params.top_k));
+    return request<LibraryListResponse>(`/library/${kind === "skill" ? "skills/search" : "mcp/search"}?${query.toString()}`);
+  },
+  getLibraryItem(kind: "skill" | "mcp", entryId: string) {
+    return request<LibraryDetailResponse>(`/library/${kind === "skill" ? "skills" : "mcp"}/${encodeURIComponent(entryId)}`);
+  },
+  refreshLibrary(kind: "skill" | "mcp", force = false) {
+    const suffix = force ? "?force=true" : "";
+    return request<LibraryListResponse>(`/library/${kind === "skill" ? "skills" : "mcp"}/refresh${suffix}`, {
+      method: "POST",
+    });
+  },
+  resummarizeLibraryItem(kind: "skill" | "mcp", entryId: string) {
+    return request<LibraryDetailResponse>(
+      `/library/${kind === "skill" ? "skills" : "mcp"}/${encodeURIComponent(entryId)}/resummarize`,
+      { method: "POST" },
+    );
+  },
+  getSkillLibrary(projectId: string) {
+    return request<LibraryListResponse>(`/projects/${projectId}/skill-library`);
+  },
+  getMcpLibrary(projectId: string) {
+    return request<LibraryListResponse>(`/projects/${projectId}/mcp-library`);
   },
   getResultAssetContentUrl(projectId: string, assetId: string) {
     return `${API_BASE}/projects/${projectId}/results/${assetId}/content`;

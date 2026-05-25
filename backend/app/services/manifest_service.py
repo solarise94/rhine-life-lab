@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import ValidationError
 
 from app.models.runs import ExecutorValidationReport, Manifest, ManifestReviewContext, TaskPacket
+from app.services.artifact_format_service import detect_artifact_class, detect_artifact_format
 from app.services.project_service import ProjectService
 from app.services.utils import atomic_write_json, read_json, resolve_within, sha256_file
 
@@ -41,11 +42,6 @@ class ManifestService:
         packet = self.load_task_packet(project_id, run_id)
         allowed_prefixes = tuple(packet.allowed_paths)
         expected_outputs = {item.role: item for item in packet.expected_outputs}
-        manifest_input_ids = {item.asset_id for item in manifest.inputs_used}
-        required_input_ids = {item.asset_id for item in packet.input_assets}
-        missing_input_ids = sorted(required_input_ids - manifest_input_ids)
-        if missing_input_ids:
-            errors.append(f"Manifest inputs_used is missing task packet inputs: {', '.join(missing_input_ids)}")
 
         graph = self.project_service.graph_store(project_id).load_graph()
         existing_valid_output_paths = {
@@ -66,10 +62,6 @@ class ManifestService:
                 errors.append(f"Manifest output role is not declared in task packet: {asset.role}")
             else:
                 seen_roles.add(asset.role)
-                if asset.type != expected.type:
-                    errors.append(
-                        f"Manifest output type mismatch for role {asset.role}: expected {expected.type}, got {asset.type}"
-                    )
             if asset.path in seen_paths:
                 errors.append(f"Duplicate output path in manifest: {asset.path}")
             seen_paths.add(asset.path)
@@ -77,10 +69,21 @@ class ManifestService:
                 errors.append(f"Manifest output is outside allowed_paths: {asset.path}")
             if asset.path in existing_valid_output_paths:
                 errors.append(
-                    f"Manifest output path collides with an existing valid asset: {asset.path} ({existing_valid_output_paths[asset.path]})"
-                )
+                        f"Manifest output path collides with an existing valid asset: {asset.path} ({existing_valid_output_paths[asset.path]})"
+                    )
             if not path.exists():
                 errors.append(f"Missing output file: {asset.path}")
+                continue
+            detected_format = detect_artifact_format(path)
+            detected_class = detect_artifact_class(path)
+            if expected is not None and detected_class != expected.artifact_class:
+                errors.append(
+                    f"Manifest output class mismatch for role {asset.role}: expected {expected.artifact_class}, got {detected_class or 'unknown'}"
+                )
+            if expected is not None and expected.accepted_formats and detected_format not in expected.accepted_formats:
+                errors.append(
+                    f"Manifest output format mismatch for role {asset.role}: expected one of {', '.join(expected.accepted_formats)}, got {detected_format or 'unknown'}"
+                )
         missing_output_roles = sorted(set(expected_outputs) - seen_roles)
         if missing_output_roles:
             errors.append(f"Manifest is missing declared outputs: {', '.join(missing_output_roles)}")
@@ -162,8 +165,15 @@ class ManifestService:
     def manifest_to_review_context(self, project_id: str, run_id: str) -> ManifestReviewContext:
         manifest = self.load_manifest(project_id, run_id)
         valid, errors = self.validate_manifest(project_id, run_id)
+        task_packet = self.load_task_packet(project_id, run_id)
         root = self.project_service.project_path(project_id)
         validation_errors = list(errors)
+        validation_evidence = manifest.validation_evidence if isinstance(manifest.validation_evidence, dict) else {}
+        input_conclusion = validation_evidence.get("input_conclusion")
+        if isinstance(input_conclusion, dict):
+            input_conclusion = input_conclusion.get("summary") or input_conclusion.get("text") or str(input_conclusion)
+        elif not isinstance(input_conclusion, str):
+            input_conclusion = None
         created_assets = []
         for asset in manifest.created_assets:
             try:
@@ -176,10 +186,11 @@ class ManifestService:
             created_assets.append(
                 {
                     "role": asset.role,
-                    "type": asset.type,
                     "path": asset.path,
                     "description": asset.description,
                     "exists": exists,
+                    "artifact_class": detect_artifact_class(path) if exists and is_file else None,
+                    "format": detect_artifact_format(path) if exists and is_file else None,
                     "sha256": sha256_file(path) if exists and is_file else None,
                     "size_bytes": path.stat().st_size if exists and is_file else None,
                     "is_file": is_file,
@@ -215,6 +226,8 @@ class ManifestService:
             run_id=run_id,
             summary=manifest.summary,
             status=manifest.status,
+            declared_input_assets=[item.model_dump() for item in task_packet.input_assets],
+            input_conclusion=input_conclusion,
             created_assets=created_assets,
             code_artifacts=code_artifacts,
             commands_executed=manifest.commands_executed,

@@ -35,6 +35,9 @@ class AppConfigService:
                 "manager_model": str(config.get("manager_model") or self.settings.manager_model),
                 "executor_model": str(config.get("executor_model") or self.settings.executor_model),
                 "reviewer_model": str(config.get("reviewer_model") or self.settings.reviewer_model),
+                "library_summarizer_model": str(
+                    config.get("library_summarizer_model") or self.settings.library_summarizer_model
+                ),
             },
             "web_search": {
                 "enabled": websearch_enabled,
@@ -51,6 +54,7 @@ class AppConfigService:
             "manager_model",
             "executor_model",
             "reviewer_model",
+            "library_summarizer_model",
             "tavily_base_url",
         }
         for field in string_fields:
@@ -99,6 +103,27 @@ class AppConfigService:
             payload["tavily_api_key"] = self._effective_tavily_api_key(config)
         return payload
 
+    def get_secret_settings(self) -> dict[str, Any]:
+        config = self._load()
+        return {
+            "deepseek_api_key": self._effective_deepseek_api_key(config),
+            "deepseek_api_base_url": str(config.get("deepseek_api_base_url") or self.settings.deepseek_api_base_url),
+            "pi_deepseek_base_url": str(config.get("pi_deepseek_base_url") or self.settings.pi_deepseek_base_url),
+            "manager_model": str(config.get("manager_model") or self.settings.manager_model),
+            "executor_model": str(config.get("executor_model") or self.settings.executor_model),
+            "reviewer_model": str(config.get("reviewer_model") or self.settings.reviewer_model),
+            "library_summarizer_model": str(
+                config.get("library_summarizer_model") or self.settings.library_summarizer_model
+            ),
+            "manager_websearch_enabled": self._effective_bool(
+                config.get("manager_websearch_enabled"),
+                os.environ.get("MANAGER_WEBSEARCH_ENABLED"),
+                default=False,
+            ),
+            "tavily_api_key": self._effective_tavily_api_key(config),
+            "tavily_base_url": str(config.get("tavily_base_url") or os.environ.get("TAVILY_BASE_URL") or "https://api.tavily.com"),
+        }
+
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
             return {}
@@ -127,6 +152,8 @@ class AppConfigService:
             self.settings.executor_model = str(config["executor_model"])
         if config.get("reviewer_model"):
             self.settings.reviewer_model = str(config["reviewer_model"])
+        if config.get("library_summarizer_model"):
+            self.settings.library_summarizer_model = str(config["library_summarizer_model"])
         deepseek_key = self._effective_deepseek_api_key(config)
         if deepseek_key:
             self.settings.deepseek_api_key = SecretStr(deepseek_key)

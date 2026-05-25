@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Archive, ChevronDown, ChevronUp } from "lucide-react";
+import { Trash2 } from "lucide-react";
 import { Card, PythonRuntime, RRuntime, WorkOrder, WorkerCapability } from "@/lib/types";
 import { ModuleCard } from "./ModuleCard";
 import { ConnectionLines } from "./ConnectionLines";
@@ -164,6 +164,22 @@ export function CardStream({
         onClearSelection?.();
       }}
     >
+      {archivedCards.length ? (
+        <button
+          type="button"
+          className={`archive-trash-button ${archiveOpen ? "open" : ""}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            setArchiveOpen((value) => !value);
+          }}
+          aria-pressed={archiveOpen}
+          aria-label={`删除 / 归档袋，当前有 ${archivedCards.length} 张卡片`}
+          title={`删除 / 归档袋 · ${archivedCards.length} 张`}
+        >
+          <Trash2 size={16} />
+          <span className="archive-trash-badge">{archivedCards.length}</span>
+        </button>
+      ) : null}
       <div className="specialist-canvas-stage">
         <ConnectionLines cards={activeCards} />
         <div className="workflow-lanes">
@@ -220,65 +236,6 @@ export function CardStream({
               </div>
             </div>
           ))}
-          {archivedCards.length ? (
-            <div className="archive-cabinet">
-              <button
-                type="button"
-                className={`archive-drawer ${archiveOpen ? "open" : ""}`}
-                onClick={() => setArchiveOpen((value) => !value)}
-              >
-                <span className="archive-drawer-label">
-                  <Archive size={14} />
-                  删除 / 归档袋
-                </span>
-                <span className="archive-drawer-meta">{archivedCards.length} 张已归档卡片</span>
-                {archiveOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-              </button>
-              {archiveOpen ? (
-                <div className="archive-cards-group">
-                  {archivedCards.map((card, idx) => (
-                    <div
-                      key={card.card_id}
-                      ref={(node) => {
-                        cardWrapperRefs.current[card.card_id] = node;
-                      }}
-                      className="archive-card-wrapper animate-enter"
-                      style={{
-                        animationDelay: `${(orderedRows.length * 2 + idx) * 50}ms`,
-                        zIndex:
-                          (interactionRank.get(card.card_id) ?? 0) * 10 +
-                          (selectedCardId === card.card_id ? 1000 : 0) +
-                          archivedCards.length -
-                          idx,
-                      }}
-                    >
-                      <ModuleCard
-                        projectId={projectId}
-                        card={card}
-                        active={selectedCardId === card.card_id}
-                        onSelect={onSelect}
-                        onStartRun={onStartRun}
-                        onReviewRun={onReviewRun}
-                        onAskManager={onAskManager}
-                        onPreviewAsset={onPreviewAsset}
-                        workerCapabilities={workerCapabilities}
-                        selectedWorkerType={selectedWorkerByCard[card.card_id]}
-                        onSelectWorker={onSelectWorker}
-                        pythonRuntimes={pythonRuntimes}
-                        rRuntimes={rRuntimes}
-                        globalPythonRuntime={globalPythonRuntime}
-                        globalRRuntime={globalRRuntime}
-                        selectedPythonRuntime={selectedPythonRuntimeByCard[card.card_id]}
-                        selectedRRuntime={selectedRRuntimeByCard[card.card_id]}
-                        onSelectPythonRuntime={onSelectPythonRuntime}
-                        onSelectRRuntime={onSelectRRuntime}
-                      />
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
           {activeCards.length === 0 && archivedCards.length === 0 ? (
             <div className="empty-state">
               暂无 specialist cards
@@ -286,6 +243,31 @@ export function CardStream({
           ) : null}
         </div>
       </div>
+      {archivedCards.length > 0 && archiveOpen ? (
+        <div className="archive-tray-panel" role="dialog" aria-label="删除 / 归档袋">
+          <div className="archive-tray-header">
+            <span>已归档卡片</span>
+            <span>{archivedCards.length}</span>
+          </div>
+          <div className="archive-tray-list">
+            {archivedCards.map((card, idx) => (
+              <button
+                key={card.card_id}
+                type="button"
+                className="archive-tray-card"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSelect(card);
+                }}
+                style={{ animationDelay: `${idx * 40}ms` }}
+                title={card.title}
+              >
+                <span className="archive-tray-card-title">{card.title}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

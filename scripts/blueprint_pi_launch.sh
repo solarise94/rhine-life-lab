@@ -50,10 +50,34 @@ path.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encodin
 PY
 fi
 
+skill_args=()
+while IFS= read -r skill_path; do
+  if [[ -n "${skill_path}" ]]; then
+    skill_args+=(--skill "${skill_path}")
+  fi
+done < <(
+  python3 - <<'PY'
+import json
+import os
+
+raw = os.environ.get("BLUEPRINT_PI_SKILL_PATHS", "[]")
+try:
+    items = json.loads(raw)
+except json.JSONDecodeError:
+    items = []
+if isinstance(items, list):
+    for item in items:
+        if item:
+            print(str(item))
+PY
+)
+
 exec "${pi_bin}" \
   --provider deepseek \
   --model "${BLUEPRINT_EXECUTOR_MODEL:-${BLUEPRINT_MANAGER_MODEL:-deepseek-v4-pro}}" \
   --api-key "${BLUEPRINT_DEEPSEEK_API_KEY}" \
   --no-session \
+  --no-skills \
   --no-context-files \
+  "${skill_args[@]}" \
   -p "@${prompt_path}"

@@ -20,12 +20,39 @@ export function useAppSettings() {
   });
 }
 
+export function useLibrary(kind: "skill" | "mcp") {
+  return useQuery({
+    queryKey: queryKeys.library(kind),
+    queryFn: () => api.getLibrary(kind),
+  });
+}
+
 export function useUpdateAppSettingsMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (payload: Parameters<typeof api.updateAppSettings>[0]) => api.updateAppSettings(payload),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.appSettings });
+    },
+  });
+}
+
+export function useRefreshLibraryMutation(kind: "skill" | "mcp") {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ force }: { force?: boolean } = {}) => api.refreshLibrary(kind, force ?? false),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.library(kind) });
+    },
+  });
+}
+
+export function useResummarizeLibraryItemMutation(kind: "skill" | "mcp") {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (entryId: string) => api.resummarizeLibraryItem(kind, entryId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.library(kind) });
     },
   });
 }
@@ -55,6 +82,17 @@ export function useProjectSnapshot(projectId: string) {
   return useQuery({
     queryKey: queryKeys.project(projectId),
     queryFn: () => api.getProject(projectId),
+  });
+}
+
+export function useUpdateProjectRuntimePreferencesMutation(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: Parameters<typeof api.updateProjectRuntimePreferences>[1]) =>
+      api.updateProjectRuntimePreferences(projectId, payload),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.project(projectId) });
+    },
   });
 }
 

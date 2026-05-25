@@ -1,118 +1,82 @@
-# Blueprint RE v3
+# 莱茵生命实验室
 
-一个按 `docs/` 蓝图落地的 Git-native 生信分析项目管理 Web 应用。
+`莱茵生命实验室` 是一个面向科研分析项目的 Git-native 生信管理系统。它把 Manager AI、Blueprint 卡片编排、执行器、评审器、结果预览、报告导出和运行时配置整合到同一套工作台里。
 
-核心边界：
+项目定位参考 `NETA` 风格的《明日方舟》“莱茵生命”主题命名，但代码本身是通用的科研工作流管理框架，可继续 fork 到实验数据管理、分析执行和报告出具场景。
 
-- 用户只通过 Manager AI 表达意图，不直接编辑 Graph IR
-- Manager AI 先生成 proposal / patch，再由后端校验并应用
-- Graph、Cards、Runs、Report 都持久化到项目目录
-- 每次 accepted proposal / run review 都会写入 Git commit
-- 默认界面是对话 + 卡片 + 详情，不把 Graph IR 暴露成主编辑界面
-- 部署方式按用户级 `systemd --user` 设计
+## 核心能力
 
-## 目录
+- Manager AI 通过受控工具读写项目蓝图，而不是直接改底层 Graph IR
+- 任务用 `Card` 描述，输入输出、运行时、脚本偏好和交付契约可显式配置
+- 执行器与评审器分离，运行结果必须经过 reviewer 校验
+- 结果支持表格、文本、图像和报告预览
+- 项目状态、卡片、运行、资产、报告与会话都持久化在项目目录
+- 技能库、MCP 库、脚本模板、Card 模板可挂载到执行配置
+- 默认部署为本机 `systemd --user` 三服务架构
+
+## 仓库结构
 
 ```text
-backend/   FastAPI 后端
-frontend/  Next.js 前端
-deploy/    systemd 用户服务模板
-scripts/   本地开发、schema 生成、部署脚本
-docs/      产品蓝图、数据契约、实现规范
-workspace/ 运行时项目目录，默认自动生成 demo project
+backend/        FastAPI 后端
+frontend/       Next.js 前端
+manager-agent/  Manager AI sidecar
+deploy/         systemd 用户服务模板
+scripts/        部署、迁移、烟测、安装脚本
+docs/           产品与实现文档
+workspace/      本地运行时项目数据（不纳入仓库）
 ```
 
-## 已实现模块
+## 运行依赖
 
-- Project / Tasks / Results / Report / Advanced 五个主视图
-- Project scaffold 初始化
-- Graph / Cards / Assets / Claims / Runs / Report JSON 持久化
-- proposal store 与 patch store
-- patch allowlist 校验 + cycle / schema / readonly 校验
-- patch apply + Git commit + commit 失败自动恢复
-- async worker adapters + task packet + manifest + run event stream
-- DeepSeek Manager AI proposal 生成（Anthropic 兼容接口）
-- proposal modify / semantic rollback
-- manager review accept/reject
-- report projection + reorder + HTML export
-- artifact pointer 基础服务
-- runtime approval 风险分级与用户确认接口
-- Pydantic JSON schema 生成脚本
-- 用户级 `systemd` 部署脚本
+需要的系统级依赖：
 
-## 本地开发
+- `python3`
+- `python3-venv`
+- `node` / `npm`
+- `bubblewrap` (`bwrap`)
+- `systemd --user`
 
-后端：
+可选但常见的运行环境：
 
-```bash
-python3 -m venv .venv/backend
-.venv/backend/bin/pip install -e backend
-cp .env.example .env
-.venv/backend/bin/python scripts/generate_backend_schemas.py
-.venv/backend/bin/uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
-```
+- `conda` 或 `mamba`
+- R 运行时与 Bioconductor 依赖
+- Pi CLI / Opencode / Claude Code / Codex 等执行器 wrapper 对应 CLI
 
-后端启动前需要在仓库根目录准备 `.env`。Manager AI 默认通过 Pi agent sidecar 调用 DeepSeek，并只暴露受控蓝图工具：
+默认执行器沙箱模式是 `BLUEPRINT_EXECUTOR_SANDBOX_MODE=bwrap`，部署脚本会做 smoke test，失败则直接中止。
 
-```env
-BLUEPRINT_DEEPSEEK_API_BASE_URL=https://api.deepseek.com/anthropic
-BLUEPRINT_DEEPSEEK_API_KEY=sk-...
-# Manager tool-use requests should use deepseek-v4-pro or deepseek-v4-flash.
-BLUEPRINT_MANAGER_MODEL=deepseek-v4-pro
-BLUEPRINT_MANAGER_BACKEND=pi
-BLUEPRINT_PI_MANAGER_URL=http://127.0.0.1:18002
-BLUEPRINT_BACKEND_API_BASE_URL=http://127.0.0.1:18001/api
-BLUEPRINT_INTERNAL_TOOL_TOKEN=change-me
-BLUEPRINT_MANAGER_TIMEOUT_SECONDS=600
-BLUEPRINT_DEFAULT_WORKER_TYPE=pi
-# The pi executor requires BLUEPRINT_PI_COMMAND to point at a real non-interactive pi CLI or wrapper.
-# DeepSeek settings are reused by the backend executor reviewer, not as a pi fallback executor.
-# Command-template placeholders:
-# {python} {project_root} {run_dir} {result_dir} {task_packet_path}
-# {manifest_path} {transcript_path} {executor_brief_path} {executor_prompt_path}
-# {adapter_contract_path} {manager_brief_path} {worker_type}
-# For opencode / pi / claude-code these values are provider CLI launch templates
-# consumed by the unified wrapper, not the backend worker command itself.
-# Codex currently remains a direct backend command template.
-# Replace <tool-specific-args> with the syntax expected by your installed CLI.
-# A local wrapper script is usually the least fragile option if provider CLI flags change.
-# BLUEPRINT_OPENCODE_COMMAND=opencode <tool-specific-args> {executor_prompt_path}
-# BLUEPRINT_CODEX_COMMAND=codex <tool-specific-args> {executor_prompt_path}
-# BLUEPRINT_CLAUDE_CODE_COMMAND=claude-code <tool-specific-args> {executor_prompt_path}
-# BLUEPRINT_PI_COMMAND=pi --no-session -p @{executor_prompt_path}
-# BLUEPRINT_OPENCODE_COMMAND=bash /absolute/path/to/opencode-launch.sh {executor_prompt_path}
-```
+## 一键安装
 
-前端：
+推荐使用交互式安装脚本。它会：
 
-```bash
-cd frontend
-npm install
-NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000/api npm run dev
-```
-
-默认地址：
-
-- 前端：`http://127.0.0.1:3000`
-- 后端：`http://127.0.0.1:8000`
-
-## 用户级 systemd 部署
+- 收集 DeepSeek / Tavily / reviewer / runtime 相关配置
+- 在仓库根目录生成本地 `.env`
+- 调用部署脚本安装前后端与 manager-agent
+- 写入 `~/.config/blueprint-re/*.env`
+- 注册并启动 `systemd --user` 服务
 
 执行：
 
 ```bash
+git clone <your-private-repo-url> laehyn-labs
+cd laehyn-labs
+bash scripts/install_blueprint_re.sh
+```
+
+安装完成后默认地址：
+
+- 前端：`http://127.0.0.1:13001`
+- 后端：`http://127.0.0.1:18001`
+
+## 无交互部署
+
+如果你已经准备好 `.env`，也可以直接：
+
+```bash
+cp .env.example .env
 bash scripts/deploy_user_systemd.sh
 ```
 
-脚本会完成：
-
-1. 创建后端虚拟环境并安装依赖
-2. 安装前端依赖并构建 Next.js
-3. 写入 `~/.config/blueprint-re/*.env`
-4. 安装三个 `systemd --user` 服务
-5. `enable --now` 启动前后端
-
-生成的服务：
+这会安装并启动：
 
 - `blueprint-re-backend.service`
 - `blueprint-re-manager-agent.service`
@@ -132,22 +96,100 @@ journalctl --user -u blueprint-re-backend.service -n 100 --no-pager
 journalctl --user -u blueprint-re-frontend.service -n 100 --no-pager
 ```
 
-如果希望退出登录后仍保持运行，需要单独执行系统层的 linger 配置，这一步通常需要管理员权限，不在部署脚本内处理。
+## 关键配置
 
-## Demo 流程
+最小必需：
 
-启动后默认会创建 `workspace/demo-rnaseq`。
+```env
+BLUEPRINT_DEEPSEEK_API_BASE_URL=https://api.deepseek.com/anthropic
+BLUEPRINT_DEEPSEEK_API_KEY=sk-your-key
+BLUEPRINT_PI_DEEPSEEK_BASE_URL=https://api.deepseek.com
+BLUEPRINT_MANAGER_MODEL=deepseek-v4-pro
+BLUEPRINT_MANAGER_BACKEND=pi
+BLUEPRINT_PI_MANAGER_URL=http://127.0.0.1:18002
+BLUEPRINT_BACKEND_API_BASE_URL=http://127.0.0.1:18001/api
+BLUEPRINT_INTERNAL_TOOL_TOKEN=change-me
+```
 
-可直接验证：
+常用扩展：
 
-1. 打开 `Tasks`
-2. 输入“客户想增加免疫浸润分析模块”
-3. 接受 proposal
-4. 对 planned card 点击“开始执行”
-5. 对 `needs_review` 的 card 点击“接受结果”
-6. 在 `Results` 和 `Report` 查看新结果
-7. 在 `Advanced` 查看 graph / proposals / git history
+- `BLUEPRINT_EXECUTOR_MODEL=deepseek-v4-flash`
+- `BLUEPRINT_REVIEWER_MODEL=deepseek-v4-flash`
+- `BLUEPRINT_REVIEWER_MAX_TURNS=24`
+- `MANAGER_WEBSEARCH_ENABLED=true`
+- `TAVILY_API_KEY=...`
+- `MANAGER_CONTEXT_WINDOW_TOKENS=1000000`
+- `MANAGER_COMPACTION_ENABLED=true`
 
-## 说明
+完整模板见 [.env.example](/home/solarise/blueprint_re_v3/.env.example:1)。
 
-Manager AI 现在通过 Pi agent sidecar 进行正常聊天和工具循环；sidecar 不加载 shell/write/edit 工具，只能调用后端受控工具读取蓝图、生成/修改/删除 proposal。如果模型不可用、工具校验失败且无法自修复、或密钥缺失，`/chat` 会直接失败并返回错误，不再走关键词 fallback。Worker 已切成异步子进程执行模型；默认执行器类型是 `pi`，但必须通过 `BLUEPRINT_PI_COMMAND` 指向真实非交互 Pi CLI 或 wrapper。`opencode/pi/claude_code` 通过统一 wrapper 接入外部 provider CLI launch template；它们统一收到 `task_packet.json`、`executor_prompt.md`、`adapter_contract.json` 和 `BLUEPRINT_*` 运行时环境变量。执行器完成后，后端会校验 manifest、代码证据和输出资产，并用 Manager AI 的 DeepSeek 配置运行 reviewer；最终 card/graph 更新仍由 Manager review 处理。
+## 本地开发
+
+后端：
+
+```bash
+python3 -m venv .venv/backend
+.venv/backend/bin/pip install -e backend
+.venv/backend/bin/python scripts/generate_backend_schemas.py
+.venv/backend/bin/uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
+```
+
+前端：
+
+```bash
+cd frontend
+npm install
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000/api npm run dev
+```
+
+Manager agent：
+
+```bash
+cd manager-agent
+npm install
+npm start
+```
+
+## 数据与隐私
+
+以下内容默认不纳入仓库：
+
+- `.env` 和本机 env 文件
+- `workspace/` 里的项目数据、聊天会话、运行产物
+- `.claude/`
+- `AGENTS.md`
+- `.venv/`、`node_modules/`、`.next/`
+
+仓库适合推送源码、文档、脚本和 schema；不适合推送本机运行数据、tokens、systemd env、聊天历史和实验原始资产。
+
+## 测试
+
+后端：
+
+```bash
+PYTHONPATH=backend .venv/backend/bin/python -m unittest discover -s backend/tests
+```
+
+前端构建校验：
+
+```bash
+cd frontend
+npm run build
+```
+
+Manager agent 语法检查：
+
+```bash
+node --check manager-agent/src/server.js
+```
+
+## Fork 建议
+
+如果你要从这个项目继续分叉为新的科研管理系统，优先看这些文档：
+
+- [docs/13_fork_architecture_and_product_logic.md](/home/solarise/blueprint_re_v3/docs/13_fork_architecture_and_product_logic.md:1)
+- [docs/15_manager_runtime_libraries_and_report_plan.md](/home/solarise/blueprint_re_v3/docs/15_manager_runtime_libraries_and_report_plan.md:1)
+- [docs/16_skill_mcp_registry_and_wrapper_attachment_plan.md](/home/solarise/blueprint_re_v3/docs/16_skill_mcp_registry_and_wrapper_attachment_plan.md:1)
+- [docs/17_explicit_output_contract_and_submission_validation_plan.md](/home/solarise/blueprint_re_v3/docs/17_explicit_output_contract_and_submission_validation_plan.md:1)
+
+这些文档基本覆盖了 manager、执行器 wrapper、skill/MCP registry、结果契约和报告链路。

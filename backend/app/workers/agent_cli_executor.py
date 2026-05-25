@@ -15,11 +15,13 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.models.runs import Manifest
+from app.services.artifact_format_service import detect_artifact_class, detect_artifact_format
 from app.services.utils import atomic_write_json
 
 MAX_MANIFEST_REPAIR_ATTEMPTS = 3
 TRACE_LINE_LIMIT = 20
 TRACE_FILE_LIMIT = 200
+STDOUT_FORWARD_CHAR_LIMIT = 4_000
 SENSITIVE_TOKEN_RE = re.compile(r"(api[_-]?key|token|password|secret|sk-[A-Za-z0-9_-]+)", re.IGNORECASE)
 OUTPUT_TIMELINE_NAME = "agent_output_timeline.jsonl"
 OUTPUT_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
@@ -130,6 +132,13 @@ def _record_output_kind(attempt_record: dict[str, Any], kind: str, line: str) ->
     entry = counts.setdefault(kind, {"lines": 0, "chars": 0})
     entry["lines"] += 1
     entry["chars"] += len(line)
+
+
+def _stdout_preview(line: str) -> tuple[str, bool]:
+    if len(line) <= STDOUT_FORWARD_CHAR_LIMIT:
+        return line, False
+    head = line[:STDOUT_FORWARD_CHAR_LIMIT]
+    return f"{head}\n[wrapper] stdout line truncated: original length {len(line)} characters. Full content should be written to result files, not stdout.", True
 
 
 def _new_trace(*, provider: str, packet: dict, run_dir: Path, project_root: Path, template: str) -> dict[str, Any]:
@@ -335,7 +344,8 @@ def _run_provider_command(
         for raw_line in process.stdout:
             line = raw_line.rstrip("\n")
             if line:
-                print(line, flush=True)
+                forwarded_line, truncated = _stdout_preview(line)
+                print(forwarded_line, flush=True)
                 line_seen_monotonic = time.monotonic()
                 now = _utc_now()
                 attempt_record["stdout_line_count"] += 1
@@ -353,9 +363,10 @@ def _run_provider_command(
                     attempt=attempt,
                     event_type="stdout_line",
                     kind=kind,
-                    text=line,
+                    text=forwarded_line,
                     line_number=attempt_record["stdout_line_count"],
                     gap_since_previous_seconds=round(line_seen_monotonic - last_line_monotonic, 3),
+                    metadata={"truncated": truncated, "original_char_count": len(line)} if truncated else {},
                 )
                 last_line_monotonic = line_seen_monotonic
                 lines = attempt_record["last_output_lines"]
@@ -390,7 +401,7 @@ def _run_provider_command(
     return return_code
 
 
-def _manifest_validation_errors(path: Path) -> list[str]:
+def _manifest_validation_errors(path: Path, *, packet: dict[str, Any] | None = None, project_root: Path | None = None) -> list[str]:
     if not path.exists():
         return [f"{path.name} is missing."]
     try:
@@ -398,24 +409,69 @@ def _manifest_validation_errors(path: Path) -> list[str]:
     except json.JSONDecodeError as exc:
         return [f"{path.name} is not valid JSON: {exc}"]
     try:
-        Manifest.model_validate(payload)
+        manifest = Manifest.model_validate(payload)
     except ValidationError as exc:
         return [str(error) for error in exc.errors()]
-    return []
+    if not packet:
+        return []
+
+    errors: list[str] = []
+
+    expected_outputs = packet.get("expected_outputs") if isinstance(packet.get("expected_outputs"), list) else []
+    expected_by_role = {
+        item.get("role"): item
+        for item in expected_outputs
+        if isinstance(item, dict) and item.get("role") and item.get("path_hint") and item.get("artifact_class")
+    }
+    created_by_role = {item.role: item for item in manifest.created_assets if item.role}
+    missing_output_roles = sorted(set(expected_by_role) - set(created_by_role))
+    if missing_output_roles:
+        formatted = ", ".join(
+            f"{role} ({expected_by_role[role]['path_hint']})" for role in missing_output_roles if role in expected_by_role
+        )
+        errors.append(f"{path.name} is missing created_assets for expected outputs: {formatted}")
+    if project_root is not None:
+        for role, asset in created_by_role.items():
+            expected = expected_by_role.get(role)
+            if not expected:
+                continue
+            output_path = project_root / asset.path
+            if not output_path.exists():
+                errors.append(f"Missing output file: {asset.path} ({role})")
+                continue
+            detected_class = detect_artifact_class(output_path)
+            detected_format = detect_artifact_format(output_path)
+            if detected_class != expected.get("artifact_class"):
+                errors.append(
+                    f"{path.name} output class mismatch for {role}: expected {expected.get('artifact_class')}, got {detected_class or 'unknown'}"
+                )
+            accepted_formats = list(expected.get("accepted_formats") or [])
+            if accepted_formats and detected_format not in accepted_formats:
+                errors.append(
+                    f"{path.name} output format mismatch for {role}: expected one of {', '.join(accepted_formats)}, got {detected_format or 'unknown'}"
+                )
+    return errors
 
 
 def _promote_candidate_manifest(*, run_dir: Path) -> list[str]:
     candidate_path = run_dir / "manifest.candidate.json"
     manifest_path = run_dir / "manifest.json"
+    packet_path = run_dir / "task_packet.json"
+    packet = None
+    if packet_path.exists():
+        try:
+            packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            packet = None
     if candidate_path.exists():
-        errors = _manifest_validation_errors(candidate_path)
+        errors = _manifest_validation_errors(candidate_path, packet=packet, project_root=run_dir.parent.parent)
         if errors:
             return errors
         payload = json.loads(candidate_path.read_text(encoding="utf-8"))
         atomic_write_json(manifest_path, payload)
         return []
     if manifest_path.exists():
-        return _manifest_validation_errors(manifest_path)
+        return _manifest_validation_errors(manifest_path, packet=packet, project_root=run_dir.parent.parent)
     return [f"{candidate_path.name} is missing; manifest.json is missing."]
 
 
@@ -450,7 +506,6 @@ def _write_manifest_repair_prompt(*, run_dir: Path, packet: dict, errors: list[s
     prompt_path = run_dir / "manifest_repair_prompt.md"
     candidate_path = run_dir / "manifest.candidate.json"
     expected_outputs = packet.get("expected_outputs", [])
-    input_assets = packet.get("input_assets", [])
     lines = [
         f"You are repairing the manifest for Blueprint run {packet.get('task_id', '')}.",
         "",
@@ -460,6 +515,25 @@ def _write_manifest_repair_prompt(*, run_dir: Path, packet: dict, errors: list[s
         "The previous manifest candidate failed strict schema validation:",
     ]
     lines.extend(f"- {error}" for error in errors)
+    missing_output_paths = []
+    for item in packet.get("expected_outputs", []):
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        path_hint = item.get("path_hint")
+        if role and path_hint and any(path_hint in error and "created_assets" in error for error in errors):
+            missing_output_paths.append((role, path_hint, item.get("artifact_class")))
+    if missing_output_paths:
+        lines.extend(
+            [
+                "",
+                "Missing required outputs that must be present on disk and declared in created_assets:",
+            ]
+        )
+        lines.extend(
+            f"- {role}: {path_hint} ({output_type or 'unknown type'})"
+            for role, path_hint, output_type in missing_output_paths
+        )
     lines.extend(
         [
             "",
@@ -470,11 +544,9 @@ def _write_manifest_repair_prompt(*, run_dir: Path, packet: dict, errors: list[s
                     "run_id": packet.get("task_id"),
                     "status": "success",
                     "summary": "One concise summary sentence.",
-                    "inputs_used": input_assets,
                     "created_assets": [
                         {
                             "role": item.get("role"),
-                            "type": item.get("type"),
                             "path": item.get("path_hint"),
                             "label": item.get("label"),
                             "asset_id": item.get("asset_id"),
@@ -489,6 +561,9 @@ def _write_manifest_repair_prompt(*, run_dir: Path, packet: dict, errors: list[s
                             "purpose": "Reproducible analysis script.",
                         }
                     ],
+                    "validation_evidence": {
+                        "input_conclusion": "Short factual note about the declared inputs and whether they were used.",
+                    },
                     "commands_executed": ["brief command description"],
                     "metrics": {},
                     "key_findings": [],
@@ -504,8 +579,11 @@ def _write_manifest_repair_prompt(*, run_dir: Path, packet: dict, errors: list[s
             "- status must be exactly one of: success, failed, partial.",
             "- Use created_assets, not outputs.",
             "- Include summary and commands_executed.",
-            "- created_assets paths must match files already produced under expected output paths.",
+            "- created_assets paths must point to files already produced under allowed result paths.",
+            "- created_assets roles must match expected_outputs.role.",
+            "- Output file class and format are detected from the file itself and must satisfy the contract.",
             "- Preserve existing metrics and key findings if they are factual.",
+            "- validation_evidence.input_conclusion should summarize the declared inputs without repeating the full list.",
         ]
     )
     prompt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

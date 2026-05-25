@@ -24,7 +24,8 @@ from app.core.paths import (
 )
 from app.models.cards import Card, CardAssetRef
 from app.models.graph import Asset, Claim, GraphState, Module, ModuleRef, ReportItem
-from app.models.project import ProjectState, ProjectSummary
+from app.models.output_contracts import CardOutputSpec
+from app.models.project import ProjectRuntimePreferences, ProjectState, ProjectSummary
 from app.services.git_service import GitService
 from app.services.graph_store import GraphStore
 from app.services.utils import atomic_write_json, utc_now
@@ -149,7 +150,16 @@ class ProjectService:
         store = GraphStore(root)
         store.save_project_state(state)
         store.save_cards([])
-        store.save_graph(GraphState(metadata={"schema_version": self.settings.schema_version}))
+        store.save_graph(
+            GraphState(
+                metadata={
+                    "schema_version": self.settings.schema_version,
+                    "runtime_preferences": state.runtime_preferences.model_dump(),
+                    "default_conda_env": None,
+                    "default_r_env": None,
+                }
+            )
+        )
         store.save_proposals([])
         store.save_chat_sessions([])
         store.save_project_memory([])
@@ -254,8 +264,22 @@ class ProjectService:
                     CardAssetRef(label="样本信息", asset_id="sample_metadata_v1"),
                 ],
                 outputs=[
-                    CardAssetRef(label="DEG 表", asset_id="deg_table_v1"),
-                    CardAssetRef(label="Volcano Plot", asset_id="volcano_plot_v1"),
+                    CardOutputSpec(
+                        role="deg_table",
+                        label="DEG 表",
+                        artifact_class="table",
+                        accepted_formats=["tsv", "csv"],
+                        preferred_format="tsv",
+                        asset_id="deg_table_v1",
+                    ),
+                    CardOutputSpec(
+                        role="volcano_plot",
+                        label="Volcano Plot",
+                        artifact_class="figure",
+                        accepted_formats=["svg", "png", "pdf"],
+                        preferred_format="svg",
+                        asset_id="volcano_plot_v1",
+                    ),
                 ],
                 key_findings=["FDR < 0.05 的显著基因 1324 个。"],
                 manager_review="结果已接受，可作为后续功能富集分析输入。",
@@ -275,8 +299,22 @@ class ProjectService:
                 why="用于解释差异基因涉及的生物学通路。",
                 inputs=[CardAssetRef(label="差异表达结果", asset_id="deg_table_v1")],
                 outputs=[
-                    CardAssetRef(label="GSEA 结果", status="planned"),
-                    CardAssetRef(label="KEGG 结果", status="planned"),
+                    CardOutputSpec(
+                        role="gsea_result",
+                        label="GSEA 结果",
+                        artifact_class="table",
+                        accepted_formats=["tsv", "csv"],
+                        preferred_format="tsv",
+                        status="planned",
+                    ),
+                    CardOutputSpec(
+                        role="kegg_result",
+                        label="KEGG 结果",
+                        artifact_class="table",
+                        accepted_formats=["tsv", "csv"],
+                        preferred_format="tsv",
+                        status="planned",
+                    ),
                 ],
                 manager_review="待执行。",
                 next_actions=["开始执行", "修改方案", "取消模块"],
@@ -292,7 +330,16 @@ class ProjectService:
                 summary="客户提出增加免疫浸润分析模块。",
                 why="用于解释免疫相关微环境变化。",
                 inputs=[CardAssetRef(label="差异表达结果", asset_id="deg_table_v1")],
-                outputs=[CardAssetRef(label="免疫浸润评分", status="planned")],
+                outputs=[
+                    CardOutputSpec(
+                        role="immune_score_table",
+                        label="免疫浸润评分",
+                        artifact_class="table",
+                        accepted_formats=["tsv", "csv"],
+                        preferred_format="tsv",
+                        status="planned",
+                    )
+                ],
                 manager_review="等待用户确认是否加入蓝图。",
                 next_actions=["接受提案", "修改提案", "查看影响"],
                 linked_modules=["module_immune_infiltration"],
@@ -386,7 +433,7 @@ class ProjectService:
         if not (self.project_path(project_id) / "project.json").exists():
             raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
         store = self.graph_store(project_id)
-        project = store.load_project_state()
+        project = self._project_state_with_runtime_preferences(store)
         cards = store.load_cards()
         graph = store.load_graph()
         summary = ProjectSummary(
@@ -406,6 +453,39 @@ class ProjectService:
             "r_runtimes": self._r_runtimes(),
         }
 
+    def get_project_runtime_preferences(self, project_id: str) -> ProjectRuntimePreferences:
+        if not (self.project_path(project_id) / "project.json").exists():
+            raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+        store = self.graph_store(project_id)
+        project = self._project_state_with_runtime_preferences(store)
+        return project.runtime_preferences
+
+    def update_project_runtime_preferences(self, project_id: str, payload: dict) -> ProjectRuntimePreferences:
+        if not (self.project_path(project_id) / "project.json").exists():
+            raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+        store = self.graph_store(project_id)
+        with self.lock_for(project_id):
+            project = self._project_state_with_runtime_preferences(store)
+            graph = store.load_graph()
+            runtime_preferences = project.runtime_preferences.model_copy(deep=True)
+            if "script_preference" in payload and payload["script_preference"] is not None:
+                script_preference = str(payload["script_preference"]).strip()
+                if script_preference in {"auto", "prefer_python", "prefer_r", "prefer_mixed"}:
+                    runtime_preferences.script_preference = script_preference
+            if "python_runtime" in payload:
+                value = str(payload["python_runtime"]).strip() if payload["python_runtime"] is not None else ""
+                runtime_preferences.python_runtime = value or None
+            if "r_runtime" in payload:
+                value = str(payload["r_runtime"]).strip() if payload["r_runtime"] is not None else ""
+                runtime_preferences.r_runtime = value or None
+            project = project.model_copy(update={"runtime_preferences": runtime_preferences, "updated_at": utc_now()})
+            graph.metadata["runtime_preferences"] = runtime_preferences.model_dump()
+            graph.metadata["default_conda_env"] = runtime_preferences.python_runtime
+            graph.metadata["default_r_env"] = runtime_preferences.r_runtime
+            store.save_project_state(project)
+            store.save_graph(graph)
+        return runtime_preferences
+
     @staticmethod
     def _count_by(items: list[object], attr: str) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -413,6 +493,22 @@ class ProjectService:
             key = getattr(item, attr)
             counts[key] = counts.get(key, 0) + 1
         return counts
+
+    def _project_state_with_runtime_preferences(self, store: GraphStore) -> ProjectState:
+        project = store.load_project_state()
+        graph = store.load_graph()
+        metadata = graph.metadata if isinstance(graph.metadata, dict) else {}
+        runtime_preferences = metadata.get("runtime_preferences")
+        if isinstance(runtime_preferences, dict):
+            try:
+                project = project.model_copy(
+                    update={
+                        "runtime_preferences": ProjectRuntimePreferences.model_validate(runtime_preferences),
+                    }
+                )
+            except Exception:
+                pass
+        return project
 
     def _worker_capabilities(self) -> list[dict]:
         registry = build_worker_registry()

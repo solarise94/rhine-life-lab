@@ -17,6 +17,20 @@ export interface CardRef {
   status?: string | null;
 }
 
+export type ArtifactClass = "figure" | "table" | "document" | "model" | "archive" | "binary";
+
+export interface CardOutputSpec {
+  role: string;
+  label: string;
+  artifact_class: ArtifactClass;
+  accepted_formats?: string[] | null;
+  preferred_format?: string | null;
+  asset_id?: string | null;
+  status?: string | null;
+  required?: boolean;
+  description?: string | null;
+}
+
 export interface Card {
   card_id: string;
   card_type: string;
@@ -27,7 +41,7 @@ export interface Card {
   summary: string;
   why: string;
   inputs: CardRef[];
-  outputs: CardRef[];
+  outputs: CardOutputSpec[];
   key_findings: string[];
   manager_review: string;
   next_actions: string[];
@@ -275,6 +289,7 @@ export interface ProjectState {
   current_goal: string;
   created_at: string;
   updated_at: string;
+  runtime_preferences: ProjectRuntimePreferences;
 }
 
 export interface ProjectSummary extends ProjectState {
@@ -320,6 +335,7 @@ export interface AppSettings {
     manager_model: string;
     executor_model: string;
     reviewer_model: string;
+    library_summarizer_model: string;
   };
   web_search: {
     enabled: boolean;
@@ -336,10 +352,66 @@ export interface UpdateAppSettingsPayload {
   manager_model?: string | null;
   executor_model?: string | null;
   reviewer_model?: string | null;
+  library_summarizer_model?: string | null;
   manager_websearch_enabled?: boolean | null;
   tavily_api_key?: string | null;
   clear_tavily_api_key?: boolean;
   tavily_base_url?: string | null;
+}
+
+export interface UpdateProjectRuntimePreferencesPayload {
+  script_preference?: "auto" | "prefer_python" | "prefer_r" | "prefer_mixed" | null;
+  python_runtime?: string | null;
+  r_runtime?: string | null;
+}
+
+export interface ProjectRuntimePreferences {
+  script_preference: "auto" | "prefer_python" | "prefer_r" | "prefer_mixed";
+  python_runtime?: string | null;
+  r_runtime?: string | null;
+}
+
+export interface LibraryEntry {
+  id: string;
+  kind?: "skill" | "mcp";
+  name: string;
+  summary: string;
+  summary_short?: string;
+  summary_long?: string;
+  tags: string[];
+  use_cases?: string[];
+  enabled: boolean;
+  source?: string | null;
+  source_path?: string | null;
+  source_hash?: string | null;
+  compatibility_notes?: string[] | null;
+  runtime_requirements?: string[] | null;
+  supported_runtimes?: string[] | null;
+  launch_hint?: string | null;
+  generated_by?: string | null;
+  generated_at?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface LibraryListResponse {
+  kind: "skill" | "mcp";
+  items: LibraryEntry[];
+  summary: string;
+  updated_at?: string | null;
+  project_id?: string;
+}
+
+export interface LibraryDetailResponse {
+  kind: "skill" | "mcp";
+  item: LibraryEntry;
+  updated_at?: string | null;
+  project_id?: string;
+}
+
+export interface ReportExportResponse {
+  path: string;
+  content_url: string;
+  html?: string;
 }
 
 export interface ProjectSnapshot {

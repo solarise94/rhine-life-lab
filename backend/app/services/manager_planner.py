@@ -56,6 +56,7 @@ You must follow the patch contract strictly:
 - Do not invent fields that are not listed in the op contract.
 - Do not use `update_card` to modify a module. Cards and modules are different objects.
 - Do not use module ids where a card id is required, or card ids where a module id is required.
+- The DAG is already visible in the UI. Do not narrate the full graph back to the user unless they explicitly ask for a graph recap.
 - Respect `selected_context.script_preference` when creating analysis cards. Treat it as a soft user preference, not a hard constraint.
 - Respect `selected_context.python_runtime` and `selected_context.r_runtime` as preferred execution runtimes when planning or updating analysis cards.
 - If `script_preference` is `auto` and a new bioinformatics card could reasonably be implemented in either Python or R, ask the user for a preference before creating cards when that choice materially affects the workflow.
@@ -74,6 +75,7 @@ Use these op contracts:
 - `add_submodule`: requires `parent_module_id`, `module_id`, `title`. `parent_module_id` must be an existing module group. `module_id` should usually refer to a module created in the same change or an existing module.
 - `create_card`: must create a valid card object. Required fields include `card_id`, `card_type`, `title`, `status`, `summary`. Prefer also setting `step`, `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_runs`, `linked_assets`, `executor_context`.
 - `update_card`: requires `card_id` of an existing card. Only use card fields such as `step`, `title`, `status`, `summary`, `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_assets`, `progress_note`, `executor_context`. Never use it for modules. To delete a card, set `status` to `cancelled` and keep the card metadata intact for auditability.
+- Every `outputs[]` entry must be an explicit output contract with `role`, `label`, and `artifact_class`. `accepted_formats` is optional and may contain multiple acceptable formats. Do not create label-only outputs.
 - `update_module`: requires `module_id` of an existing module. Only use module fields such as `title`, `status`, `summary`, `depends_on_assets`, `expected_outputs`, `linked_cards`.
 - `set_card_status`: requires `card_id`, `status`.
 - `set_module_status`: requires `module_id`, `status`.
@@ -94,6 +96,7 @@ You are in normal chat mode. Answer the user's question conversationally using t
 Rules:
 - Do not create, modify, or imply that you applied blueprint changes.
 - If the user asks to mutate project state, tell them you can prepare an auditable proposal and they should state the desired change clearly.
+- The DAG is already visible in the UI; do not narrate the full graph unless the user explicitly asks for a recap.
 - Keep answers concise and concrete.
 """
 
@@ -104,6 +107,7 @@ You can either answer directly or call tools. You do not directly modify files o
 Tool rules:
 - Use `get_project_context` when you need current graph/cards/assets/proposals.
 - For ordinary greetings, explanations, reviews, suggestions, and "what else can we do" questions, answer directly after inspecting context.
+- The DAG is already visible in the UI; do not narrate the full graph unless the user explicitly asks for a recap.
 - Use direct card tools when the user clearly asks to add, create, modify, delete, rerun, rollback, or otherwise change the blueprint.
 - Direct card tools apply the requested card change immediately after validation.
 - Never claim a blueprint change has been applied unless the tool actually succeeded.

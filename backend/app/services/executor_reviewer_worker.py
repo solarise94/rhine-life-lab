@@ -548,7 +548,7 @@ class ExecutorReviewerWorker:
         files.update(path for path in (cls._clean_relative_path(item.path) for item in packet.input_assets) if path)
         files.update(
             path
-            for path in (cls._allowed_created_asset_path(packet, item.role, item.type, item.path) for item in manifest.created_assets)
+            for path in (cls._allowed_created_asset_path(packet, item.role, item.path) for item in manifest.created_assets)
             if path
         )
         files.update(
@@ -569,15 +569,15 @@ class ExecutorReviewerWorker:
         return normalized
 
     @classmethod
-    def _allowed_created_asset_path(cls, packet: TaskPacket, role: str, asset_type: str, path: str) -> str | None:
+    def _allowed_created_asset_path(cls, packet: TaskPacket, role: str, path: str) -> str | None:
         normalized = cls._clean_relative_path(path)
         if normalized is None:
             return None
         expected = next((item for item in packet.expected_outputs if item.role == role), None)
-        if expected is None or expected.type != asset_type:
+        if expected is None:
             return None
-        expected_path = cls._clean_relative_path(expected.path_hint)
-        if expected_path and normalized == expected_path:
+        expected_paths = [cls._clean_relative_path(item) for item in expected.allowed_path_hints()]
+        if normalized in {item for item in expected_paths if item}:
             return normalized
         allowed_prefixes = tuple(prefix for prefix in (cls._clean_allowed_prefix(item) for item in packet.allowed_paths) if prefix)
         if allowed_prefixes and normalized.startswith(allowed_prefixes):

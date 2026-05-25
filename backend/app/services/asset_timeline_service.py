@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import re
 
 from app.models.cards import Card, CardAssetRef
+from app.models.output_contracts import CardOutputSpec
 from app.models.graph import Asset, GraphState, Module, RunRecord
 
 
@@ -304,8 +305,8 @@ class AssetTimelineService:
         return batches, sorted(active_card_ids - scheduled)
 
     @classmethod
-    def ensure_output_asset_ids(cls, outputs: list[CardAssetRef], reserved_asset_ids: set[str]) -> list[CardAssetRef]:
-        next_outputs: list[CardAssetRef] = []
+    def ensure_output_asset_ids(cls, outputs: list[CardOutputSpec], reserved_asset_ids: set[str]) -> list[CardOutputSpec]:
+        next_outputs: list[CardOutputSpec] = []
         for output in outputs:
             asset_id = output.asset_id
             if not asset_id:

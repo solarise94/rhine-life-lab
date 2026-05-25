@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_report_service
@@ -28,3 +29,12 @@ def reorder_report(
 @router.post("/report/export-html")
 def export_report_html(project_id: str, report_service: ReportService = Depends(get_report_service)) -> dict:
     return report_service.export_html(project_id)
+
+
+@router.get("/report/exported-html")
+def get_exported_report_html(project_id: str, report_service: ReportService = Depends(get_report_service)) -> FileResponse:
+    report = report_service.get_exported_html(project_id)
+    path = report_service.project_service.project_path(project_id) / report["path"]
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Report has not been exported yet.")
+    return FileResponse(path, media_type="text/html")

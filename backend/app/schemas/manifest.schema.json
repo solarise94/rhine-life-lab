@@ -49,14 +49,10 @@
       "title": "CodeArtifact",
       "type": "object"
     },
-    "CreatedAsset": {
+    "CreatedAssetRecord": {
       "properties": {
         "role": {
           "title": "Role",
-          "type": "string"
-        },
-        "type": {
-          "title": "Type",
           "type": "string"
         },
         "path": {
@@ -98,14 +94,45 @@
           ],
           "default": null,
           "title": "Description"
+        },
+        "artifact_class": {
+          "anyOf": [
+            {
+              "enum": [
+                "figure",
+                "table",
+                "document",
+                "model",
+                "archive",
+                "binary"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Class"
+        },
+        "format": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Format"
         }
       },
       "required": [
         "role",
-        "type",
         "path"
       ],
-      "title": "CreatedAsset",
+      "title": "CreatedAssetRecord",
       "type": "object"
     },
     "TaskPacketAsset": {
@@ -183,7 +210,7 @@
     },
     "created_assets": {
       "items": {
-        "$ref": "#/$defs/CreatedAsset"
+        "$ref": "#/$defs/CreatedAssetRecord"
       },
       "title": "Created Assets",
       "type": "array"

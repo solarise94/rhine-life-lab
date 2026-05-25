@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.models.executor import ExecutorContext
+from app.models.output_contracts import CardOutputSpec
 
 
 CardStatus = Literal[
@@ -52,7 +53,7 @@ class Card(BaseModel):
     summary: str
     why: str = ""
     inputs: list[CardAssetRef] = Field(default_factory=list)
-    outputs: list[CardAssetRef] = Field(default_factory=list)
+    outputs: list[CardOutputSpec] = Field(default_factory=list)
     key_findings: list[str] = Field(default_factory=list)
     manager_review: str = ""
     next_actions: list[str] = Field(default_factory=list)
