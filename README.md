@@ -170,14 +170,14 @@ BLUEPRINT_INTERNAL_TOOL_TOKEN=change-me
 
 执行器默认使用 `pi`，UI 里会标注 `pi` 为最佳兼容；`OpenCode`、`Claude Code`、`Codex CLI` 可选但属于部分兼容。
 
-支持矩阵：
+认证与能力支持矩阵：
 
-| 执行器 | 原生 CLI 登录 | 项目 API 注入 | 备注 |
-| --- | --- | --- | --- |
-| `pi` | 不支持 | 支持 | 默认推荐，使用 DeepSeek/Pi 配置 |
-| `opencode` | 支持 | 支持 | 项目 API 可走 OpenAI-compatible 或 provider-native |
-| `claude_code` | 支持 | 不支持 | 使用本机 Claude Code 登录态 |
-| `codex` | 支持 | 不支持 | 使用本机 Codex 登录态 |
+| 执行器 | 兼容性 | 登录/项目 API | Tool policy 原生注入 | MCP 原生注入 | Skill 原生注入 | 备注 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `pi` | 最佳兼容 | `project_api` 支持；不支持 `cli_native` | 部分支持，主要由 Blueprint prompt/bwrap 约束 | 不支持原生 MCP 注入 | 支持，转换为 `pi --skill <path>` | 默认推荐，DeepSeek/Pi 配置最完整 |
+| `opencode` | 部分兼容 | `cli_native` 和 `project_api` 均支持 | 部分支持，写入 run-scoped OpenCode capability config；强制边界仍靠 bwrap | 部分支持，写入 OpenCode config 并暴露 `OPENCODE_MCP_CONFIG` | 部分支持，写入 OpenCode config/env 的 skill paths | 项目 API 可走 OpenAI-compatible 或 provider-native |
+| `claude_code` | 部分兼容 | 仅 `cli_native`，不注入 Anthropic 项目 API | 支持，映射到 `--permission-mode`、`--allowedTools`/`--disallowedTools` 的安全子集 | 支持，映射到 `--mcp-config <path>` | 非原生，仅通过 Blueprint env/prompt 暴露 skill paths | 使用本机 Claude Code 登录态 |
+| `codex` | 部分兼容 | 仅 `cli_native`，不注入 OpenAI 项目 API | 不支持原生注入；仅 Blueprint prompt/bwrap 约束 | 不支持原生 MCP 注入 | 不支持原生 skill 注入 | 使用本机 Codex 登录态 |
 
 认证模式：
 

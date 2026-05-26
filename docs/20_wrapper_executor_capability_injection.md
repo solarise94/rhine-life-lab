@@ -38,6 +38,17 @@ Provider-specific details belong in the wrapper/renderer layer, not in frontend 
 
 ## Capability Mapping
 
+### Native Support Matrix
+
+This table describes the current implementation, not each CLI's theoretical maximum capability.
+
+| Worker | Login / API injection | Tool policy native injection | MCP native injection | Skill native injection | Fallback boundary |
+| --- | --- | --- | --- | --- | --- |
+| `pi` | `project_api` only. DeepSeek/Pi credentials are injected through the launch env/script. | Partial. Tool policy is mostly prompt-level plus bwrap enforcement. | Not native. MCP remains represented in Blueprint files/prompt. | Supported through `pi --skill <path>` generated from `BLUEPRINT_PI_SKILL_PATHS`. | bwrap, task packet, executor prompt, validation/review. |
+| `opencode` | `cli_native` and `project_api`. Project API can generate OpenAI-compatible/provider-native config. | Partial. Policy is written to run-scoped OpenCode capability config; filesystem boundary remains bwrap. | Partial. MCP config is embedded into OpenCode config and exposed as `OPENCODE_MCP_CONFIG`. | Partial. Skill ids/paths are written to OpenCode config/env; exact native plugin semantics are best-effort. | bwrap, task packet, executor prompt, validation/review. |
+| `claude_code` | `cli_native` only. Project Anthropic API injection is intentionally blocked. | Supported subset through `--permission-mode`, `--allowedTools`, and `--disallowedTools`. | Supported through `--mcp-config <path>`. | Not native. Skill paths are exposed through Blueprint env/prompt only. | bwrap, task packet, executor prompt, validation/review. |
+| `codex` | `cli_native` only. Project OpenAI API injection is deferred. | Not native in current renderer. | Not native in current renderer. | Not native in current renderer. | bwrap, task packet, executor prompt, validation/review. |
+
 ### Skills
 
 Skills are copied into `runs/<run_id>/library/skills/<skill_id>/` and listed in `skill_bindings.json`. Renderers expose these paths through provider config/env and keep prompt references in `executor_prompt.md`.

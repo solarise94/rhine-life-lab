@@ -82,12 +82,12 @@ bash scripts/install_blueprint_re.sh --interactive
 
 其他执行器可安装，但要标注为部分兼容：
 
-| Worker | 推荐程度 | `cli_native` | `project_api` | 配置要求 |
-| --- | --- | --- | --- | --- |
-| `pi` | 最佳兼容 | 否 | 是 | 配好 DeepSeek/Pi 项目 API |
-| `opencode` | 部分兼容 | 是 | 是 | 原生登录或 OpenAI-compatible/provider-native 项目 API |
-| `claude_code` | 部分兼容 | 是 | 否 | 本机 Claude Code 已登录 |
-| `codex` | 部分兼容 | 是 | 否 | 本机 Codex CLI 已登录 |
+| Worker | 推荐程度 | 登录/项目 API | Tool policy 原生注入 | MCP 原生注入 | Skill 原生注入 | 配置要求 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `pi` | 最佳兼容 | `project_api` 支持；`cli_native` 不支持 | 部分支持，主要由 Blueprint prompt/bwrap 约束 | 不支持 | 支持，转换为 `pi --skill <path>` | 配好 DeepSeek/Pi 项目 API |
+| `opencode` | 部分兼容 | `cli_native` 和 `project_api` 均支持 | 部分支持，写入 run-scoped capability config | 部分支持，写入 OpenCode config 并暴露 `OPENCODE_MCP_CONFIG` | 部分支持，写入 OpenCode config/env 的 skill paths | 原生登录或 OpenAI-compatible/provider-native 项目 API |
+| `claude_code` | 部分兼容 | 仅 `cli_native` | 支持安全子集，映射为 `--permission-mode`、`--allowedTools`/`--disallowedTools` | 支持，映射为 `--mcp-config <path>` | 非原生，仅通过 Blueprint env/prompt 暴露 paths | 本机 Claude Code 已登录 |
+| `codex` | 部分兼容 | 仅 `cli_native` | 不支持原生注入；仅 Blueprint prompt/bwrap 约束 | 不支持 | 不支持 | 本机 Codex CLI 已登录 |
 
 `cli_native` 表示 wrapper 不注入项目 API key，不写 auth-bearing config，只让 CLI 使用系统已有登录态或本机配置。bwrap 会把原生目录作为只读路径暴露给执行器；如果 CLI 需要刷新 token，应先在宿主机手动登录，不能在 run 沙箱内刷新。
 
