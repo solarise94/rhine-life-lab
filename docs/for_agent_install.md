@@ -76,6 +76,54 @@ bash scripts/install_blueprint_re.sh --interactive
 1. 前端工作台设置页。
 2. 仓库根目录 `.env`。
 
+## Executor Selection And Auth
+
+默认执行器应保持 `pi`。它是当前最佳兼容路径，支持项目 API 注入，安装脚本和 UI 都按它作为默认值处理。
+
+其他执行器可安装，但要标注为部分兼容：
+
+| Worker | 推荐程度 | `cli_native` | `project_api` | 配置要求 |
+| --- | --- | --- | --- | --- |
+| `pi` | 最佳兼容 | 否 | 是 | 配好 DeepSeek/Pi 项目 API |
+| `opencode` | 部分兼容 | 是 | 是 | 原生登录或 OpenAI-compatible/provider-native 项目 API |
+| `claude_code` | 部分兼容 | 是 | 否 | 本机 Claude Code 已登录 |
+| `codex` | 部分兼容 | 是 | 否 | 本机 Codex CLI 已登录 |
+
+`cli_native` 表示 wrapper 不注入项目 API key，不写 auth-bearing config，只让 CLI 使用系统已有登录态或本机配置。bwrap 会把原生目录作为只读路径暴露给执行器；如果 CLI 需要刷新 token，应先在宿主机手动登录，不能在 run 沙箱内刷新。
+
+`project_api` 表示 wrapper 使用项目配置注入 API key/base URL/model。当前只应给 `pi` 和 `opencode` 使用；不要给 `claude_code` 或 `codex` 注入项目 API。
+
+Agent 安装时不要把 `executor_profile` 当作 profile id 使用。`executor_profile` 是稳定 worker 名，例如 `pi_worker`、`opencode_worker`；真实选择的 profile id 应写入 `executor_profile_id`。
+
+## Executor Command Templates
+
+新安装必须优先写 `*_COMMAND_JSON`，不要优先写旧的 shell 字符串模板。
+
+JSON argv 模板规则：
+
+- 每个 JSON 数组元素就是一个 argv。
+- 占位符只在单个 argv 元素内替换，不经过 shell 二次切分。
+- 这能正确处理 WSL 和 Linux 下带空格的路径，例如 `/mnt/c/Users/xu/Documents/New project/...`。
+- `{repo_root}` 指仓库根目录，适合引用仓库内脚本。
+- `{executor_prompt_path}` 指当前 run 的 executor prompt。
+
+推荐默认值：
+
+```env
+BLUEPRINT_PI_COMMAND_JSON=["bash","{repo_root}/scripts/blueprint_pi_launch.sh","{executor_prompt_path}"]
+BLUEPRINT_OPENCODE_COMMAND_JSON=["opencode","run","--file","{executor_prompt_path}","--format","json","--dangerously-skip-permissions","Read {executor_prompt_path} and complete the Blueprint executor contract exactly."]
+BLUEPRINT_CLAUDE_CODE_COMMAND_JSON=["claude","-p","{executor_prompt_path}","--output-format","stream-json","--verbose"]
+BLUEPRINT_CODEX_COMMAND_JSON=["codex","exec","{executor_prompt_path}"]
+```
+
+旧变量 `BLUEPRINT_PI_COMMAND`、`BLUEPRINT_OPENCODE_COMMAND`、`BLUEPRINT_CLAUDE_CODE_COMMAND`、`BLUEPRINT_CODEX_COMMAND` 仍可作为兼容 fallback，但如果路径里有空格，agent 应改成 JSON argv，而不是尝试手写复杂 shell quoting。
+
+WSL 特别注意：
+
+- 不要把仓库路径中的空格当成用户错误；长期方案是 JSON argv。
+- 不要让 `conda run /mnt/c/Users/.../New project/...` 通过 shell 字符串拼接。
+- 不要因为 bwrap 只读挂载原生目录而改成无沙箱执行。
+
 ## Runtime Detection Rules
 
 安装脚本按以下顺序探测 Conda base：

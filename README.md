@@ -43,19 +43,17 @@ workspace/      本地运行时项目数据（不纳入仓库）
 
 # 安装方式
 
-[说真的，这种事交给智能体去干吧。人类敲配置文件容易手滑](https://github.com/code-yeongyu/oh-my-openagent/blob/dev/README.md)
+说真的，这种事交给智能体去干吧。人类敲配置文件容易手滑。
 
 优先建议先安装一个终端执行器，再让 agent 自己完成私有仓库登录、下载、依赖检查和部署。
 
 
-1. `Codex CLI`
-   - 安装：`npm install -g @openai/codex`
-2. `Claude Code`
-   - 安装：`npm install -g @anthropic-ai/claude-code`
-3. `pi`
-   - GitHub：https://github.com/earendil-works/pi
-   - 安装：`npm install -g @earendil-works/pi-coding-agent`
-4. `what ever`
+推荐执行器：
+
+1. `pi`：默认推荐，兼容性最好，支持项目 API 注入。
+2. `OpenCode`：部分兼容，支持原生 CLI 登录和项目 API 注入。
+3. `Claude Code`：部分兼容，仅支持原生 CLI 登录。
+4. `Codex CLI`：部分兼容，仅支持原生 CLI 登录。
 
 建议先准备：
 
@@ -69,10 +67,6 @@ npm -v
 ## 给 Agent 的安装 Prompt
 
 都什么年代了，还在手动安装，复制下面这段 prompt 让 agent 帮你完成吧。
-
-灵感文案引用自 oh-my-openagent：
-`Or read the Installation Guide, but seriously, let an agent do it. Humans fat-finger configs.`
-来源：<https://github.com/code-yeongyu/oh-my-openagent/blob/dev/README.md>
 
 优先直接把下面这段 prompt 发给你已经安装好的执行器：
 
@@ -171,6 +165,35 @@ BLUEPRINT_INTERNAL_TOOL_TOKEN=change-me
 - `MANAGER_COMPACTION_ENABLED=true`
 
 完整模板见 [.env.example](/home/solarise/blueprint_re_v3/.env.example:1)。
+
+## 执行器配置
+
+执行器默认使用 `pi`，UI 里会标注 `pi` 为最佳兼容；`OpenCode`、`Claude Code`、`Codex CLI` 可选但属于部分兼容。
+
+支持矩阵：
+
+| 执行器 | 原生 CLI 登录 | 项目 API 注入 | 备注 |
+| --- | --- | --- | --- |
+| `pi` | 不支持 | 支持 | 默认推荐，使用 DeepSeek/Pi 配置 |
+| `opencode` | 支持 | 支持 | 项目 API 可走 OpenAI-compatible 或 provider-native |
+| `claude_code` | 支持 | 不支持 | 使用本机 Claude Code 登录态 |
+| `codex` | 支持 | 不支持 | 使用本机 Codex 登录态 |
+
+认证模式：
+
+- `cli_native`：不注入项目 API key，执行器使用系统里已经登录好的 CLI 账号或本机配置。bwrap 会把原生目录作为只读路径暴露给 CLI，不能在 run 内刷新登录。
+- `project_api`：wrapper 才会注入项目里的 API key、base URL、model，并生成 run-scoped provider config。
+
+命令模板优先使用 `*_COMMAND_JSON`，不要优先写 shell 字符串。JSON argv 模板里每个元素都是单独 argv，能稳定处理 WSL 和 Linux 下带空格的路径，例如 `/mnt/c/Users/xu/Documents/New project/...`。
+
+```env
+BLUEPRINT_PI_COMMAND_JSON=["bash","{repo_root}/scripts/blueprint_pi_launch.sh","{executor_prompt_path}"]
+BLUEPRINT_OPENCODE_COMMAND_JSON=["opencode","run","--file","{executor_prompt_path}","--format","json","--dangerously-skip-permissions","Read {executor_prompt_path} and complete the Blueprint executor contract exactly."]
+BLUEPRINT_CLAUDE_CODE_COMMAND_JSON=["claude","-p","{executor_prompt_path}","--output-format","stream-json","--verbose"]
+BLUEPRINT_CODEX_COMMAND_JSON=["codex","exec","{executor_prompt_path}"]
+```
+
+旧的 `*_COMMAND` 字符串模板仍可用，但只作为兼容路径。新安装和 WSL 部署不要依赖 shell 拼接命令。
 
 ## 本地开发
 
