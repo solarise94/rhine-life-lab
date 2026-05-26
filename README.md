@@ -72,48 +72,13 @@ npm -v
 
 如果没有 Node.js，先装 Node 18+ 再继续。
 
-## 给 Agent 的一键安装 Prompt
+## 给 Agent 的安装 Prompt
 
-把下面这段 prompt 直接发给你已经安装好的执行器，让它自己带着你完成私有仓库登录、拉取和安装。
+优先直接把下面这段 prompt 发给你已经安装好的执行器：
 
 ```text
-请你把自己当作这台机器上的安装代理，帮我安装 Blueprint RE。
-
-目标：
-1. 检查当前机器是否已安装 git、gh、node、npm、python3、python3-venv、systemd --user、bubblewrap/bwrap。
-2. 如果缺失，请优先使用系统包管理器安装；如果不是 apt 系，请明确告诉我下一步需要我授权或手动安装什么。
-3. 帮我登录 GitHub CLI：
-   - 如果 gh 未安装，先安装 gh。
-   - 然后引导我完成 `gh auth login`。
-   - 登录成功后，用 gh 克隆这个私有仓库：https://github.com/solarise94/rhine-life-lab
-4. 进入仓库后，不要先问我 API key。优先阅读：
-   - README.md
-   - docs/for_agent_install.md
-   - scripts/install_blueprint_re.sh
-   - scripts/deploy_user_systemd.sh
-5. 直接执行安装，目标是把工作台先跑起来：
-   - 自动检查依赖
-   - 自动检查 bwrap 沙箱
-   - 自动探测默认 Conda、Python runtime、R runtime
-   - 允许 DeepSeek / Tavily API key 先留空
-6. 安装完成后，验证：
-   - systemctl --user status blueprint-re-manager-agent.service
-   - systemctl --user status blueprint-re-backend.service
-   - systemctl --user status blueprint-re-frontend.service
-   - curl http://127.0.0.1:18001/healthz
-7. 最后告诉我：
-   - 前端地址
-   - 后端地址
-   - 哪些依赖是自动装的
-   - 哪些 API key 还没配置
-
-约束：
-- 不要静默跳过 bwrap 沙箱失败。
-- 不要把 token 或 API key 写进公开日志。
-- 不要让我手工读脚本，优先由你自己执行、检查、汇报。
+请登录 GitHub 并拉取私有仓库 https://github.com/solarise94/rhine-life-lab ，然后阅读 docs/for_agent_install.md，根据文档引导完成项目安装、依赖检查、服务启动和安装验证；除非确实无法自动处理，否则不要把脚本阅读和手工操作再交还给我。
 ```
-
-如果你希望 agent 直接按仓库内文档执行，参见 [docs/for_agent_install.md](/home/solarise/blueprint_re_v3/docs/for_agent_install.md:1)。
 
 ## 本地兜底安装
 
