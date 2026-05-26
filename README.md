@@ -166,7 +166,7 @@ BLUEPRINT_INTERNAL_TOOL_TOKEN=change-me
 
 完整模板见 [.env.example](/home/solarise/blueprint_re_v3/.env.example:1)。
 
-## 执行器配置
+## 执行器配置（注：执行器兼容性仍需测试）
 
 执行器默认使用 `pi`，UI 里会标注 `pi` 为最佳兼容；`OpenCode`、`Claude Code`、`Codex CLI` 可选但属于部分兼容。
 
