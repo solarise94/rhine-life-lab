@@ -42,6 +42,7 @@ class ManifestService:
         packet = self.load_task_packet(project_id, run_id)
         allowed_prefixes = tuple(packet.allowed_paths)
         expected_outputs = {item.role: item for item in packet.expected_outputs}
+        required_output_roles = {item.role for item in packet.expected_outputs if item.required}
 
         graph = self.project_service.graph_store(project_id).load_graph()
         existing_valid_output_paths = {
@@ -84,7 +85,7 @@ class ManifestService:
                 errors.append(
                     f"Manifest output format mismatch for role {asset.role}: expected one of {', '.join(expected.accepted_formats)}, got {detected_format or 'unknown'}"
                 )
-        missing_output_roles = sorted(set(expected_outputs) - seen_roles)
+        missing_output_roles = sorted(required_output_roles - seen_roles)
         if missing_output_roles:
             errors.append(f"Manifest is missing declared outputs: {', '.join(missing_output_roles)}")
         return not errors, errors

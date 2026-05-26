@@ -424,8 +424,13 @@ def _manifest_validation_errors(path: Path, *, packet: dict[str, Any] | None = N
         for item in expected_outputs
         if isinstance(item, dict) and item.get("role") and item.get("path_hint") and item.get("artifact_class")
     }
+    required_roles = {
+        role
+        for role, item in expected_by_role.items()
+        if role and item.get("required", True) is not False
+    }
     created_by_role = {item.role: item for item in manifest.created_assets if item.role}
-    missing_output_roles = sorted(set(expected_by_role) - set(created_by_role))
+    missing_output_roles = sorted(required_roles - set(created_by_role))
     if missing_output_roles:
         formatted = ", ".join(
             f"{role} ({expected_by_role[role]['path_hint']})" for role in missing_output_roles if role in expected_by_role
@@ -541,6 +546,8 @@ def _write_manifest_repair_prompt(*, run_dir: Path, packet: dict, errors: list[s
             continue
         role = item.get("role")
         path_hint = item.get("path_hint")
+        if item.get("required", True) is False:
+            continue
         if role and path_hint and any(path_hint in error and "created_assets" in error for error in errors):
             missing_output_paths.append((role, path_hint, item.get("artifact_class")))
     if missing_output_paths:
@@ -573,6 +580,7 @@ def _write_manifest_repair_prompt(*, run_dir: Path, packet: dict, errors: list[s
                             "description": "Short factual description.",
                         }
                         for item in expected_outputs
+                        if item.get("required", True) is not False
                     ],
                     "code_artifacts": [
                         {

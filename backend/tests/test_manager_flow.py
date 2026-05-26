@@ -2301,6 +2301,72 @@ print('BP_EVENT {"type":"progress_update","stage":"provider","progress":10,"mess
         self.assertFalse(ok)
         self.assertTrue(any("collides with an existing valid asset" in error for error in errors))
 
+    def test_manifest_validation_allows_missing_optional_expected_output(self) -> None:
+        project_root = self.project_service.project_path("test-project")
+        run_id = "run_optional_output_missing"
+        run_dir = project_root / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        packet = TaskPacket.model_validate(
+            {
+                "task_id": run_id,
+                "project_id": "test-project",
+                "card_id": "card_optional_output",
+                "goal": "Validate optional outputs.",
+                "input_assets": [],
+                "expected_outputs": [
+                    expected_output_spec(
+                        "report_html",
+                        f"results/card_optional_output/{run_id}/report.html",
+                        artifact_class="document",
+                        accepted_formats=["html"],
+                    ),
+                    {
+                        **expected_output_spec(
+                            "figures_pack",
+                            f"results/card_optional_output/{run_id}/figures_pack.svg",
+                            artifact_class="figure",
+                            accepted_formats=["svg"],
+                        ),
+                        "required": False,
+                    },
+                ],
+                "allowed_paths": [
+                    f"runs/{run_id}/",
+                    f"results/card_optional_output/{run_id}/",
+                ],
+                "worker_instructions": "Write the main report only.",
+            }
+        )
+        atomic_write_json(run_dir / "task_packet.json", packet.model_dump())
+        report_path = project_root / packet.expected_outputs[0].path_hint
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text("<html>ok</html>\n", encoding="utf-8")
+        atomic_write_json(
+            run_dir / "manifest.json",
+            {
+                "run_id": run_id,
+                "status": "success",
+                "summary": "optional figure pack omitted",
+                "created_assets": [
+                    {
+                        "role": "report_html",
+                        "path": packet.expected_outputs[0].path_hint,
+                        "description": "Main HTML report.",
+                    }
+                ],
+                "commands_executed": ["optional-output-test"],
+                "metrics": {},
+                "key_findings": [],
+                "recommended_graph_updates": [],
+                "warnings": [],
+            },
+        )
+
+        ok, errors = self.manifest_service.validate_manifest("test-project", run_id)
+
+        self.assertTrue(ok, errors)
+        self.assertEqual([], errors)
+
     def test_filesystem_audit_ignores_backend_chat_session_writes(self) -> None:
         project_root = self.project_service.project_path("test-project")
         store = self.project_service.graph_store("test-project")
@@ -2555,6 +2621,132 @@ time.sleep(5)
             self.assertTrue(synced_script.exists())
             self.assertEqual("print('run local script')\n", synced_script.read_text(encoding="utf-8"))
             self.assertTrue((run_dir / "manifest.json").exists())
+
+    def test_agent_cli_wrapper_allows_missing_optional_expected_output(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wrapper-optional-output-") as tmpdir:
+            project_root = Path(tmpdir)
+            run_id = "run_optional_output_wrapper_ok"
+            run_dir = project_root / "runs" / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (project_root / "results" / "card_optional_output" / run_id).mkdir(parents=True, exist_ok=True)
+            packet = {
+                "task_id": run_id,
+                "expected_outputs": [
+                    expected_output_spec(
+                        "report_html",
+                        f"results/card_optional_output/{run_id}/report.html",
+                        artifact_class="document",
+                        accepted_formats=["html"],
+                    ),
+                    {
+                        **expected_output_spec(
+                            "figures_pack",
+                            f"results/card_optional_output/{run_id}/figures_pack.svg",
+                            artifact_class="figure",
+                            accepted_formats=["svg"],
+                        ),
+                        "required": False,
+                    },
+                ],
+            }
+            atomic_write_json(run_dir / "task_packet.json", packet)
+            (project_root / "results" / "card_optional_output" / run_id / "report.html").write_text(
+                "<html>ok</html>\n",
+                encoding="utf-8",
+            )
+            atomic_write_json(
+                run_dir / "manifest.candidate.json",
+                {
+                    "run_id": run_id,
+                    "status": "success",
+                    "summary": "optional file omitted",
+                    "created_assets": [
+                        {
+                            "role": "report_html",
+                            "path": f"results/card_optional_output/{run_id}/report.html",
+                            "artifact_class": "document",
+                            "format": "html",
+                        }
+                    ],
+                    "code_artifacts": [],
+                    "commands_executed": ["optional-output-test"],
+                    "validation_evidence": {"input_conclusion": "No inputs."},
+                },
+            )
+
+            errors = agent_cli_executor._promote_candidate_manifest(run_dir=run_dir)
+
+            self.assertEqual([], errors)
+            self.assertTrue((run_dir / "manifest.json").exists())
+
+    def test_agent_cli_wrapper_rejects_missing_file_for_declared_optional_output(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wrapper-optional-output-declared-") as tmpdir:
+            project_root = Path(tmpdir)
+            run_id = "run_optional_output_wrapper_missing_file"
+            run_dir = project_root / "runs" / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (project_root / "results" / "card_optional_output" / run_id).mkdir(parents=True, exist_ok=True)
+            packet = {
+                "task_id": run_id,
+                "expected_outputs": [
+                    expected_output_spec(
+                        "report_html",
+                        f"results/card_optional_output/{run_id}/report.html",
+                        artifact_class="document",
+                        accepted_formats=["html"],
+                    ),
+                    {
+                        **expected_output_spec(
+                            "figures_pack",
+                            f"results/card_optional_output/{run_id}/figures_pack.svg",
+                            artifact_class="figure",
+                            accepted_formats=["svg"],
+                        ),
+                        "required": False,
+                    },
+                ],
+            }
+            atomic_write_json(run_dir / "task_packet.json", packet)
+            (project_root / "results" / "card_optional_output" / run_id / "report.html").write_text(
+                "<html>ok</html>\n",
+                encoding="utf-8",
+            )
+            atomic_write_json(
+                run_dir / "manifest.candidate.json",
+                {
+                    "run_id": run_id,
+                    "status": "success",
+                    "summary": "optional file declared but absent",
+                    "created_assets": [
+                        {
+                            "role": "report_html",
+                            "path": f"results/card_optional_output/{run_id}/report.html",
+                            "artifact_class": "document",
+                            "format": "html",
+                        },
+                        {
+                            "role": "figures_pack",
+                            "path": f"results/card_optional_output/{run_id}/figures_pack.svg",
+                            "artifact_class": "figure",
+                            "format": "svg",
+                        },
+                    ],
+                    "code_artifacts": [],
+                    "commands_executed": ["optional-output-test"],
+                    "validation_evidence": {"input_conclusion": "No inputs."},
+                },
+            )
+
+            errors = agent_cli_executor._promote_candidate_manifest(run_dir=run_dir)
+
+            self.assertTrue(
+                any(
+                    "Missing output file: results/card_optional_output/run_optional_output_wrapper_missing_file/figures_pack.svg"
+                    in error
+                    for error in errors
+                ),
+                errors,
+            )
 
     def test_filesystem_audit_violation_marks_run_failed(self) -> None:
         script = """
