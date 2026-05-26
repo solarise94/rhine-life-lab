@@ -85,7 +85,7 @@ npm -v
 3. 帮我登录 GitHub CLI：
    - 如果 gh 未安装，先安装 gh。
    - 然后引导我完成 `gh auth login`。
-   - 登录成功后，用 gh 克隆这个私有仓库：<PRIVATE_REPO_URL>
+   - 登录成功后，用 gh 克隆这个私有仓库：https://github.com/solarise94/rhine-life-lab
 4. 进入仓库后，不要先问我 API key。优先阅读：
    - README.md
    - docs/for_agent_install.md
@@ -132,7 +132,7 @@ npm -v
 执行：
 
 ```bash
-git clone <your-private-repo-url> laehyn-labs
+git clone https://github.com/solarise94/rhine-life-lab.git laehyn-labs
 cd laehyn-labs
 bash scripts/install_blueprint_re.sh --interactive
 ```
