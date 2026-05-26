@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import SecretStr
 
 from app.core.config import Settings, get_settings
+from app.models.executor_profiles import default_profiles
 
 
 class AppConfigService:
@@ -22,6 +23,8 @@ class AppConfigService:
         config = self._load()
         deepseek_key = self._effective_deepseek_api_key(config)
         tavily_key = self._effective_tavily_api_key(config)
+        anthropic_key = self._effective_anthropic_api_key(config)
+        openai_key = self._effective_openai_api_key(config)
         websearch_enabled = self._effective_bool(
             config.get("manager_websearch_enabled"),
             os.environ.get("MANAGER_WEBSEARCH_ENABLED"),
@@ -44,6 +47,14 @@ class AppConfigService:
                 "api_key_configured": bool(tavily_key),
                 "base_url": str(config.get("tavily_base_url") or os.environ.get("TAVILY_BASE_URL") or "https://api.tavily.com"),
             },
+            "anthropic": {
+                "api_key_configured": bool(anthropic_key),
+                "api_base_url": str(config.get("anthropic_api_base_url") or self.settings.anthropic_api_base_url),
+            },
+            "openai": {
+                "api_key_configured": bool(openai_key),
+                "api_base_url": str(config.get("openai_api_base_url") or self.settings.openai_api_base_url),
+            },
         }
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -56,6 +67,8 @@ class AppConfigService:
             "reviewer_model",
             "library_summarizer_model",
             "tavily_base_url",
+            "anthropic_api_base_url",
+            "openai_api_base_url",
         }
         for field in string_fields:
             if field in payload and payload[field] is not None:
@@ -79,6 +92,20 @@ class AppConfigService:
             value = str(payload["tavily_api_key"]).strip()
             if value:
                 config["tavily_api_key"] = value
+
+        if payload.get("clear_anthropic_api_key"):
+            config.pop("anthropic_api_key", None)
+        elif "anthropic_api_key" in payload and payload["anthropic_api_key"] is not None:
+            value = str(payload["anthropic_api_key"]).strip()
+            if value:
+                config["anthropic_api_key"] = value
+
+        if payload.get("clear_openai_api_key"):
+            config.pop("openai_api_key", None)
+        elif "openai_api_key" in payload and payload["openai_api_key"] is not None:
+            value = str(payload["openai_api_key"]).strip()
+            if value:
+                config["openai_api_key"] = value
 
         self._save(config)
         self._apply_runtime_overrides(config)
@@ -122,6 +149,10 @@ class AppConfigService:
             ),
             "tavily_api_key": self._effective_tavily_api_key(config),
             "tavily_base_url": str(config.get("tavily_base_url") or os.environ.get("TAVILY_BASE_URL") or "https://api.tavily.com"),
+            "anthropic_api_key": self._effective_anthropic_api_key(config),
+            "anthropic_api_base_url": str(config.get("anthropic_api_base_url") or self.settings.anthropic_api_base_url),
+            "openai_api_key": self._effective_openai_api_key(config),
+            "openai_api_base_url": str(config.get("openai_api_base_url") or self.settings.openai_api_base_url),
         }
 
     def _load(self) -> dict[str, Any]:
@@ -154,9 +185,19 @@ class AppConfigService:
             self.settings.reviewer_model = str(config["reviewer_model"])
         if config.get("library_summarizer_model"):
             self.settings.library_summarizer_model = str(config["library_summarizer_model"])
+        if config.get("anthropic_api_base_url"):
+            self.settings.anthropic_api_base_url = str(config["anthropic_api_base_url"])
+        if config.get("openai_api_base_url"):
+            self.settings.openai_api_base_url = str(config["openai_api_base_url"])
         deepseek_key = self._effective_deepseek_api_key(config)
         if deepseek_key:
             self.settings.deepseek_api_key = SecretStr(deepseek_key)
+        anthropic_key = self._effective_anthropic_api_key(config)
+        if anthropic_key:
+            self.settings.anthropic_api_key = SecretStr(anthropic_key)
+        openai_key = self._effective_openai_api_key(config)
+        if openai_key:
+            self.settings.openai_api_key = SecretStr(openai_key)
 
     def _effective_deepseek_api_key(self, config: dict[str, Any]) -> str:
         configured = str(config.get("deepseek_api_key") or "").strip()
@@ -173,6 +214,22 @@ class AppConfigService:
             return configured
         return os.environ.get("TAVILY_API_KEY", "").strip()
 
+    def _effective_anthropic_api_key(self, config: dict[str, Any]) -> str:
+        configured = str(config.get("anthropic_api_key") or "").strip()
+        if configured:
+            return configured
+        if self.settings.anthropic_api_key:
+            return self.settings.anthropic_api_key.get_secret_value()
+        return os.environ.get("ANTHROPIC_API_KEY", "").strip()
+
+    def _effective_openai_api_key(self, config: dict[str, Any]) -> str:
+        configured = str(config.get("openai_api_key") or "").strip()
+        if configured:
+            return configured
+        if self.settings.openai_api_key:
+            return self.settings.openai_api_key.get_secret_value()
+        return os.environ.get("OPENAI_API_KEY", "").strip()
+
     @staticmethod
     def _effective_bool(config_value: Any, env_value: str | None, *, default: bool) -> bool:
         if config_value is not None:
@@ -180,3 +237,58 @@ class AppConfigService:
         if env_value is None:
             return default
         return env_value.lower() in {"1", "true", "yes", "on"}
+
+    def list_executor_profiles(self) -> list[dict[str, Any]]:
+        config = self._load()
+        profiles = config.get("executor_profiles")
+        if not isinstance(profiles, list):
+            return []
+        return [item for item in profiles if isinstance(item, dict)]
+
+    def save_executor_profile(self, profile: dict[str, Any]) -> None:
+        config = self._load()
+        profiles = config.get("executor_profiles")
+        if not isinstance(profiles, list):
+            profiles = []
+        profile_id = profile.get("profile_id")
+        existing_index = next(
+            (i for i, item in enumerate(profiles) if isinstance(item, dict) and item.get("profile_id") == profile_id),
+            None,
+        )
+        if existing_index is not None:
+            profiles[existing_index] = profile
+        else:
+            profiles.append(profile)
+        config["executor_profiles"] = profiles
+        self._save(config)
+
+    def delete_executor_profile(self, profile_id: str) -> None:
+        config = self._load()
+        profiles = config.get("executor_profiles")
+        if not isinstance(profiles, list):
+            return
+        config["executor_profiles"] = [
+            item for item in profiles if not (isinstance(item, dict) and item.get("profile_id") == profile_id)
+        ]
+        self._save(config)
+
+    def resolve_executor_command(self, worker_type: str) -> str | None:
+        setting_name = f"{worker_type}_command"
+        return getattr(self.settings, setting_name, None)
+
+    def resolve_executor_profile(self, worker_type: str, profile_id: str | None = None) -> dict[str, Any] | None:
+        stored_profiles = self.list_executor_profiles()
+        default_profile_items = [profile.model_dump() for profile in default_profiles()]
+        profiles = stored_profiles + [
+            item for item in default_profile_items
+            if not any(stored.get("profile_id") == item.get("profile_id") for stored in stored_profiles)
+        ]
+        if profile_id:
+            return next(
+                (item for item in profiles if item.get("profile_id") == profile_id and item.get("worker_type") == worker_type),
+                None,
+            )
+        return next(
+            (item for item in profiles if item.get("worker_type") == worker_type and item.get("enabled", True)),
+            None,
+        )

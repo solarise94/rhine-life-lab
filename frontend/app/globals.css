@@ -1192,6 +1192,19 @@ button {
   box-shadow: 0 0 0 3px var(--blue-border);
 }
 
+.executor-compat-note {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-solid) 82%, var(--blue) 18%);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.45;
+  padding: 7px 9px;
+  text-transform: none;
+}
+
 /* ─── Buttons ─── */
 .btn {
   display: inline-flex;

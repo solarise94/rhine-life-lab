@@ -528,10 +528,12 @@ class ProjectService:
 
     def _worker_capabilities(self) -> list[dict]:
         registry = build_worker_registry()
-        adapter = registry.get("pi")
-        if adapter is None:
-            return []
-        return [adapter.capability_metadata(self.settings)]
+        result = []
+        for name, adapter in registry.items():
+            checker = getattr(adapter, "capability_metadata", None)
+            if callable(checker):
+                result.append(checker(self.settings))
+        return result
 
     def _python_runtimes(self) -> list[dict]:
         runtimes: list[dict] = [{"name": "__system__", "label": "System Python", "path": None, "manager": "system", "exists": True}]

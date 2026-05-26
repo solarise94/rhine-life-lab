@@ -37,6 +37,33 @@ export function useUpdateAppSettingsMutation() {
   });
 }
 
+export function useExecutorProfiles() {
+  return useQuery({
+    queryKey: queryKeys.executorProfiles,
+    queryFn: () => api.listExecutorProfiles(),
+  });
+}
+
+export function useSaveExecutorProfileMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (profile: Parameters<typeof api.saveExecutorProfile>[0]) => api.saveExecutorProfile(profile),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.executorProfiles });
+    },
+  });
+}
+
+export function useDeleteExecutorProfileMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (profileId: string) => api.deleteExecutorProfile(profileId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.executorProfiles });
+    },
+  });
+}
+
 export function useRefreshLibraryMutation(kind: "skill" | "mcp") {
   const queryClient = useQueryClient();
   return useMutation({
@@ -245,14 +272,16 @@ export function useStartRunMutation(projectId: string) {
     mutationFn: ({
       cardId,
       workerType,
+      profileId,
       pythonRuntime,
       rRuntime,
     }: {
       cardId: string;
       workerType?: string;
+      profileId?: string;
       pythonRuntime?: string;
       rRuntime?: string;
-    }) => api.startRun(projectId, cardId, workerType, pythonRuntime, rRuntime),
+    }) => api.startRun(projectId, cardId, workerType, profileId, pythonRuntime, rRuntime),
     onSuccess: async () => {
       await refresh();
     },

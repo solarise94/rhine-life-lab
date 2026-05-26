@@ -6,4 +6,7 @@ blueprint_re_backend.egg-info/SOURCES.txt
 blueprint_re_backend.egg-info/dependency_links.txt
 blueprint_re_backend.egg-info/requires.txt
 blueprint_re_backend.egg-info/top_level.txt
+tests/test_argv_templates.py
+tests/test_executor_profiles.py
 tests/test_manager_flow.py
+tests/test_review_2025_05_26_remediation.py

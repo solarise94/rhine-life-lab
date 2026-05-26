@@ -23,6 +23,9 @@ import {
   LibraryListResponse,
   RunEvent,
   StartRunResponse,
+  ExecutorProfile,
+  ExecutorProfileListResponse,
+  ExecutorProfileValidation,
   UpdateAppSettingsPayload,
   UpdateProjectRuntimePreferencesPayload,
   RuntimeApprovalDecision,
@@ -161,6 +164,30 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(payload),
     });
+  },
+  listExecutorProfiles() {
+    return request<ExecutorProfileListResponse>("/executor-profiles");
+  },
+  validateExecutorProfile(profile: Partial<ExecutorProfile>) {
+    return request<ExecutorProfileValidation>("/executor-profiles/validate", {
+      method: "POST",
+      body: JSON.stringify(profile),
+    });
+  },
+  saveExecutorProfile(profile: ExecutorProfile) {
+    return request<{ profile: ExecutorProfile; validation: ExecutorProfileValidation }>(
+      `/executor-profiles/${encodeURIComponent(profile.profile_id)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(profile),
+      },
+    );
+  },
+  deleteExecutorProfile(profileId: string) {
+    return request<{ profile_id: string; deleted: boolean }>(
+      `/executor-profiles/${encodeURIComponent(profileId)}`,
+      { method: "DELETE" },
+    );
   },
   createProject(payload: CreateProjectPayload) {
     return request<{ project: ProjectState }>("/projects", {
@@ -459,10 +486,10 @@ export const api = {
   rejectProposal(projectId: string, proposalId: string) {
     return request<{ proposal: Proposal }>(`/projects/${projectId}/proposals/${proposalId}/reject`, { method: "POST" });
   },
-  startRun(projectId: string, cardId: string, workerType?: string, pythonRuntime?: string, rRuntime?: string) {
+  startRun(projectId: string, cardId: string, workerType?: string, profileId?: string, pythonRuntime?: string, rRuntime?: string) {
     return request<StartRunResponse>(`/projects/${projectId}/cards/${cardId}/start-run`, {
       method: "POST",
-      body: JSON.stringify({ worker_type: workerType ?? null, python_runtime: pythonRuntime ?? null, r_runtime: rRuntime ?? null }),
+      body: JSON.stringify({ worker_type: workerType ?? null, profile_id: profileId ?? null, python_runtime: pythonRuntime ?? null, r_runtime: rRuntime ?? null }),
     });
   },
   resetCardRunState(projectId: string, cardId: string) {

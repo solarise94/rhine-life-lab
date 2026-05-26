@@ -75,8 +75,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         project_root: Path,
         settings: object,
     ) -> WorkerLaunchSpec:
-        template = self.resolve_command_template(settings)
-        if not template:
+        if not self.is_configured(settings):
             raise RuntimeError(f"Worker adapter {self.name} is not configured.")
         self._validate_executor_policy(packet)
         library_paths = self._write_library_bindings(packet=packet, run_dir=run_dir)
@@ -96,8 +95,18 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "manager_brief_path": str(run_dir / "manager_brief.json"),
             "worker_type": self.name,
             "python": sys.executable,
+            "repo_root": str(Path(__file__).resolve().parents[2].parent),
         }
-        command = shlex.split(template.format(**mapping))
+        argv_template = self.resolve_command_argv_template(settings)
+        if argv_template:
+            command = self._render_argv_template(argv_template, mapping)
+        else:
+            template = self.resolve_command_template(settings)
+            if not template:
+                raise RuntimeError(f"Worker adapter {self.name} is not configured.")
+            # Quote values to protect paths with spaces in the legacy string template
+            quoted_mapping = {k: shlex.quote(v) for k, v in mapping.items()}
+            command = shlex.split(template.format(**quoted_mapping))
         backend_root = Path(__file__).resolve().parents[2]
         pythonpath = os.environ.get("PYTHONPATH", "")
         merged_pythonpath = str(backend_root) if not pythonpath else f"{backend_root}{os.pathsep}{pythonpath}"
@@ -134,6 +143,9 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "BLUEPRINT_WORKER_TYPE": self.name,
             "BLUEPRINT_EXECUTOR_PROFILE": (
                 packet.executor_context.executor_profile if packet.executor_context and packet.executor_context.executor_profile else ""
+            ),
+            "BLUEPRINT_EXECUTOR_PROFILE_ID": (
+                packet.executor_context.executor_profile_id if packet.executor_context and packet.executor_context.executor_profile_id else ""
             ),
             "BLUEPRINT_EXECUTOR_SKILLS": json.dumps(packet.executor_context.skills if packet.executor_context else []),
             "BLUEPRINT_EXECUTOR_MCP_SERVERS": json.dumps(packet.executor_context.mcp_servers if packet.executor_context else []),
@@ -371,6 +383,9 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "BLUEPRINT_FORBIDDEN_PATHS",
             "BLUEPRINT_WORKER_TYPE",
             "BLUEPRINT_EXECUTOR_PROFILE",
+            "BLUEPRINT_EXECUTOR_PROFILE_ID",
+            "BLUEPRINT_AUTH_MODE",
+            "BLUEPRINT_API_PROTOCOL",
             "BLUEPRINT_EXECUTOR_SKILLS",
             "BLUEPRINT_RUNTIME_WORKING_DIR",
             "BLUEPRINT_MANAGER_REPORT_STDOUT_PREFIX",
@@ -401,6 +416,9 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "HTTP_PROXY",
             "HTTPS_PROXY",
             "NO_PROXY",
+            "CLAUDE_CONFIG_DIR",
+            "OPENCODE_CONFIG_DIR",
+            "CODEX_CONFIG_DIR",
             "http_proxy",
             "https_proxy",
             "no_proxy",
@@ -432,7 +450,32 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         )
         if r_user_libs and "R_LIBS_USER" not in environment:
             environment["R_LIBS_USER"] = os.pathsep.join(str(path) for path in r_user_libs)
+
+        # Capture real host paths before bwrap rewrites them
+        # This allows renderers to find host CLI auth/config directories
+        host_home = os.environ.get("HOME", "")
+        host_xdg_config = os.environ.get("XDG_CONFIG_HOME", "")
+        host_claude_config = os.environ.get("CLAUDE_CONFIG_DIR", "")
+        host_opencode_config = os.environ.get("OPENCODE_CONFIG_DIR", "")
+        host_codex_config = os.environ.get("CODEX_CONFIG_DIR", "")
+
+        if host_home:
+            environment["BLUEPRINT_HOST_HOME"] = host_home
+        if host_xdg_config:
+            environment["BLUEPRINT_HOST_XDG_CONFIG_HOME"] = host_xdg_config
+        if host_claude_config:
+            environment["BLUEPRINT_HOST_CLAUDE_CONFIG_DIR"] = host_claude_config
+        if host_opencode_config:
+            environment["BLUEPRINT_HOST_OPENCODE_CONFIG_DIR"] = host_opencode_config
+        if host_codex_config:
+            environment["BLUEPRINT_HOST_CODEX_CONFIG_DIR"] = host_codex_config
+
         env_keys.add("BLUEPRINT_SANDBOX_PLAN")
+        env_keys.add("BLUEPRINT_HOST_HOME")
+        env_keys.add("BLUEPRINT_HOST_XDG_CONFIG_HOME")
+        env_keys.add("BLUEPRINT_HOST_CLAUDE_CONFIG_DIR")
+        env_keys.add("BLUEPRINT_HOST_OPENCODE_CONFIG_DIR")
+        env_keys.add("BLUEPRINT_HOST_CODEX_CONFIG_DIR")
         if "LANG" not in environment and os.environ.get("LANG"):
             environment["LANG"] = os.environ["LANG"]
         sandbox_plan = {
@@ -595,8 +638,26 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             return self.command_template
         return None
 
+    def resolve_command_argv_template(self, settings: object) -> list[str] | None:
+        """Return a structured argv template (list of strings with placeholders).
+
+        When provided, this is preferred over resolve_command_template() to avoid
+        shlex.split issues with paths containing spaces.
+        Subclasses may override to provide a structured argv list.
+        """
+        return None
+
+    @staticmethod
+    def _render_argv_template(template: list[str], mapping: dict[str, str]) -> list[str]:
+        """Render each argv element by substituting placeholders."""
+        try:
+            return [item.format(**mapping) for item in template]
+        except KeyError as exc:
+            missing = exc.args[0]
+            raise RuntimeError(f"Command argv template referenced unknown placeholder {{{missing}}}.") from exc
+
     def is_configured(self, settings: object) -> bool:
-        return bool(self.resolve_command_template(settings))
+        return bool(self.resolve_command_template(settings) or self.resolve_command_argv_template(settings))
 
     def capability_metadata(self, settings: object) -> dict[str, object]:
         metadata = super().capability_metadata(settings)

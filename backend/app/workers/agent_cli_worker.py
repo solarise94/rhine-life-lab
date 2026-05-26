@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from app.models.runs import TaskPacket
@@ -26,8 +27,40 @@ class AgentCliWorkerAdapter(CommandTemplateWorkerAdapter):
             + f" --provider {self.provider} --task-packet {{task_packet_path}} --run-dir {{run_dir}} --project-root {{project_root}}"
         )
 
+    def resolve_command_argv_template(self, settings: object) -> list[str] | None:
+        """Return the wrapper invocation argv list (not the provider command).
+
+        This ensures the wrapper is launched with proper argv, avoiding shlex.split
+        issues with paths containing spaces.
+        """
+        if not self.is_configured(settings):
+            return None
+        return [
+            "{python}",
+            "-m",
+            self.wrapper_module,
+            "--provider",
+            self.provider,
+            "--task-packet",
+            "{task_packet_path}",
+            "--run-dir",
+            "{run_dir}",
+            "--project-root",
+            "{project_root}",
+        ]
+
+    def resolve_launch_argv_template(self, settings: object) -> list[str] | None:
+        """Return the provider command argv template from *_command_json setting.
+
+        This is passed to the wrapper via BLUEPRINT_AGENT_LAUNCH_ARGV_TEMPLATE env var.
+        """
+        if not self.launch_template_setting_name:
+            return None
+        json_setting_name = f"{self.launch_template_setting_name}_json"
+        return getattr(settings, json_setting_name, None)
+
     def is_configured(self, settings: object) -> bool:
-        return bool(self.resolve_launch_template(settings))
+        return bool(self.resolve_launch_template(settings) or self.resolve_launch_argv_template(settings))
 
     def resolve_launch_template(self, settings: object) -> str | None:
         if not self.launch_template_setting_name:
@@ -54,7 +87,8 @@ class AgentCliWorkerAdapter(CommandTemplateWorkerAdapter):
         settings: object,
     ) -> WorkerLaunchSpec:
         launch_template = self.resolve_launch_template(settings)
-        if not launch_template:
+        launch_argv_template = self.resolve_launch_argv_template(settings)
+        if not launch_template and not launch_argv_template:
             raise RuntimeError(f"Worker adapter {self.name} is not configured.")
         spec = super().build_launch_spec(
             packet=packet,
@@ -67,9 +101,48 @@ class AgentCliWorkerAdapter(CommandTemplateWorkerAdapter):
 
     def extra_environment(self, *, packet: TaskPacket, settings: object) -> dict[str, str]:
         launch_template = self.resolve_launch_template(settings)
-        if not launch_template:
+        launch_argv_template = self.resolve_launch_argv_template(settings)
+        if not launch_template and not launch_argv_template:
             return {}
-        return {
+        env = {
             "BLUEPRINT_AGENT_PROVIDER": self.provider,
-            "BLUEPRINT_AGENT_LAUNCH_TEMPLATE": launch_template,
         }
+        # Prefer structured argv template over string template
+        if launch_argv_template:
+            env["BLUEPRINT_AGENT_LAUNCH_ARGV_TEMPLATE"] = json.dumps(launch_argv_template)
+        if launch_template:
+            env["BLUEPRINT_AGENT_LAUNCH_TEMPLATE"] = launch_template
+        profile_id, auth_mode, api_protocol = self._resolve_profile_hints(packet, settings)
+        if profile_id:
+            env["BLUEPRINT_EXECUTOR_PROFILE_ID"] = profile_id
+        if auth_mode:
+            env["BLUEPRINT_AUTH_MODE"] = auth_mode
+        if api_protocol:
+            env["BLUEPRINT_API_PROTOCOL"] = api_protocol
+        return env
+
+    def _resolve_profile_hints(self, packet: TaskPacket, settings: object) -> tuple[str | None, str | None, str | None]:
+        """Resolve profile_id, auth_mode, and api_protocol from stored profiles."""
+        try:
+            from app.services.app_config_service import AppConfigService
+            config_service = AppConfigService(settings)
+            # Use profile_id from executor context if available (user-selected profile)
+            requested_profile_id = None
+            if packet.executor_context:
+                requested_profile_id = packet.executor_context.executor_profile_id
+                if not requested_profile_id and packet.executor_context.executor_profile:
+                    legacy_profile = packet.executor_context.executor_profile
+                    if not legacy_profile.endswith("_worker"):
+                        requested_profile_id = legacy_profile
+            if not requested_profile_id:
+                return None, None, None
+            profile = config_service.resolve_executor_profile(self.provider, profile_id=requested_profile_id)
+            if profile:
+                return (
+                    profile.get("profile_id"),
+                    profile.get("auth_mode"),
+                    profile.get("api_protocol"),
+                )
+        except Exception:
+            pass
+        return None, None, None

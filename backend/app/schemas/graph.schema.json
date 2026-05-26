@@ -342,6 +342,7 @@
         "status": {
           "enum": [
             "queued",
+            "launching",
             "running",
             "reviewing",
             "needs_approval",

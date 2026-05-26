@@ -11,6 +11,7 @@ export type ScriptPreference = "auto" | "prefer_python" | "prefer_r" | "prefer_m
 export const EMPTY_CARD_PAGE_BY_ID: Record<string, CardPage> = {};
 export const EMPTY_ATTACHMENTS: Attachment[] = [];
 export const EMPTY_SELECTED_WORKER_BY_CARD: Record<string, string | undefined> = {};
+export const EMPTY_SELECTED_PROFILE_BY_CARD: Record<string, string | undefined> = {};
 export const EMPTY_SELECTED_RUNTIME_BY_CARD: Record<string, string | undefined> = {};
 
 type ArtifactPreviewStoreState = {
@@ -30,6 +31,7 @@ interface WorkspaceUiState {
   selectedCardByProject: Record<string, string | null | undefined>;
   cardInteractionOrderByProject: Record<string, string[] | undefined>;
   selectedWorkerByProject: Record<string, Record<string, string | undefined>>;
+  selectedProfileByProject: Record<string, Record<string, string | undefined>>;
   globalPythonRuntimeByProject: Record<string, string | undefined>;
   selectedPythonRuntimeByProject: Record<string, Record<string, string | undefined>>;
   globalRRuntimeByProject: Record<string, string | undefined>;
@@ -45,6 +47,7 @@ interface WorkspaceUiState {
   setCurrentChatSessionId: (projectId: string, sessionId?: string | null) => void;
   setSelectedCard: (projectId: string, cardId?: string | null) => void;
   setSelectedWorker: (projectId: string, cardId: string, workerType?: string) => void;
+  setSelectedProfile: (projectId: string, cardId: string, profileId?: string) => void;
   setGlobalPythonRuntime: (projectId: string, runtime?: string) => void;
   setSelectedPythonRuntime: (projectId: string, cardId: string, runtime?: string) => void;
   setGlobalRRuntime: (projectId: string, runtime?: string) => void;
@@ -72,6 +75,7 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
       selectedCardByProject: {},
       cardInteractionOrderByProject: {},
       selectedWorkerByProject: {},
+      selectedProfileByProject: {},
       globalPythonRuntimeByProject: {},
       selectedPythonRuntimeByProject: {},
       globalRRuntimeByProject: {},
@@ -122,6 +126,19 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
               [projectId]: {
                 ...(state.selectedWorkerByProject[projectId] ?? {}),
                 [cardId]: workerType,
+              },
+            },
+          };
+        }),
+      setSelectedProfile: (projectId, cardId, profileId) =>
+        set((state) => {
+          if (state.selectedProfileByProject[projectId]?.[cardId] === profileId) return state;
+          return {
+            selectedProfileByProject: {
+              ...state.selectedProfileByProject,
+              [projectId]: {
+                ...(state.selectedProfileByProject[projectId] ?? {}),
+                [cardId]: profileId,
               },
             },
           };
@@ -318,6 +335,7 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
         selectedCardByProject: state.selectedCardByProject,
         cardInteractionOrderByProject: state.cardInteractionOrderByProject,
         selectedWorkerByProject: state.selectedWorkerByProject,
+        selectedProfileByProject: state.selectedProfileByProject,
         globalPythonRuntimeByProject: state.globalPythonRuntimeByProject,
         selectedPythonRuntimeByProject: state.selectedPythonRuntimeByProject,
         globalRRuntimeByProject: state.globalRRuntimeByProject,

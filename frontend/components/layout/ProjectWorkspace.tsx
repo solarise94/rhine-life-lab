@@ -8,6 +8,7 @@ import { ApiError, api } from "@/lib/api";
 import {
   useAdvancedGit,
   useAdvancedGraph,
+  useExecutorProfiles,
   useManagerAuto,
   useProjectFiles,
   useProjectReport,
@@ -29,6 +30,7 @@ import {
   EMPTY_ARTIFACT_PREVIEW_STATE,
   EMPTY_SELECTED_RUNTIME_BY_CARD,
   EMPTY_SELECTED_WORKER_BY_CARD,
+  EMPTY_SELECTED_PROFILE_BY_CARD,
   useWorkspaceUiStore,
 } from "@/lib/stores/workspace-ui-store";
 import { Card, ReportExportResponse } from "@/lib/types";
@@ -77,6 +79,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     (s) => s.cardInteractionOrderByProject[projectId] ?? EMPTY_CARD_INTERACTION_ORDER,
   );
   const selectedWorkerByProject = useWorkspaceUiStore((s) => s.selectedWorkerByProject[projectId] ?? EMPTY_SELECTED_WORKER_BY_CARD);
+  const selectedProfileByProject = useWorkspaceUiStore((s) => s.selectedProfileByProject[projectId] ?? EMPTY_SELECTED_PROFILE_BY_CARD);
   const globalPythonRuntime = useWorkspaceUiStore((s) => s.globalPythonRuntimeByProject?.[projectId]);
   const selectedPythonRuntimeByProject = useWorkspaceUiStore((s) => s.selectedPythonRuntimeByProject?.[projectId] ?? EMPTY_SELECTED_RUNTIME_BY_CARD);
   const globalRRuntime = useWorkspaceUiStore((s) => s.globalRRuntimeByProject?.[projectId]);
@@ -86,6 +89,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const notice = useWorkspaceUiStore((s) => s.noticesByProject[projectId] ?? null);
   const setSelectedCard = useWorkspaceUiStore((s) => s.setSelectedCard);
   const setSelectedWorker = useWorkspaceUiStore((s) => s.setSelectedWorker);
+  const setSelectedProfile = useWorkspaceUiStore((s) => s.setSelectedProfile);
   const setGlobalPythonRuntime = useWorkspaceUiStore((s) => s.setGlobalPythonRuntime);
   const setSelectedPythonRuntime = useWorkspaceUiStore((s) => s.setSelectedPythonRuntime);
   const setGlobalRRuntime = useWorkspaceUiStore((s) => s.setGlobalRRuntime);
@@ -121,6 +125,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const updateProjectRuntimePreferencesMutation = useUpdateProjectRuntimePreferencesMutation(projectId);
   const reorderReportMutation = useReportReorderMutation(projectId);
   const exportReportMutation = useReportExportMutation(projectId);
+  const executorProfilesQuery = useExecutorProfiles();
+  const executorProfiles = executorProfilesQuery.data?.profiles ?? [];
   const [lastReportExport, setLastReportExport] = useState<ReportExportResponse | null>(null);
 
   const snapshot = projectQuery.data;
@@ -305,11 +311,21 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   async function handleStartRun(card: Card) {
     setNotice(projectId, null);
     setSelectedCard(projectId, card.card_id);
-    const workerType = selectedWorkerByProject[card.card_id] ?? configuredWorkers[0]?.worker_type;
+    const selectedProfileId = selectedProfileByProject[card.card_id];
+    const selectedProfile = executorProfiles.find((p) => p.enabled && p.profile_id === selectedProfileId);
+    let workerType: string | undefined;
+    let profileId: string | undefined;
+    if (selectedProfile) {
+      workerType = selectedProfile.worker_type;
+      profileId = selectedProfile.profile_id;
+    } else {
+      workerType = selectedWorkerByProject[card.card_id] ?? configuredWorkers[0]?.worker_type;
+      profileId = executorProfiles.find((p) => p.enabled && p.worker_type === workerType)?.profile_id;
+    }
     const pythonRuntime = selectedPythonRuntimeByProject[card.card_id] ?? effectiveGlobalPythonRuntime ?? "__system__";
     const rRuntime = selectedRRuntimeByProject[card.card_id] ?? effectiveGlobalRRuntime ?? "__system__";
     try {
-      const response = await startRunMutation.mutateAsync({ cardId: card.card_id, workerType, pythonRuntime, rRuntime });
+      const response = await startRunMutation.mutateAsync({ cardId: card.card_id, workerType, profileId, pythonRuntime, rRuntime });
       if (response.status === "cancelled") {
         setNotice(projectId, `Run ${response.run_id} 未启动：${response.worker_type} 的权限校验被拒绝。`);
       }
@@ -403,11 +419,18 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           }}
           onPreviewAsset={(assetId, cardId) => handleOpenAssetPreview(assetId, "card", cardId)}
           workerCapabilities={snapshot.worker_capabilities}
+          executorProfiles={executorProfiles}
           selectedWorkerByCard={selectedWorkerByProject}
+          selectedProfileByCard={selectedProfileByProject}
           onSelectWorker={(card, workerType) => {
             if (autoLocked) return;
             setSelectedWorker(projectId, card.card_id, workerType);
             setNotice(projectId, `Card ${card.card_id} 将使用 ${workerType} 执行。`);
+          }}
+          onSelectProfile={(card, profileId) => {
+            if (autoLocked) return;
+            setSelectedProfile(projectId, card.card_id, profileId);
+            setNotice(projectId, `Card ${card.card_id} 将使用 profile ${profileId} 执行。`);
           }}
           pythonRuntimes={snapshot.python_runtimes ?? []}
           rRuntimes={snapshot.r_runtimes ?? []}
@@ -618,11 +641,18 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 }}
                 onPreviewAsset={(assetId, cardId) => handleOpenAssetPreview(assetId, "card", cardId)}
                 workerCapabilities={snapshot.worker_capabilities}
+                executorProfiles={executorProfiles}
                 selectedWorkerByCard={selectedWorkerByProject}
+                selectedProfileByCard={selectedProfileByProject}
                 onSelectWorker={(card, workerType) => {
                   if (autoLocked) return;
                   setSelectedWorker(projectId, card.card_id, workerType);
                   setNotice(projectId, `Card ${card.card_id} 将使用 ${workerType} 执行。`);
+                }}
+                onSelectProfile={(card, profileId) => {
+                  if (autoLocked) return;
+                  setSelectedProfile(projectId, card.card_id, profileId);
+                  setNotice(projectId, `Card ${card.card_id} 将使用 profile ${profileId} 执行。`);
                 }}
                 pythonRuntimes={snapshot.python_runtimes ?? []}
                 rRuntimes={snapshot.r_runtimes ?? []}

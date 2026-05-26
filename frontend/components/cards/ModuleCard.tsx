@@ -11,7 +11,7 @@ import {
   Sparkles,
   Archive,
 } from "lucide-react";
-import { Card, PythonRuntime, RRuntime, WorkerCapability } from "@/lib/types";
+import { Card, PythonRuntime, RRuntime, WorkerCapability, ExecutorProfile } from "@/lib/types";
 import { CardStatusBadge } from "./CardStatusBadge";
 import { SpecialistAvatar } from "./SpecialistAvatar";
 import { FileBag } from "./FileBag";
@@ -28,8 +28,11 @@ export function ModuleCard({
   onAskManager,
   onPreviewAsset,
   workerCapabilities = [],
+  executorProfiles = [],
   selectedWorkerType,
+  selectedProfileId,
   onSelectWorker,
+  onSelectProfile,
   pythonRuntimes = [],
   rRuntimes = [],
   globalPythonRuntime,
@@ -49,8 +52,11 @@ export function ModuleCard({
   onAskManager?: (text: string) => void;
   onPreviewAsset?: (assetId: string, cardId?: string) => void;
   workerCapabilities?: WorkerCapability[];
+  executorProfiles?: ExecutorProfile[];
   selectedWorkerType?: string;
+  selectedProfileId?: string;
   onSelectWorker?: (card: Card, workerType: string) => void;
+  onSelectProfile?: (card: Card, profileId: string) => void;
   pythonRuntimes?: PythonRuntime[];
   rRuntimes?: RRuntime[];
   globalPythonRuntime?: string;
@@ -69,6 +75,18 @@ export function ModuleCard({
   const isRunning = card.status === "running" || card.status === "reviewing";
   const isDormant = card.status === "cancelled" || card.status === "rejected";
   const configuredWorkers = workerCapabilities.filter((item) => item.configured);
+  const enabledProfiles = executorProfiles.filter((p) => p.enabled);
+  const fallbackProfile = selectedWorkerType
+    ? enabledProfiles.find((p) => p.worker_type === selectedWorkerType)
+    : enabledProfiles[0];
+  const effectiveSelectedProfileId =
+    selectedProfileId && enabledProfiles.some((p) => p.profile_id === selectedProfileId)
+      ? selectedProfileId
+      : fallbackProfile?.profile_id;
+  const effectiveSelectedProfile = enabledProfiles.find((p) => p.profile_id === effectiveSelectedProfileId);
+  const executorCompatibility = effectiveSelectedProfile
+    ? executorCompatibilityCopy(effectiveSelectedProfile.worker_type)
+    : null;
   const globalRuntimeLabel = globalPythonRuntime && globalPythonRuntime !== "__system__" ? globalPythonRuntime : "system";
   const globalRRuntimeLabel = globalRRuntime && globalRRuntime !== "__system__" ? globalRRuntime : "system";
 
@@ -174,20 +192,35 @@ export function ModuleCard({
                     <label className="executor-select-label" onClick={(e) => e.stopPropagation()}>
                       <span>执行器</span>
                       <select
-                        value={selectedWorkerType ?? configuredWorkers[0]?.worker_type ?? ""}
-                        onChange={(e) => onSelectWorker?.(card, e.target.value)}
-                        disabled={readOnly || !configuredWorkers.length}
+                        value={effectiveSelectedProfileId ?? enabledProfiles[0]?.profile_id ?? ""}
+                        onChange={(e) => {
+                          const profile = enabledProfiles.find((p) => p.profile_id === e.target.value);
+                          if (profile) {
+                            onSelectWorker?.(card, profile.worker_type);
+                            onSelectProfile?.(card, profile.profile_id);
+                          }
+                        }}
+                        disabled={readOnly || !enabledProfiles.length}
                       >
-                        {configuredWorkers.length ? (
-                          configuredWorkers.map((item) => (
-                            <option key={item.worker_type} value={item.worker_type}>
-                              {item.worker_type}{item.execution_mode === "builtin_pi_agent" ? " · DeepSeek" : ""}
-                            </option>
-                          ))
+                        {enabledProfiles.length ? (
+                          enabledProfiles.map((profile) => {
+                            const authLabel = profile.auth_mode === "cli_native"
+                              ? " · CLI login"
+                              : " · Project API";
+                            const compatibilityLabel = profile.worker_type === "pi" ? " · 最佳兼容" : " · 部分兼容";
+                            return (
+                              <option key={profile.profile_id} value={profile.profile_id}>
+                                {profile.display_name}{authLabel}{compatibilityLabel}
+                              </option>
+                            );
+                          })
                         ) : (
                           <option value="">未配置真实执行器</option>
                         )}
                       </select>
+                      {executorCompatibility ? (
+                        <span className="executor-compat-note">{executorCompatibility}</span>
+                      ) : null}
                     </label>
                     <label className="executor-select-label" onClick={(e) => e.stopPropagation()}>
                       <span>Python runtime</span>
@@ -276,4 +309,20 @@ export function ModuleCard({
       </div>
     </div>
   );
+}
+
+function executorCompatibilityCopy(workerType: string): string {
+  if (workerType === "pi") {
+    return "Pi Agent 具有最佳兼容性，完整支持 Blueprint 的 skill、MCP、tool 和沙箱契约。";
+  }
+  if (workerType === "opencode") {
+    return "OpenCode 为部分兼容：支持执行器选择和项目 API 注入，MCP/tool 以 wrapper 与外层沙箱为主。";
+  }
+  if (workerType === "claude_code") {
+    return "Claude Code 为部分兼容：仅使用本机 CLI 登录态，MCP/tool 做原生能力映射，不注入项目 API。";
+  }
+  if (workerType === "codex") {
+    return "Codex 为部分兼容：仅使用本机 CLI 登录态，MCP/tool 原生映射按能力逐步接入。";
+  }
+  return "该执行器为部分兼容，请以运行 trace 和沙箱计划为准。";
 }

@@ -1524,6 +1524,20 @@ class ManagerFlowTest(unittest.TestCase):
         finally:
             settings.opencode_command = original_command
 
+    def test_start_run_keeps_executor_profile_separate_from_profile_id(self) -> None:
+        store = self.project_service.graph_store("test-project")
+        card = next(item for item in store.load_cards() if item.card_id == "card_enrichment_group")
+
+        context = self.worker._build_executor_context(
+            "test-project",
+            card,
+            "opencode",
+            profile_id="opencode-cli-native",
+        )
+
+        self.assertEqual("opencode_worker", context.executor_profile)
+        self.assertEqual("opencode-cli-native", context.executor_profile_id)
+
     def test_pi_and_claude_code_workers_use_wrapper_contract(self) -> None:
         settings = self.project_service.settings
         original_pi = settings.pi_command

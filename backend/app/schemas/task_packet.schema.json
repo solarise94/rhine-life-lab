@@ -45,6 +45,18 @@
           "default": null,
           "title": "Executor Profile"
         },
+        "executor_profile_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Executor Profile Id"
+        },
         "skills": {
           "items": {
             "type": "string"

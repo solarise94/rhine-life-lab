@@ -10,6 +10,8 @@ REQUIRED_PYTHON_VERSION="3.13.0"
 REQUIRED_NODE_VERSION="22.19.0"
 NODE_BIN=""
 PYTHON_BIN=""
+OPENCODE_BIN=""
+CLAUDE_BIN=""
 
 version_gte() {
   local actual="$1"
@@ -54,6 +56,11 @@ find_node_bin() {
     return 0
   fi
   return 1
+}
+
+find_optional_bin() {
+  local name="$1"
+  command -v "${name}" 2>/dev/null || true
 }
 
 detect_conda_base() {
@@ -203,6 +210,8 @@ check_language_versions() {
     exit 1
   fi
   node_version="$(node_version_of "${NODE_BIN}")"
+  OPENCODE_BIN="$(find_optional_bin opencode)"
+  CLAUDE_BIN="$(find_optional_bin claude)"
   echo "Using Python ${python_version} via ${PYTHON_BIN}"
   echo "Using Node ${node_version} via ${NODE_BIN}"
 }
@@ -253,6 +262,8 @@ import secrets
 print(secrets.token_urlsafe(32))
 PY
 )}"
+DEFAULT_OPENCODE_COMMAND_JSON="[\"${OPENCODE_BIN:-opencode}\",\"run\",\"--file\",\"{executor_prompt_path}\",\"--format\",\"json\",\"--dangerously-skip-permissions\",\"Read {executor_prompt_path} and complete the Blueprint executor contract exactly.\"]"
+DEFAULT_CLAUDE_CODE_COMMAND_JSON="[\"${CLAUDE_BIN:-claude}\",\"-p\",\"{executor_prompt_path}\",\"--output-format\",\"stream-json\",\"--verbose\"]"
 
 # Whitelist-based, single-write backend environment
 _write_env_once() {
@@ -265,6 +276,7 @@ _write_env_once() {
 }
 
 _write_env_once "${APP_ENV_DIR}/backend.env" \
+  "PATH=$(dirname "${NODE_BIN}"):${HOME}/.local/bin:${CONDA_BASE}/bin:${PATH}" \
   "BACKEND_HOST=127.0.0.1" \
   "BACKEND_PORT=18001" \
   "BLUEPRINT_FRONTEND_ORIGIN=http://127.0.0.1:13001" \
@@ -279,7 +291,9 @@ _write_env_once "${APP_ENV_DIR}/backend.env" \
   "BLUEPRINT_DEEPSEEK_API_BASE_URL=${BLUEPRINT_DEEPSEEK_API_BASE_URL:-https://api.deepseek.com/anthropic}" \
   "BLUEPRINT_PI_DEEPSEEK_BASE_URL=${BLUEPRINT_PI_DEEPSEEK_BASE_URL:-https://api.deepseek.com}" \
   "BLUEPRINT_MANAGER_MODEL=${BLUEPRINT_MANAGER_MODEL:-deepseek-v4-pro}" \
-  "BLUEPRINT_INTERNAL_TOOL_TOKEN=${INTERNAL_TOOL_TOKEN}"
+  "BLUEPRINT_INTERNAL_TOOL_TOKEN=${INTERNAL_TOOL_TOKEN}" \
+  "BLUEPRINT_OPENCODE_COMMAND_JSON=${BLUEPRINT_OPENCODE_COMMAND_JSON:-${DEFAULT_OPENCODE_COMMAND_JSON}}" \
+  "BLUEPRINT_CLAUDE_CODE_COMMAND_JSON=${BLUEPRINT_CLAUDE_CODE_COMMAND_JSON:-${DEFAULT_CLAUDE_CODE_COMMAND_JSON}}"
 
 cat > "${APP_ENV_DIR}/manager-agent.env" <<EOF
 MANAGER_AGENT_HOST=127.0.0.1

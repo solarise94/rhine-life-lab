@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
-import { Card, PythonRuntime, RRuntime, WorkOrder, WorkerCapability } from "@/lib/types";
+import { Card, PythonRuntime, RRuntime, WorkOrder, WorkerCapability, ExecutorProfile } from "@/lib/types";
 import { ModuleCard } from "./ModuleCard";
 import { ConnectionLines } from "./ConnectionLines";
 
@@ -20,8 +20,11 @@ export function CardStream({
   onAskManager,
   onPreviewAsset,
   workerCapabilities = [],
+  executorProfiles = [],
   selectedWorkerByCard = {},
+  selectedProfileByCard = {},
   onSelectWorker,
+  onSelectProfile,
   pythonRuntimes = [],
   rRuntimes = [],
   globalPythonRuntime,
@@ -44,8 +47,11 @@ export function CardStream({
   onAskManager?: (text: string) => void;
   onPreviewAsset?: (assetId: string, cardId?: string) => void;
   workerCapabilities?: WorkerCapability[];
+  executorProfiles?: ExecutorProfile[];
   selectedWorkerByCard?: Record<string, string | undefined>;
+  selectedProfileByCard?: Record<string, string | undefined>;
   onSelectWorker?: (card: Card, workerType: string) => void;
+  onSelectProfile?: (card: Card, profileId: string) => void;
   pythonRuntimes?: PythonRuntime[];
   rRuntimes?: RRuntime[];
   globalPythonRuntime?: string;
@@ -223,8 +229,11 @@ export function CardStream({
                       onAskManager={onAskManager}
                       onPreviewAsset={onPreviewAsset}
                       workerCapabilities={workerCapabilities}
+                      executorProfiles={executorProfiles}
                       selectedWorkerType={selectedWorkerByCard[card.card_id]}
+                      selectedProfileId={selectedProfileByCard[card.card_id]}
                       onSelectWorker={onSelectWorker}
+                      onSelectProfile={onSelectProfile}
                       pythonRuntimes={pythonRuntimes}
                       rRuntimes={rRuntimes}
                       globalPythonRuntime={globalPythonRuntime}

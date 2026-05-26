@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     deepseek_api_base_url: str = "https://api.deepseek.com/anthropic"
     deepseek_api_key: SecretStr | None = None
     pi_deepseek_base_url: str = "https://api.deepseek.com"
+    anthropic_api_key: SecretStr | None = None
+    anthropic_api_base_url: str = "https://api.anthropic.com"
+    openai_api_key: SecretStr | None = None
+    openai_api_base_url: str = "https://api.openai.com/v1"
     manager_model: str = "deepseek-v4-pro"
     executor_model: str = "deepseek-v4-flash"
     reviewer_model: str = "deepseek-v4-flash"
@@ -44,6 +48,11 @@ class Settings(BaseSettings):
     pi_command: str | None = None
     claude_code_command: str | None = None
     codex_command: str | None = None
+    # Structured argv templates (preferred over string templates to avoid shlex.split issues with paths containing spaces)
+    opencode_command_json: list[str] | None = None
+    pi_command_json: list[str] | None = None
+    claude_code_command_json: list[str] | None = None
+    codex_command_json: list[str] | None = None
 
     model_config = {
         "env_prefix": "BLUEPRINT_",

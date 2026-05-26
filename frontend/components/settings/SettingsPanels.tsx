@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   useAppSettings,
+  useExecutorProfiles,
   useExportDiagnosticsMutation,
   useLibrary,
   useRefreshLibraryMutation,
@@ -100,6 +101,44 @@ function LibrarySection({
             <div className="settings-empty">选择一个条目查看详情</div>
           )}
         </div>
+      </div>
+    </section>
+  );
+}
+
+function ExecutorProfilesSection() {
+  const profilesQuery = useExecutorProfiles();
+  const profiles = profilesQuery.data?.profiles ?? [];
+  const matrix = profilesQuery.data?.support_matrix;
+
+  return (
+    <section className="settings-section">
+      <div className="settings-section-header">
+        <div>
+          <h3>Executor Profiles</h3>
+          <p>管理执行器配置。Codex 和 Claude Code 仅支持本机 CLI 登录态；项目 API 注入目前只开放给 OpenCode 和 Pi。</p>
+        </div>
+      </div>
+      <div className="settings-kv-list">
+        {profiles.map((p) => {
+          const cliOk = matrix?.command_configured?.[p.worker_type] ?? false;
+          const unsupported = ["codex", "claude_code"].includes(p.worker_type) && p.auth_mode === "project_api";
+          return (
+            <div key={p.profile_id}>
+              <strong>{p.display_name}</strong>
+              <span>
+                {p.worker_type} · {p.auth_mode}
+                {p.api_protocol ? ` · ${p.api_protocol}` : ""}
+                {unsupported ? " · (未支持)" : ""}
+                {cliOk ? " · CLI ✓" : " · CLI ✗"}
+                {p.enabled ? "" : " · 禁用"}
+              </span>
+            </div>
+          );
+        })}
+        {profiles.length === 0 ? (
+          <div><strong>No profiles</strong><span>使用默认配置</span></div>
+        ) : null}
       </div>
     </section>
   );
@@ -359,6 +398,8 @@ export function SettingsPanels({
           </div>
         ) : null}
       </section>
+
+      <ExecutorProfilesSection />
 
       <LibrarySection
         kind="skill"

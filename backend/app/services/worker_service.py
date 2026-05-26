@@ -154,6 +154,7 @@ class WorkerService:
         project_id: str,
         card_id: str,
         worker_type: str | None = None,
+        profile_id: str | None = None,
         python_runtime: str | None = None,
         r_runtime: str | None = None,
     ) -> dict:
@@ -178,6 +179,7 @@ class WorkerService:
                 adapter,
                 execution_guard,
                 guard_kind,
+                profile_id=profile_id,
                 python_runtime=python_runtime,
                 r_runtime=r_runtime,
             )
@@ -193,6 +195,7 @@ class WorkerService:
         adapter: Any,
         execution_guard: Lock | Semaphore,
         guard_kind: str,
+        profile_id: str | None = None,
         python_runtime: str | None = None,
         r_runtime: str | None = None,
     ) -> dict:
@@ -223,6 +226,7 @@ class WorkerService:
                 card,
                 graph.assets,
                 resolved_worker_type,
+                profile_id=profile_id,
                 python_runtime=python_runtime,
                 r_runtime=r_runtime,
             )
@@ -1334,6 +1338,7 @@ class WorkerService:
         card: Card,
         assets: list[Asset],
         worker_type: str,
+        profile_id: str | None = None,
         python_runtime: str | None = None,
         r_runtime: str | None = None,
     ) -> TaskPacket:
@@ -1433,7 +1438,7 @@ class WorkerService:
                 run_dir=f"runs/{run_id}",
                 result_dir=result_dir,
             ),
-            executor_context=self._build_executor_context(project_id, card, worker_type, python_runtime=python_runtime, r_runtime=r_runtime),
+            executor_context=self._build_executor_context(project_id, card, worker_type, profile_id=profile_id, python_runtime=python_runtime, r_runtime=r_runtime),
             manager_reporting_contract=self._build_manager_reporting_contract(),
         )
 
@@ -1454,6 +1459,7 @@ class WorkerService:
         project_id: str,
         card: Card,
         worker_type: str,
+        profile_id: str | None = None,
         python_runtime: str | None = None,
         r_runtime: str | None = None,
     ) -> ExecutorContext:
@@ -1462,6 +1468,7 @@ class WorkerService:
             graph,
             card,
             worker_type,
+            profile_id=profile_id,
             python_runtime=python_runtime,
             r_runtime=r_runtime,
         )
@@ -1481,6 +1488,7 @@ class WorkerService:
         graph: Any,
         card: Card,
         worker_type: str,
+        profile_id: str | None = None,
         python_runtime: str | None = None,
         r_runtime: str | None = None,
     ) -> ExecutorContext:
@@ -1494,6 +1502,7 @@ class WorkerService:
         network_policy = "allow" if worker_type in {"opencode", "codex", "pi", "claude_code"} else "prompt"
         return ExecutorContext(
             executor_profile=f"{worker_type}_worker",
+            executor_profile_id=profile_id,
             skills=[module_id.replace("module_", "") for module_id in card.linked_modules],
             instruction_blocks=[
                 "Prefer reproducible scripts over ad-hoc shell pipelines.",
@@ -1516,6 +1525,8 @@ class WorkerService:
         context = default_context.model_copy(deep=True)
         if override.executor_profile is not None:
             context.executor_profile = override.executor_profile
+        if override.executor_profile_id is not None:
+            context.executor_profile_id = override.executor_profile_id
         if "skills" in override.model_fields_set:
             context.skills = list(override.skills)
         if "mcp_servers" in override.model_fields_set:

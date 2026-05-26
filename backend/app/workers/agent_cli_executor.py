@@ -49,6 +49,8 @@ def _parse_args() -> object:
     parser.add_argument("--task-packet", required=True)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--project-root", required=True)
+    parser.add_argument("--profile-id", default=None)
+    parser.add_argument("--auth-mode", default=None)
     return parser.parse_args()
 
 
@@ -142,7 +144,7 @@ def _stdout_preview(line: str) -> tuple[str, bool]:
     return f"{head}\n[wrapper] stdout line truncated: original length {len(line)} characters. Full content should be written to result files, not stdout.", True
 
 
-def _new_trace(*, provider: str, packet: dict, run_dir: Path, project_root: Path, template: str) -> dict[str, Any]:
+def _new_trace(*, provider: str, packet: dict, run_dir: Path, project_root: Path, template: str, auth_mode: str | None = None, profile_id: str | None = None) -> dict[str, Any]:
     return {
         "schema_version": "agent_trace.v1",
         "run_id": packet.get("task_id"),
@@ -150,6 +152,8 @@ def _new_trace(*, provider: str, packet: dict, run_dir: Path, project_root: Path
         "card_id": packet.get("card_id"),
         "card_title": packet.get("card_title"),
         "provider": provider,
+        "auth_mode": auth_mode,
+        "profile_id": profile_id,
         "started_at": _utc_now(),
         "finished_at": None,
         "total_duration_seconds": None,
@@ -233,19 +237,20 @@ def _collect_file_timeline(project_root: Path, run_dir: Path, packet: dict, *, s
     return sorted(entries, key=lambda item: (item["mtime"], item["path"]))
 
 
-def _render_launch_command(
-    template: str,
+def _launch_template_mapping(
     *,
     provider: str,
+    packet: dict,
     packet_path: Path,
     run_dir: Path,
     project_root: Path,
     prompt_path: Path | None = None,
-) -> list[str]:
-    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+) -> dict[str, str]:
     candidate_path = run_dir / "manifest.candidate.json"
     executor_prompt_path = prompt_path or run_dir / "executor_prompt.md"
-    mapping = {
+    backend_root = Path(__file__).resolve().parents[2]
+    repo_root = backend_root.parent
+    return {
         "python": sys.executable,
         "project_root": str(project_root),
         "run_dir": str(run_dir),
@@ -261,12 +266,65 @@ def _render_launch_command(
         "manager_brief_path": str(run_dir / "manager_brief.json"),
         "manifest_repair_prompt_path": str(run_dir / "manifest_repair_prompt.md"),
         "worker_type": provider,
+        "repo_root": str(repo_root),
     }
+
+
+def _render_launch_command(
+    template: str,
+    *,
+    provider: str,
+    packet_path: Path,
+    run_dir: Path,
+    project_root: Path,
+    prompt_path: Path | None = None,
+    packet: dict | None = None,
+) -> list[str]:
+    mapping = _launch_template_mapping(
+        provider=provider,
+        packet=packet or json.loads(packet_path.read_text(encoding="utf-8")),
+        packet_path=packet_path,
+        run_dir=run_dir,
+        project_root=project_root,
+        prompt_path=prompt_path,
+    )
     try:
-        return shlex.split(template.format(**mapping))
+        # Quote values to protect paths with spaces in the legacy string template
+        quoted_mapping = {k: shlex.quote(v) for k, v in mapping.items()}
+        return shlex.split(template.format(**quoted_mapping))
     except KeyError as exc:
         missing = exc.args[0]
         raise RuntimeError(f"Launch template for provider={provider} referenced unknown placeholder {{{missing}}}.") from exc
+
+
+def _render_launch_argv_template(
+    template: list[str],
+    *,
+    provider: str,
+    packet_path: Path,
+    run_dir: Path,
+    project_root: Path,
+    prompt_path: Path | None = None,
+    packet: dict | None = None,
+) -> list[str]:
+    """Render a structured argv template by substituting placeholders.
+
+    This is preferred over _render_launch_command() to avoid shlex.split issues
+    with paths containing spaces.
+    """
+    mapping = _launch_template_mapping(
+        provider=provider,
+        packet=packet or json.loads(packet_path.read_text(encoding="utf-8")),
+        packet_path=packet_path,
+        run_dir=run_dir,
+        project_root=project_root,
+        prompt_path=prompt_path,
+    )
+    try:
+        return [item.format(**mapping) for item in template]
+    except KeyError as exc:
+        missing = exc.args[0]
+        raise RuntimeError(f"Launch argv template for provider={provider} referenced unknown placeholder {{{missing}}}.") from exc
 
 
 def _run_provider_command(
@@ -632,88 +690,21 @@ def _write_manifest_repair_prompt(*, run_dir: Path, packet: dict, errors: list[s
     return prompt_path
 
 
-def _repair_manifest(
+def _run_provider_with_repair_loop(
     *,
-    template: str,
+    command: list[str],
     provider: str,
-    packet_path: Path,
+    packet: dict,
     run_dir: Path,
     project_root: Path,
     env: dict[str, str],
-    packet: dict,
-    errors: list[str],
-    attempt: int,
     trace: dict[str, Any],
+    started: float,
     trace_started_monotonic: float,
+    repair_command_factory: Any | None = None,
+    completion_message: str,
+    completion_metadata: dict[str, Any],
 ) -> int:
-    repair_prompt_path = _write_manifest_repair_prompt(run_dir=run_dir, packet=packet, errors=errors, attempt=attempt)
-    repair_env = {
-        **env,
-        "BLUEPRINT_EXECUTOR_PROMPT": str(repair_prompt_path),
-        "BLUEPRINT_MANIFEST_REPAIR_PROMPT": str(repair_prompt_path),
-    }
-    command = _render_launch_command(
-        template,
-        provider=provider,
-        packet_path=packet_path,
-        run_dir=run_dir,
-        project_root=project_root,
-        prompt_path=repair_prompt_path,
-    )
-    return _run_provider_command(
-        command,
-        project_root=project_root,
-        env=repair_env,
-        run_dir=run_dir,
-        trace=trace,
-        phase="manifest_repair",
-        attempt=attempt,
-        packet=packet,
-        trace_started_monotonic=trace_started_monotonic,
-    )
-
-
-def main() -> int:
-    args = _parse_args()
-    provider = args.provider
-    packet_path = Path(args.task_packet)
-    run_dir = Path(args.run_dir)
-    project_root = Path(args.project_root)
-    env = os.environ.copy()
-    template = env.get("BLUEPRINT_AGENT_LAUNCH_TEMPLATE", "").strip()
-    if not template:
-        print(f"[wrapper] missing launch template for provider={provider}", flush=True)
-        return 2
-
-    packet = _load_task_packet(packet_path)
-    started = time.monotonic()
-    trace = _new_trace(provider=provider, packet=packet, run_dir=run_dir, project_root=project_root, template=template)
-    _write_trace(run_dir, trace)
-    print(
-        "BP_EVENT "
-        + json.dumps(
-            {
-                "type": "progress_update",
-                "stage": "dispatch",
-                "progress": 1,
-                "message": f"Dispatching {provider} wrapper with unified executor prompt.",
-                "metadata": {"provider": provider},
-            },
-            ensure_ascii=False,
-        ),
-        flush=True,
-    )
-    try:
-        command = _render_launch_command(template, provider=provider, packet_path=packet_path, run_dir=run_dir, project_root=project_root)
-    except RuntimeError as exc:
-        print(f"[wrapper] {exc}", flush=True)
-        trace["status"] = "failed"
-        trace["current_phase"] = "launch_template_error"
-        trace["finished_at"] = _utc_now()
-        trace["total_duration_seconds"] = round(time.monotonic() - started, 3)
-        _record_observation(trace, "launch_template_error", str(exc), severity="error")
-        _write_trace(run_dir, trace)
-        return 2
     return_code = _run_provider_command(
         command,
         project_root=project_root,
@@ -723,8 +714,9 @@ def main() -> int:
         phase="initial_provider",
         attempt=1,
         packet=packet,
-        trace_started_monotonic=started,
+        trace_started_monotonic=trace_started_monotonic,
     )
+
     if _has_blocking_dependency_issue(run_dir):
         trace["status"] = "failed"
         trace["current_phase"] = "runtime_dependency_missing"
@@ -739,6 +731,7 @@ def main() -> int:
         trace["file_timeline"] = _collect_file_timeline(project_root, run_dir, packet, started_monotonic=started)
         _write_trace(run_dir, trace)
         return 3
+
     if return_code == 0:
         validation_errors = _promote_candidate_manifest(run_dir=run_dir)
         trace.setdefault("manifest_validation", []).append(
@@ -754,21 +747,33 @@ def main() -> int:
             _record_observation(trace, "manifest_validation_failed", "Initial manifest candidate failed schema validation.", severity="warning")
         trace["file_timeline"] = _collect_file_timeline(project_root, run_dir, packet, started_monotonic=started)
         _write_trace(run_dir, trace)
+
         for attempt in range(1, MAX_MANIFEST_REPAIR_ATTEMPTS + 1):
             if not validation_errors:
                 break
-            repair_code = _repair_manifest(
-                template=template,
-                provider=provider,
-                packet_path=packet_path,
-                run_dir=run_dir,
+            repair_prompt_path = _write_manifest_repair_prompt(run_dir=run_dir, packet=packet, errors=validation_errors, attempt=attempt)
+            repair_command = command
+            repair_env = {
+                **env,
+                "BLUEPRINT_EXECUTOR_PROMPT": str(repair_prompt_path),
+                "BLUEPRINT_MANIFEST_REPAIR_PROMPT": str(repair_prompt_path),
+            }
+            if repair_command_factory is not None:
+                try:
+                    repair_command, repair_env = repair_command_factory(repair_prompt_path, repair_env)
+                except Exception as exc:
+                    print(f"[wrapper] repair command factory failed: {exc}, using original command", flush=True)
+
+            repair_code = _run_provider_command(
+                repair_command,
                 project_root=project_root,
-                env=env,
-                packet=packet,
-                errors=validation_errors,
-                attempt=attempt,
+                env=repair_env,
+                run_dir=run_dir,
                 trace=trace,
-                trace_started_monotonic=started,
+                phase="manifest_repair",
+                attempt=attempt,
+                packet=packet,
+                trace_started_monotonic=trace_started_monotonic,
             )
             if repair_code != 0:
                 return_code = repair_code
@@ -791,6 +796,7 @@ def main() -> int:
                 print(f"[wrapper] - {error}", flush=True)
             return_code = 1
             _record_observation(trace, "manifest_repair_exhausted", "Manifest schema validation failed after repair attempts.", severity="error")
+
     trace["status"] = "success" if return_code == 0 else "failed"
     trace["current_phase"] = "complete"
     trace["finished_at"] = _utc_now()
@@ -806,14 +812,345 @@ def main() -> int:
                 "type": "progress_update",
                 "stage": "dispatch_complete",
                 "progress": 100 if return_code == 0 else None,
-                "message": f"{provider} wrapper finished with exit code {return_code}.",
-                "metadata": {"provider": provider, "input_assets": len(packet.get('input_assets', []))},
+                "message": completion_message.format(return_code=return_code),
+                "metadata": completion_metadata,
             },
             ensure_ascii=False,
         ),
         flush=True,
     )
     return return_code
+
+
+def _try_render_provider(
+    *,
+    provider: str,
+    auth_mode: str | None,
+    profile_id: str | None,
+    packet: dict,
+    run_dir: Path,
+    project_root: Path,
+) -> tuple[Any | None, Any | None, Any | None, Any | None]:
+    """Try to use the renderer registry to produce a provider command/config plan.
+
+    Returns a tuple of (ProviderRenderResult, renderer, profile_spec, settings) if a renderer is available.
+    Returns (None, None, None, None) otherwise.
+    """
+    if not auth_mode:
+        return None, None, None, None
+    try:
+        from app.workers.provider_renderers import get_renderer_registry
+        from app.models.executor_profiles import ExecutorProfileSpec
+    except ImportError:
+        return None, None, None, None
+
+    registry = get_renderer_registry()
+    renderer = registry.get(provider)
+    if renderer is None:
+        return None, None, None, None
+
+    profile_spec = None
+    try:
+        from app.services.app_config_service import AppConfigService
+        from app.core.config import get_settings
+        config_service = AppConfigService(get_settings())
+        stored = config_service.resolve_executor_profile(provider, profile_id=profile_id)
+        if stored:
+            profile_spec = ExecutorProfileSpec(**stored)
+    except Exception:
+        pass
+
+    if profile_spec is None:
+        try:
+            from app.models.executor_profiles import default_profiles
+            defaults = default_profiles()
+            profile_spec = next(
+                (p for p in defaults if p.worker_type == provider and p.auth_mode == auth_mode),
+                None,
+            )
+        except Exception:
+            pass
+
+    if profile_spec is None:
+        profile_spec = ExecutorProfileSpec(
+            profile_id=profile_id or f"{provider}-{auth_mode}",
+            display_name=f"{provider} ({auth_mode})",
+            worker_type=provider,
+            auth_mode=auth_mode,
+        )
+
+    prompt_path = run_dir / "executor_prompt.md"
+
+    settings = None
+    try:
+        from app.core.config import get_settings
+        settings = get_settings()
+    except Exception:
+        pass
+
+    try:
+        result = renderer.render(
+            auth_mode=auth_mode,
+            profile=profile_spec,
+            prompt_path=prompt_path,
+            run_dir=run_dir,
+            project_root=project_root,
+            settings=settings,
+            packet=packet,
+        )
+    except Exception as exc:
+        print(f"[wrapper] renderer failed for provider={provider}: {exc}", flush=True)
+        return None, renderer, profile_spec, settings
+
+    try:
+        result.write_provider_config_plan(run_dir)
+    except Exception as exc:
+        print(f"[wrapper] failed to write provider_config_plan.json: {exc}", flush=True)
+
+    return result, renderer, profile_spec, settings
+
+
+def _run_rendered_provider(
+    *,
+    renderer_result: Any,
+    provider: str,
+    auth_mode: str | None,
+    profile_id: str | None,
+    packet: dict,
+    packet_path: Path,
+    run_dir: Path,
+    project_root: Path,
+    env: dict[str, str],
+    started: float,
+    renderer: Any = None,
+    profile_spec: Any = None,
+    settings: Any = None,
+) -> int:
+    """Run the provider command produced by a renderer (instead of the template)."""
+    command = renderer_result.command_argv
+    merged_env = {**env, **renderer_result.environment_overlay}
+    template_preview = " ".join(renderer_result.redacted_command or renderer_result.command_argv)
+
+    trace = _new_trace(
+        provider=provider,
+        packet=packet,
+        run_dir=run_dir,
+        project_root=project_root,
+        template=template_preview,
+        auth_mode=auth_mode,
+        profile_id=profile_id,
+    )
+    trace["renderer"] = {
+        "worker_type": renderer_result.worker_type,
+        "auth_mode": renderer_result.auth_mode,
+        "config_files": list(renderer_result.config_file_paths),
+        "config_summary": renderer_result.config_summary,
+    }
+    _write_trace(run_dir, trace)
+
+    print(
+        "BP_EVENT "
+        + json.dumps(
+            {
+                "type": "progress_update",
+                "stage": "dispatch",
+                "progress": 1,
+                "message": f"Dispatching {provider} wrapper (renderer) with unified executor prompt.",
+                "metadata": {"provider": provider, "auth_mode": auth_mode, "profile_id": profile_id},
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+
+    def repair_command_factory(repair_prompt_path: Path, repair_env: dict[str, str]) -> tuple[list[str], dict[str, str]]:
+        if renderer and profile_spec and settings:
+            repair_render_result = renderer.render(
+                auth_mode=auth_mode or "cli_native",
+                profile=profile_spec,
+                prompt_path=repair_prompt_path,
+                run_dir=run_dir,
+                project_root=project_root,
+                settings=settings,
+                packet=packet,
+            )
+            if repair_render_result.is_supported and repair_render_result.command_argv:
+                return (
+                    repair_render_result.command_argv,
+                    {
+                        **env,
+                        **repair_render_result.environment_overlay,
+                        "BLUEPRINT_EXECUTOR_PROMPT": str(repair_prompt_path),
+                        "BLUEPRINT_MANIFEST_REPAIR_PROMPT": str(repair_prompt_path),
+                    },
+                )
+        return command, repair_env
+
+    return _run_provider_with_repair_loop(
+        command=command,
+        provider=provider,
+        packet=packet,
+        run_dir=run_dir,
+        project_root=project_root,
+        env=merged_env,
+        trace=trace,
+        started=started,
+        trace_started_monotonic=started,
+        repair_command_factory=repair_command_factory,
+        completion_message=f"{provider} wrapper (renderer) finished with exit code {{return_code}}.",
+        completion_metadata={"provider": provider, "auth_mode": auth_mode, "profile_id": profile_id},
+    )
+
+
+def main() -> int:
+    args = _parse_args()
+    provider = args.provider
+    packet_path = Path(args.task_packet)
+    run_dir = Path(args.run_dir)
+    project_root = Path(args.project_root)
+    env = os.environ.copy()
+    template = env.get("BLUEPRINT_AGENT_LAUNCH_TEMPLATE", "").strip()
+    argv_template_raw = env.get("BLUEPRINT_AGENT_LAUNCH_ARGV_TEMPLATE", "").strip()
+    argv_template: list[str] | None = None
+    if argv_template_raw:
+        try:
+            argv_template = json.loads(argv_template_raw)
+            if not isinstance(argv_template, list):
+                argv_template = None
+        except json.JSONDecodeError:
+            argv_template = None
+    auth_mode = args.auth_mode or env.get("BLUEPRINT_AUTH_MODE", "").strip() or None
+    profile_id = args.profile_id or env.get("BLUEPRINT_EXECUTOR_PROFILE_ID", "").strip() or None
+
+    packet = _load_task_packet(packet_path)
+    started = time.monotonic()
+
+    renderer_result, renderer, profile_spec, settings = _try_render_provider(
+        provider=provider,
+        auth_mode=auth_mode,
+        profile_id=profile_id,
+        packet=packet,
+        run_dir=run_dir,
+        project_root=project_root,
+    )
+
+    if renderer_result and renderer_result.unsupported_error:
+        print(f"[wrapper] renderer unsupported for provider={provider}: {renderer_result.unsupported_error}", flush=True)
+        trace = _new_trace(provider=provider, packet=packet, run_dir=run_dir, project_root=project_root, template=template or "", auth_mode=auth_mode, profile_id=profile_id)
+        _write_trace(run_dir, trace)
+        trace["status"] = "failed"
+        trace["current_phase"] = "renderer_unsupported"
+        trace["finished_at"] = _utc_now()
+        trace["total_duration_seconds"] = round(time.monotonic() - started, 3)
+        _record_observation(trace, "renderer_unsupported", renderer_result.unsupported_error, severity="error")
+        _write_trace(run_dir, trace)
+        return 2
+
+    if renderer_result and renderer_result.command_argv:
+        return _run_rendered_provider(
+            renderer_result=renderer_result,
+            provider=provider,
+            auth_mode=auth_mode,
+            profile_id=profile_id,
+            packet=packet,
+            packet_path=packet_path,
+            run_dir=run_dir,
+            project_root=project_root,
+            env=env,
+            started=started,
+            renderer=renderer,
+            profile_spec=profile_spec,
+            settings=settings,
+        )
+    if renderer_result and renderer_result.is_supported:
+        env = {**env, **renderer_result.environment_overlay}
+
+    if not template and not argv_template:
+        print(f"[wrapper] missing launch template for provider={provider}", flush=True)
+        return 2
+
+    template_preview = " ".join(argv_template) if argv_template else template
+    trace = _new_trace(provider=provider, packet=packet, run_dir=run_dir, project_root=project_root, template=template_preview, auth_mode=auth_mode, profile_id=profile_id)
+    _write_trace(run_dir, trace)
+    print(
+        "BP_EVENT "
+        + json.dumps(
+            {
+                "type": "progress_update",
+                "stage": "dispatch",
+                "progress": 1,
+                "message": f"Dispatching {provider} wrapper with unified executor prompt.",
+                "metadata": {"provider": provider},
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+    try:
+        if argv_template:
+            command = _render_launch_argv_template(
+                argv_template,
+                provider=provider,
+                packet_path=packet_path,
+                run_dir=run_dir,
+                project_root=project_root,
+                packet=packet,
+            )
+        else:
+            command = _render_launch_command(
+                template,
+                provider=provider,
+                packet_path=packet_path,
+                run_dir=run_dir,
+                project_root=project_root,
+                packet=packet,
+            )
+    except RuntimeError as exc:
+        print(f"[wrapper] {exc}", flush=True)
+        trace["status"] = "failed"
+        trace["current_phase"] = "launch_template_error"
+        trace["finished_at"] = _utc_now()
+        trace["total_duration_seconds"] = round(time.monotonic() - started, 3)
+        _record_observation(trace, "launch_template_error", str(exc), severity="error")
+        _write_trace(run_dir, trace)
+        return 2
+    def repair_command_factory(repair_prompt_path: Path, repair_env: dict[str, str]) -> tuple[list[str], dict[str, str]]:
+        if argv_template:
+            repair_command = _render_launch_argv_template(
+                argv_template,
+                provider=provider,
+                packet_path=packet_path,
+                run_dir=run_dir,
+                project_root=project_root,
+                prompt_path=repair_prompt_path,
+                packet=packet,
+            )
+        else:
+            repair_command = _render_launch_command(
+                template,
+                provider=provider,
+                packet_path=packet_path,
+                run_dir=run_dir,
+                project_root=project_root,
+                prompt_path=repair_prompt_path,
+                packet=packet,
+            )
+        return repair_command, repair_env
+
+    return _run_provider_with_repair_loop(
+        command=command,
+        provider=provider,
+        packet=packet,
+        run_dir=run_dir,
+        project_root=project_root,
+        env=env,
+        trace=trace,
+        started=started,
+        trace_started_monotonic=started,
+        repair_command_factory=repair_command_factory,
+        completion_message=f"{provider} wrapper finished with exit code {{return_code}}.",
+        completion_metadata={"provider": provider, "input_assets": len(packet.get("input_assets", []))},
+    )
 
 
 if __name__ == "__main__":

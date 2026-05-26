@@ -348,6 +348,41 @@ export interface WorkerCapability {
   notes: string[];
 }
 
+export interface ExecutorProfile {
+  profile_id: string;
+  display_name: string;
+  worker_type: string;
+  auth_mode: "cli_native" | "project_api";
+  enabled: boolean;
+  command?: string | null;
+  api_protocol?: string | null;
+  provider_id?: string | null;
+  model?: string | null;
+  base_url?: string | null;
+  credential_ref?: string | null;
+  permission_preset?: string;
+  native_auth_readonly?: boolean;
+}
+
+export interface ExecutorProfileListResponse {
+  profiles: ExecutorProfile[];
+  support_matrix: {
+    auth_modes: Record<string, string[]>;
+    api_protocols: Record<string, string[]>;
+    command_configured: Record<string, boolean>;
+  };
+}
+
+export interface ExecutorProfileValidation {
+  profile_id: string;
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  cli_available?: boolean | null;
+  auth_configured?: boolean | null;
+  provider_configured?: boolean | null;
+}
+
 export interface PythonRuntime {
   name: string;
   label: string;

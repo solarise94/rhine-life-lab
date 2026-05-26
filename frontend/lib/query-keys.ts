@@ -1,6 +1,7 @@
 export const queryKeys = {
   projects: ["projects"] as const,
   appSettings: ["app-settings"] as const,
+  executorProfiles: ["executor-profiles"] as const,
   library: (kind: "skill" | "mcp") => ["library", kind] as const,
   project: (projectId: string) => ["project", projectId] as const,
   managerAuto: (projectId: string, sessionId?: string | null) => ["manager-auto", projectId, sessionId ?? "none"] as const,
