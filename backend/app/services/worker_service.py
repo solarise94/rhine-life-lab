@@ -2039,17 +2039,12 @@ class WorkerService:
     def _resolve_worker_type(self, worker_type: str | None) -> str:
         if worker_type:
             return worker_type
-        default_worker_type = self.project_service.settings.default_worker_type
-        candidates = list(dict.fromkeys([default_worker_type, "pi", "opencode", "codex", "claude_code"]))
-        for candidate in candidates:
-            if self._is_worker_configured(candidate):
-                return candidate
+        candidate = self.project_service.settings.default_worker_type or "pi"
+        if self._is_worker_configured(candidate):
+            return candidate
         raise HTTPException(
             status_code=409,
-            detail=(
-                "No configured executor is available. Configure BLUEPRINT_PI_COMMAND for the real pi CLI "
-                "or set one of BLUEPRINT_OPENCODE_COMMAND, BLUEPRINT_CODEX_COMMAND, or BLUEPRINT_CLAUDE_CODE_COMMAND."
-            ),
+            detail="No configured executor is available. Configure BLUEPRINT_PI_COMMAND for the real pi CLI.",
         )
 
     def _is_worker_configured(self, worker_type: str) -> bool:
