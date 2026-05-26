@@ -433,7 +433,7 @@ class WorkerService:
             card = next(item for item in cards if item.card_id == run.card_id)
             if run.status == "cancelled":
                 return {"run_id": run_id, "status": run.status, "summary": run.summary}
-            if run.status not in {"queued", "needs_approval", "running", "reviewing"}:
+            if run.status not in {"queued", "launching", "needs_approval", "running", "reviewing"}:
                 raise HTTPException(status_code=409, detail=f"Run {run_id} cannot be cancelled from status {run.status}.")
             message = (reason or "Run cancelled by operator.").strip()
             run.status = "cancelled"
@@ -452,6 +452,9 @@ class WorkerService:
         process = self._processes.get(run_id)
         if process is not None and process.poll() is None:
             process.kill()
+        # Do NOT pop _threads here — the _execute_run finally block does that
+        # when the thread actually finishes. Popping early would let cleanup_run
+        # delete run/results directories while the thread is still using them.
         self._append_event(project_id, run_id, run.card_id, event_type="run_cancelled", message=message)
         self._commit_run_stage(project_id, run_id, "cancelled")
         self._enqueue_wake_event(
@@ -628,15 +631,34 @@ class WorkerService:
             card = next(item for item in cards if item.card_id == run.card_id)
             previous_outputs_by_role = self._current_output_assets_by_role(card, graph.assets, current_run_id=run_id)
             previous_output_asset_ids = {asset.asset_id for asset in previous_outputs_by_role.values()}
+
+            # Always materialize as candidate first — promotion to valid happens
+            # only after the ambiguity pre-check passes.
             created_assets = self._materialize_run_assets(
                 graph=graph,
                 run_id=run_id,
                 card=card,
                 created_assets=review_context.created_assets,
-                status="valid" if accept else "candidate",
+                status="candidate",
                 input_asset_ids=[item.asset_id for item in task_packet.input_assets],
             )
+
+            # Pre-flight: detect ambiguous output mapping before committing accept side effects.
+            unmapped_outputs: list[str] = []
             if accept:
+                unmapped_outputs = self._detect_unmapped_outputs(
+                    card,
+                    created_assets,
+                    manifest_created_assets=manifest.created_assets,
+                    expected_outputs=task_packet.expected_outputs,
+                )
+                if unmapped_outputs:
+                    accept = False
+
+            if accept:
+                # Promote candidate assets to valid now that we know the mapping is clean.
+                for asset in created_assets:
+                    asset.status = "valid"
                 new_claim_ids = self._materialize_claims(
                     graph, run_id, review_context.key_findings, [asset.asset_id for asset in created_assets]
                 )
@@ -685,6 +707,13 @@ class WorkerService:
                         linked_claim_ids=new_claim_ids,
                     )
                 )
+            elif unmapped_outputs:
+                card.status = "needs_review"
+                card.progress_note = None
+                card.manager_review = (
+                    f"输出资产映射存在歧义，无法将以下 planned output 绑定到真实产物：{', '.join(unmapped_outputs)}。"
+                    "产出已保留为 candidate，请手动确认或重新运行。"
+                )
             else:
                 card.status = "rejected"
                 card.progress_note = None
@@ -714,8 +743,7 @@ class WorkerService:
         if self._run_status(project_id, run_id) == "cancelled":
             self._threads.pop(run_id, None)
             return
-        self._set_run_status(project_id, run_id, card_id, status="running", summary="执行器已启动。", progress_note="正在执行分析任务。")
-        self._append_event(project_id, run_id, card_id, event_type="run_started", message=f"执行器 {worker_type} 已启动。")
+        self._set_run_status(project_id, run_id, card_id, status="launching", summary="执行器正在启动。", progress_note="正在启动执行器。")
         transcript_path = self.project_service.project_path(project_id) / "runs" / run_id / "transcript.md"
 
         try:
@@ -730,6 +758,16 @@ class WorkerService:
                 bufsize=1,
             )
             self._processes[run_id] = process
+            if self._run_status(project_id, run_id) == "cancelled":
+                try:
+                    process.kill()
+                    process.wait(timeout=5)
+                except Exception:
+                    pass
+                self._processes.pop(run_id, None)
+                return
+            self._set_run_status(project_id, run_id, card_id, status="running", summary="执行器已启动。", progress_note="正在执行分析任务。")
+            self._append_event(project_id, run_id, card_id, event_type="run_started", message=f"执行器 {worker_type} 已启动。")
 
             def pump_stdout() -> None:
                 with transcript_path.open("a", encoding="utf-8") as transcript:
@@ -1166,9 +1204,7 @@ class WorkerService:
                     event_id=f"evt_{run_id}_{sequence:03d}",
                     run_id=run_id,
                     card_id=card_id,
-                    source="executor"
-                    if event_type.startswith("run_") or event_type.startswith("executor_")
-                    else "manager",
+                    source="executor" if event_type in {"executor_output", "executor_progress", "executor_issue"} else "manager",
                     event_type=event_type,
                     visibility="bubble",
                     preview_id=f"bubble_{card_id}",
@@ -1646,20 +1682,34 @@ class WorkerService:
             store.save_cards(cards)
 
     @staticmethod
-    def _has_active_run(runs: list[RunRecord], card_id: str) -> bool:
-        return any(run.card_id == card_id and run.status in {"queued", "needs_approval", "running", "reviewing"} for run in runs)
+    def _active_run_statuses() -> set[str]:
+        return {"queued", "launching", "needs_approval", "running", "reviewing"}
 
-    @staticmethod
-    def _has_other_active_runs(runs: list[RunRecord], card_id: str, exclude_run_id: str) -> bool:
+    def _has_active_run(self, runs: list[RunRecord], card_id: str) -> bool:
+        active = self._active_run_statuses()
+        return any(run.card_id == card_id and run.status in active for run in runs)
+
+    def _has_other_active_runs(self, runs: list[RunRecord], card_id: str, exclude_run_id: str) -> bool:
+        active = self._active_run_statuses()
         return any(
-            run.card_id == card_id and run.run_id != exclude_run_id and run.status in {"queued", "needs_approval", "running", "reviewing"}
+            run.card_id == card_id and run.run_id != exclude_run_id and run.status in active
             for run in runs
         )
 
+    def has_active_runs(self, project_id: str) -> bool:
+        lock = self.project_service.lock_for(project_id)
+        with lock:
+            store = self.project_service.graph_store(project_id)
+            graph = store.load_graph()
+            active = self._active_run_statuses()
+            return any(run.status in active for run in graph.runs)
+
     def _run_status(self, project_id: str, run_id: str) -> str | None:
-        graph = self.project_service.graph_store(project_id).load_graph()
-        run = next((item for item in graph.runs if item.run_id == run_id), None)
-        return run.status if run else None
+        lock = self.project_service.lock_for(project_id)
+        with lock:
+            graph = self.project_service.graph_store(project_id).load_graph()
+            run = next((item for item in graph.runs if item.run_id == run_id), None)
+            return run.status if run else None
 
     @staticmethod
     def _materialize_run_assets(
@@ -1745,31 +1795,136 @@ class WorkerService:
                 card.linked_assets.append(asset.asset_id)
 
     @staticmethod
+    def _detect_unmapped_outputs(
+        card: Card,
+        assets: list[Asset],
+        *,
+        manifest_created_assets: list[object] | None = None,
+        expected_outputs: list[object] | None = None,
+    ) -> list[str]:
+        """Pre-flight check: returns planned output IDs that cannot be resolved to real assets.
+
+        Uses the same matching logic as _sync_card_outputs but does NOT mutate the card.
+        """
+        def _get(obj: object, name: str, default: Any = None) -> Any:
+            if isinstance(obj, dict):
+                return obj.get(name, default)
+            return getattr(obj, name, default)
+
+        assets_by_id = {a.asset_id: a for a in assets}
+        assets_by_planned_id: dict[str, Asset] = {}
+        for a in assets:
+            planned = a.metadata.get("planned_asset_id")
+            if planned:
+                assets_by_planned_id[planned] = a
+        duplicate_roles: set[str] = set()
+        seen_roles: set[str] = set()
+        for a in assets:
+            role = str(a.metadata.get("role") or "")
+            if role:
+                if role in seen_roles:
+                    duplicate_roles.add(role)
+                seen_roles.add(role)
+
+        resolved_planned_ids: set[str] = set()
+        if manifest_created_assets is not None:
+            expected_by_role: dict[str, str] = {}
+            for item in (expected_outputs or []):
+                role = _get(item, "role", "")
+                asset_id = _get(item, "asset_id", None)
+                if role:
+                    expected_by_role[role] = asset_id or role
+            for manifest_asset in manifest_created_assets:
+                m_asset_id = _get(manifest_asset, "asset_id", None)
+                role = _get(manifest_asset, "role", "")
+                matched = False
+                if m_asset_id and m_asset_id in assets_by_id:
+                    matched = True
+                elif m_asset_id and m_asset_id in assets_by_planned_id:
+                    matched = True
+                elif role and role not in duplicate_roles and role in {str(a.metadata.get("role") or "") for a in assets}:
+                    matched = True
+                if matched:
+                    planned_id = m_asset_id or expected_by_role.get(role, role)
+                    resolved_planned_ids.add(planned_id)
+
+        return [
+            output.asset_id
+            for output in card.outputs
+            if output.asset_id is not None and output.asset_id not in resolved_planned_ids
+        ]
+
+    @staticmethod
     def _sync_card_outputs(
         card: Card,
         assets: list[Asset],
         *,
         manifest_created_assets: list[object] | None = None,
         expected_outputs: list[object] | None = None,
-    ) -> None:
-        expected_asset_id_by_role = {
-            getattr(item, "role", ""): getattr(item, "asset_id", None)
-            for item in (expected_outputs or [])
-            if getattr(item, "asset_id", None)
-        }
-        real_by_planned: dict[str, Asset] = {}
-        if manifest_created_assets is not None:
-            for asset, manifest_asset in zip(assets, manifest_created_assets, strict=False):
-                role = getattr(manifest_asset, "role", "")
-                planned_asset_id = getattr(manifest_asset, "asset_id", None) or expected_asset_id_by_role.get(role)
-                if planned_asset_id:
-                    real_by_planned[planned_asset_id] = asset
+    ) -> list[str]:
+        def _get(obj: object, name: str, default: Any = None) -> Any:
+            if isinstance(obj, dict):
+                return obj.get(name, default)
+            return getattr(obj, name, default)
 
+        expected_by_role: dict[str, str] = {}
+        for item in (expected_outputs or []):
+            role = _get(item, "role", "")
+            asset_id = _get(item, "asset_id", None)
+            if role:
+                expected_by_role[role] = asset_id or role
+
+        assets_by_id = {a.asset_id: a for a in assets}
+        assets_by_planned_id: dict[str, Asset] = {}
+        for a in assets:
+            planned = a.metadata.get("planned_asset_id")
+            if planned:
+                assets_by_planned_id[planned] = a
+        assets_by_role: dict[str, Asset] = {}
+        duplicate_roles: set[str] = set()
+        for a in assets:
+            role = str(a.metadata.get("role") or "")
+            if role:
+                if role in assets_by_role:
+                    duplicate_roles.add(role)
+                else:
+                    assets_by_role[role] = a
+        for dup_role in sorted(duplicate_roles):
+            logger.warning("Duplicate output role in produced assets: role=%s", dup_role)
+
+        real_by_planned: dict[str, Asset] = {}
+        matched_asset_ids: set[str] = set()
+        if manifest_created_assets is not None:
+            for manifest_asset in manifest_created_assets:
+                m_asset_id = _get(manifest_asset, "asset_id", None)
+                role = _get(manifest_asset, "role", "")
+                actual_asset = None
+                if m_asset_id and m_asset_id in assets_by_id:
+                    actual_asset = assets_by_id[m_asset_id]
+                elif m_asset_id and m_asset_id in assets_by_planned_id:
+                    actual_asset = assets_by_planned_id[m_asset_id]
+                elif role and role not in duplicate_roles and role in assets_by_role:
+                    actual_asset = assets_by_role[role]
+                if actual_asset:
+                    planned_id = m_asset_id or expected_by_role.get(role, role)
+                    real_by_planned[planned_id] = actual_asset
+                    matched_asset_ids.add(actual_asset.asset_id)
+                else:
+                    logger.error("Unmatched manifest output: role=%s asset_id=%s", role, m_asset_id)
+
+        for a in assets:
+            if a.asset_id not in matched_asset_ids:
+                logger.warning("Produced asset not referenced in manifest: asset_id=%s role=%s", a.asset_id, a.metadata.get("role"))
+
+        unmapped: list[str] = []
         for output in card.outputs:
             if output.asset_id in real_by_planned:
                 real_asset = real_by_planned[output.asset_id]
                 output.asset_id = real_asset.asset_id
                 output.status = real_asset.status
+            elif output.asset_id is not None:
+                unmapped.append(output.asset_id)
+        return unmapped
 
     @staticmethod
     def _current_output_assets_by_role(card: Card, assets: list[Asset], *, current_run_id: str) -> dict[str, Asset]:

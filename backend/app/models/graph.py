@@ -9,7 +9,7 @@ from app.models.cards import CardStatus
 
 ModuleType = Literal["analysis_module", "module_group"]
 AssetStatus = Literal["candidate", "valid", "stale", "superseded", "rejected", "archived", "missing"]
-RunStatus = Literal["queued", "running", "reviewing", "needs_approval", "success", "failed", "cancelled", "reviewed"]
+RunStatus = Literal["queued", "launching", "running", "reviewing", "needs_approval", "success", "failed", "cancelled", "reviewed"]
 ClaimStatus = Literal["candidate", "valid", "stale", "superseded", "rejected", "archived", "missing"]
 
 

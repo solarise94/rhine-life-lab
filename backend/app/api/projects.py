@@ -1,12 +1,13 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Literal
 
-from app.api.deps import get_flow_service, get_library_registry_service, get_manager_auto_service, get_project_service
+from app.api.deps import get_flow_service, get_library_registry_service, get_manager_auto_service, get_project_service, get_worker_service
 from app.services.flow_service import FlowService
 from app.services.library_registry_service import LibraryRegistryService
 from app.services.manager_auto_service import ManagerAutoService
 from app.services.project_service import ProjectService
+from app.services.worker_service import WorkerService
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -39,7 +40,13 @@ def create_project(request: CreateProjectRequest, project_service: ProjectServic
 
 
 @router.delete("/{project_id}")
-def delete_project(project_id: str, project_service: ProjectService = Depends(get_project_service)) -> dict:
+def delete_project(
+    project_id: str,
+    project_service: ProjectService = Depends(get_project_service),
+    worker_service: WorkerService = Depends(get_worker_service),
+) -> dict:
+    if worker_service.has_active_runs(project_id):
+        raise HTTPException(status_code=409, detail=f"Project {project_id} has active runs and cannot be deleted.")
     project_service.delete_project(project_id)
     return {"ok": True}
 

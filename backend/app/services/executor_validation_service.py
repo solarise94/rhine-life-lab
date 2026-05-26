@@ -162,6 +162,15 @@ class ExecutorValidationService:
                 issues.append(ValidationIssue(severity="error", code="invalid_output_path", message=str(exc), path=asset.path))
                 continue
             if not path.exists():
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        code="missing_output",
+                        message=f"Declared output file does not exist: {asset.path}",
+                        path=asset.path,
+                        repair_hint="Ensure the executor writes all declared outputs to the expected paths.",
+                    )
+                )
                 continue
             size = path.stat().st_size
             if size == 0:

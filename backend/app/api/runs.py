@@ -1,6 +1,6 @@
 import asyncio
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from app.api.deps import (
@@ -89,7 +89,9 @@ def rerun_card(
 @router.get("/runs/{run_id}")
 def get_run(project_id: str, run_id: str, project_service: ProjectService = Depends(get_project_service)) -> dict:
     graph = project_service.graph_store(project_id).load_graph()
-    run = next(item for item in graph.runs if item.run_id == run_id)
+    run = next((item for item in graph.runs if item.run_id == run_id), None)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
     return {"run": run}
 
 
@@ -168,6 +170,7 @@ async def run_events_ws(project_id: str, run_id: str, websocket: WebSocket) -> N
     await websocket.accept()
     store = get_project_service().graph_store(project_id)
     sent = 0
+    disconnected = False
     try:
         while True:
             events = store.load_run_events(run_id)
@@ -177,8 +180,13 @@ async def run_events_ws(project_id: str, run_id: str, websocket: WebSocket) -> N
             graph = store.load_graph()
             run = next((item for item in graph.runs if item.run_id == run_id), None)
             if run and run.status in {"success", "failed", "cancelled", "reviewed"} and sent >= len(events):
-                await asyncio.sleep(0.25)
-            else:
-                await asyncio.sleep(0.5)
+                break
+            await asyncio.sleep(0.5)
     except WebSocketDisconnect:
-        return
+        disconnected = True
+    finally:
+        if not disconnected:
+            try:
+                await websocket.close()
+            except Exception:
+                pass

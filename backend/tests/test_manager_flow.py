@@ -448,6 +448,7 @@ class ManagerFlowTest(unittest.TestCase):
             status="valid",
             path="results/qc/run_001/filtered_counts.tsv",
             summary="Filtered counts output.",
+            metadata={"role": "filtered_counts", "planned_asset_id": "planned_filtered_counts"},
         )
         manifest_asset = CreatedAsset.model_validate(
             {

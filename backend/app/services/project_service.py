@@ -205,7 +205,18 @@ class ProjectService:
             raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
         if len(self.list_projects()) <= 1:
             raise HTTPException(status_code=400, detail="Cannot delete the only project.")
-        shutil.rmtree(root)
+        lock = self.lock_for(project_id)
+        with lock:
+            store = self.graph_store(project_id)
+            graph = store.load_graph()
+            active_statuses = {"queued", "launching", "needs_approval", "running", "reviewing"}
+            active_runs = [run for run in graph.runs if run.status in active_statuses]
+            if active_runs:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Project {project_id} has active runs ({', '.join(r.run_id for r in active_runs)}) and cannot be deleted.",
+                )
+            shutil.rmtree(root)
         self._locks.pop(project_id, None)
 
     def _seed_demo(self, store: GraphStore, state: ProjectState) -> None:

@@ -57,6 +57,38 @@ function resolveModel(runtimeConfig) {
   return model;
 }
 
+let startupValidation = null;
+
+function validateStartupConfig() {
+  if (startupValidation) {
+    return startupValidation;
+  }
+  const errors = [];
+  const runtimeConfig = resolveManagerConfig();
+  if (!runtimeConfig.apiKey) {
+    errors.push("MANAGER_AGENT_API_KEY or BLUEPRINT_DEEPSEEK_API_KEY is not configured.");
+  }
+  const model = getModel(runtimeConfig.provider, runtimeConfig.model);
+  if (!model) {
+    errors.push(`Manager model not found: provider=${runtimeConfig.provider}, model=${runtimeConfig.model}`);
+  }
+  const deepseekBaseUrl = normalizeBaseUrl(runtimeConfig.piDeepseekBaseUrl);
+  if (runtimeConfig.provider === "deepseek" && deepseekBaseUrl) {
+    try {
+      new URL(deepseekBaseUrl);
+    } catch {
+      errors.push(`Invalid DeepSeek base URL: ${deepseekBaseUrl}`);
+    }
+  }
+  startupValidation = {
+    ok: errors.length === 0,
+    errors,
+    provider: runtimeConfig.provider,
+    model: runtimeConfig.model,
+  };
+  return startupValidation;
+}
+
 function buildSystemPrompt(runtimeConfig = resolveManagerConfig()) {
   const webCapabilityLines =
     runtimeConfig.websearchEnabled && runtimeConfig.tavilyApiKey
@@ -288,6 +320,8 @@ function jsonResponse(res, status, payload) {
   res.end(body);
 }
 
+const sseStreams = new WeakSet();
+
 function openSse(res) {
   res.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
@@ -296,9 +330,13 @@ function openSse(res) {
     "x-accel-buffering": "no",
   });
   res.flushHeaders?.();
+  sseStreams.add(res);
 }
 
 function writeSseEvent(res, payload) {
+  if (res.destroyed || res.writableEnded || !sseStreams.has(res)) {
+    return;
+  }
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
@@ -2519,52 +2557,84 @@ async function runManualCompaction(payload) {
 }
 
 async function handle(req, res) {
-  const { pathname } = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
-  if (req.method === "GET" && pathname === "/healthz") {
-    jsonResponse(res, 200, { status: "ok" });
-    return;
-  }
-  if (req.method === "POST" && pathname === "/chat-stream") {
-    const disconnectController = new AbortController();
-    req.on("close", () => disconnectController.abort(new Error("client_disconnected")));
-    openSse(res);
-    try {
-      const payload = await readJson(req);
-      const response = await runManagerChat(payload, (event) => writeSseEvent(res, event), disconnectController.signal);
-      writeSseEvent(res, { type: "response", response });
-      writeSseEvent(res, { type: "done" });
-    } catch (error) {
-      writeSseEvent(res, { type: "error", detail: error instanceof Error ? error.message : String(error) });
-    } finally {
-      res.end();
+  try {
+    const { pathname } = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
+    if (req.method === "GET" && pathname === "/healthz") {
+      const validation = validateStartupConfig();
+      if (!validation.ok) {
+        jsonResponse(res, 503, { status: "not_ready", ready: false, errors: validation.errors });
+        return;
+      }
+      jsonResponse(res, 200, { status: "ok", ready: true });
+      return;
     }
-    return;
-  }
-  if (req.method === "POST" && pathname === "/compact") {
+    if (req.method === "POST" && pathname === "/chat-stream") {
+      const disconnectController = new AbortController();
+      req.on("close", () => disconnectController.abort(new Error("client_disconnected")));
+      openSse(res);
+      try {
+        const payload = await readJson(req);
+        const response = await runManagerChat(payload, (event) => writeSseEvent(res, event), disconnectController.signal);
+        writeSseEvent(res, { type: "response", response });
+        writeSseEvent(res, { type: "done" });
+      } catch (error) {
+        writeSseEvent(res, { type: "error", detail: error instanceof Error ? error.message : String(error) });
+      } finally {
+        sseStreams.delete(res);
+        if (!res.destroyed && !res.writableEnded) {
+          res.end();
+        }
+      }
+      return;
+    }
+    if (req.method === "POST" && pathname === "/compact") {
+      try {
+        const payload = await readJson(req);
+        const response = await runManualCompaction(payload);
+        jsonResponse(res, 200, response);
+      } catch (error) {
+        jsonResponse(res, 502, { detail: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (req.method !== "POST" || pathname !== "/chat") {
+      jsonResponse(res, 404, { detail: "Not found" });
+      return;
+    }
     try {
       const payload = await readJson(req);
-      const response = await runManualCompaction(payload);
+      const response = await runManagerChat(payload);
       jsonResponse(res, 200, response);
     } catch (error) {
       jsonResponse(res, 502, { detail: error instanceof Error ? error.message : String(error) });
     }
-    return;
-  }
-  if (req.method !== "POST" || pathname !== "/chat") {
-    jsonResponse(res, 404, { detail: "Not found" });
-    return;
-  }
-  try {
-    const payload = await readJson(req);
-    const response = await runManagerChat(payload);
-    jsonResponse(res, 200, response);
   } catch (error) {
-    jsonResponse(res, 502, { detail: error instanceof Error ? error.message : String(error) });
+    if (!res.headersSent) {
+      jsonResponse(res, 500, { detail: error instanceof Error ? error.message : String(error) });
+    } else if (!res.writableEnded && !res.destroyed) {
+      res.end();
+    }
   }
 }
 
+const validation = validateStartupConfig();
+if (!validation.ok) {
+  console.error("Manager agent startup validation failed:");
+  for (const err of validation.errors) {
+    console.error("  - " + err);
+  }
+  process.exit(1);
+}
+
 const server = (await import("node:http")).createServer((req, res) => {
-  void handle(req, res);
+  handle(req, res).catch((error) => {
+    console.error("Unhandled error in request handler:", error);
+    if (!res.headersSent) {
+      jsonResponse(res, 500, { detail: "Internal server error" });
+    } else if (!res.writableEnded && !res.destroyed) {
+      res.end();
+    }
+  });
 });
 
 server.listen(PORT, HOST, () => {

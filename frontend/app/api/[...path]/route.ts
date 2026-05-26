@@ -20,7 +20,8 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
   };
 
   if (request.method !== "GET" && request.method !== "HEAD") {
-    init.body = await request.text();
+    init.body = request.body;
+    init.duplex = "half";
   }
 
   const upstream = await fetch(target, init);

@@ -15,3 +15,10 @@ def get_graph(project_id: str, project_service: ProjectService = Depends(get_pro
 @router.get("/git")
 def get_git(project_id: str, project_service: ProjectService = Depends(get_project_service)) -> dict:
     return {"items": project_service.git_service(project_id).log()}
+
+
+@router.get("/proposals")
+def get_proposals(project_id: str, project_service: ProjectService = Depends(get_project_service)) -> dict:
+    store = project_service.graph_store(project_id)
+    proposals = store.load_proposals()
+    return {"items": proposals}
