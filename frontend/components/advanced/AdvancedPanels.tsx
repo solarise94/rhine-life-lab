@@ -7,6 +7,7 @@ import { PythonRuntime, RRuntime } from "@/lib/types";
 export function AdvancedPanels({
   graph,
   gitItems,
+  readOnly = false,
   pythonRuntimes = [],
   rRuntimes = [],
   globalPythonRuntime,
@@ -16,6 +17,7 @@ export function AdvancedPanels({
 }: {
   graph: Record<string, unknown> | null;
   gitItems: Array<{ hash: string; date: string; subject: string }>;
+  readOnly?: boolean;
   pythonRuntimes?: PythonRuntime[];
   rRuntimes?: RRuntime[];
   globalPythonRuntime?: string;
@@ -43,6 +45,7 @@ export function AdvancedPanels({
               <select
                 value={globalPythonRuntime ?? "__system__"}
                 onChange={(event) => onSelectGlobalPythonRuntime?.(event.target.value)}
+                disabled={readOnly}
                 style={{
                   fontSize: 13,
                   padding: "8px 10px",
@@ -64,6 +67,7 @@ export function AdvancedPanels({
               <select
                 value={globalRRuntime ?? "__system__"}
                 onChange={(event) => onSelectGlobalRRuntime?.(event.target.value)}
+                disabled={readOnly}
                 style={{
                   fontSize: 13,
                   padding: "8px 10px",

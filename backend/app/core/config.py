@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     executor_sandbox_mode: str = "bwrap"
     executor_max_concurrent_runs: int = 3
     executor_conda_base: Path = Path("/home/solarise/miniconda3")
+    default_python_runtime: str | None = None
+    default_r_runtime: str | None = None
     executor_host_root_readonly: bool = True
     executor_extra_ro_binds: str = Field(default_factory=lambda: f"{Path.home()}/.nvm,{Path.home()}/.local")
     opencode_command: str | None = None

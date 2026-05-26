@@ -121,6 +121,7 @@ class InstallRuntimeDependenciesPayload(BaseModel):
     packages: list[str] = Field(default_factory=list)
     manager: str | None = None
     timeout_seconds: int = 600
+    source: dict[str, Any] = Field(default_factory=dict)
 
 
 class FindCardsPayload(BaseModel):
@@ -726,6 +727,7 @@ class ManagerBlueprintTools:
             "packages": packages,
             "manager": self._dependency_manager_label(ecosystem, request.manager),
             "timeout_seconds": timeout,
+            "source": dict(request.source or {}),
         }
 
     def start_card_run(self, project_id: str, payload: dict) -> dict:

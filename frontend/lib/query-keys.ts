@@ -3,6 +3,7 @@ export const queryKeys = {
   appSettings: ["app-settings"] as const,
   library: (kind: "skill" | "mcp") => ["library", kind] as const,
   project: (projectId: string) => ["project", projectId] as const,
+  managerAuto: (projectId: string, sessionId?: string | null) => ["manager-auto", projectId, sessionId ?? "none"] as const,
   chatSessions: (projectId: string) => ["chat-sessions", projectId] as const,
   chatSession: (projectId: string, sessionId: string) => ["chat-session", projectId, sessionId] as const,
   assetFlow: (projectId: string) => ["asset-flow", projectId] as const,

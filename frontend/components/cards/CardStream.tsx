@@ -12,6 +12,7 @@ export function CardStream({
   workOrder,
   selectedCardId,
   cardInteractionOrder = [],
+  readOnly = false,
   onSelect,
   onClearSelection,
   onStartRun,
@@ -35,6 +36,7 @@ export function CardStream({
   workOrder?: WorkOrder;
   selectedCardId?: string;
   cardInteractionOrder?: string[];
+  readOnly?: boolean;
   onSelect: (card: Card) => void;
   onClearSelection?: () => void;
   onStartRun: (card: Card) => void;
@@ -217,6 +219,7 @@ export function CardStream({
                       onSelect={onSelect}
                       onStartRun={onStartRun}
                       onReviewRun={onReviewRun}
+                      readOnly={readOnly}
                       onAskManager={onAskManager}
                       onPreviewAsset={onPreviewAsset}
                       workerCapabilities={workerCapabilities}

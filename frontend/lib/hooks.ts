@@ -85,6 +85,14 @@ export function useProjectSnapshot(projectId: string) {
   });
 }
 
+export function useManagerAuto(projectId: string, sessionId?: string | null) {
+  return useQuery({
+    queryKey: queryKeys.managerAuto(projectId, sessionId),
+    queryFn: () => api.getManagerAuto(projectId, sessionId),
+    refetchInterval: 4_000,
+  });
+}
+
 export function useUpdateProjectRuntimePreferencesMutation(projectId: string) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -102,18 +110,25 @@ export function useExportDiagnosticsMutation(projectId: string) {
   });
 }
 
-export function useChatSessions(projectId: string) {
+export function useChatSessions(projectId: string, options?: { refetchInterval?: number | false }) {
   return useQuery({
     queryKey: queryKeys.chatSessions(projectId),
     queryFn: () => api.getChatSessions(projectId),
+    refetchInterval: options?.refetchInterval,
   });
 }
 
-export function useChatSession(projectId: string, sessionId: string | undefined, enabled: boolean) {
+export function useChatSession(
+  projectId: string,
+  sessionId: string | undefined,
+  enabled: boolean,
+  options?: { refetchInterval?: number | false },
+) {
   return useQuery({
     queryKey: queryKeys.chatSession(projectId, sessionId ?? "none"),
     queryFn: () => api.getChatSession(projectId, sessionId!),
     enabled: enabled && Boolean(sessionId),
+    refetchInterval: options?.refetchInterval,
   });
 }
 

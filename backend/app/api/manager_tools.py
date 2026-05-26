@@ -2,12 +2,30 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from app.api.deps import get_manager_service
+from app.api.deps import get_manager_auto_service, get_manager_service
 from app.core.config import get_settings
+from app.services.manager_auto_service import ManagerAutoService
 from app.services.manager_planner import ManagerPlanningError
 from app.services.manager_service import ManagerService
 
 router = APIRouter(prefix="/internal/manager-tools/projects/{project_id}", tags=["manager-tools"])
+
+_MUTATING_TOOL_NAMES = {
+    "create_card",
+    "update_card",
+    "configure_card_execution",
+    "delete_card",
+    "set_tool_policy",
+    "install_runtime_dependencies",
+    "start_card_run",
+    "stop_card_run",
+    "rerun_card",
+    "review_card_run",
+    "cleanup_run_history",
+    "save_card_template",
+    "instantiate_card_template",
+    "write_project_memory",
+}
 
 
 def _verify_internal_token(authorization: str | None) -> None:
@@ -17,6 +35,41 @@ def _verify_internal_token(authorization: str | None) -> None:
         raise HTTPException(status_code=503, detail="BLUEPRINT_INTERNAL_TOOL_TOKEN is not configured")
     if authorization != f"Bearer {expected}":
         raise HTTPException(status_code=401, detail="Invalid internal tool token")
+
+
+def _guard_mutation(
+    project_id: str,
+    tool_name: str,
+    session_id: str | None,
+    manager_auto_service: ManagerAutoService,
+) -> None:
+    if tool_name in _MUTATING_TOOL_NAMES:
+        manager_auto_service.assert_mutation_allowed(project_id, session_id, tool_name)
+
+
+def _mark_auto_running(
+    project_id: str,
+    session_id: str | None,
+    manager_auto_service: ManagerAutoService,
+    *,
+    active_run_id: str | None = None,
+    active_job_id: str | None = None,
+    clear_active_run: bool = False,
+    clear_active_job: bool = False,
+) -> None:
+    if not session_id:
+        return
+    view = manager_auto_service.get_view(project_id, session_id)
+    if not view.is_owner:
+        return
+    manager_auto_service.set_runtime_state(
+        project_id,
+        state_value="running",
+        active_run_id=active_run_id,
+        active_job_id=active_job_id,
+        clear_active_run=clear_active_run,
+        clear_active_job=clear_active_job,
+    )
 
 
 @router.get("/context")
@@ -102,9 +155,12 @@ def create_card(
     project_id: str,
     payload: dict,
     authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     _verify_internal_token(authorization)
+    _guard_mutation(project_id, "create_card", x_blueprint_session_id, manager_auto_service)
     try:
         return manager_service.blueprint_tools.create_card(project_id, payload)
     except ManagerPlanningError as exc:
@@ -131,9 +187,12 @@ def update_card(
     card_id: str,
     payload: dict,
     authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     _verify_internal_token(authorization)
+    _guard_mutation(project_id, "update_card", x_blueprint_session_id, manager_auto_service)
     try:
         body = dict(payload)
         body["card_id"] = card_id
@@ -147,9 +206,12 @@ def configure_card_execution(
     project_id: str,
     payload: dict,
     authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     _verify_internal_token(authorization)
+    _guard_mutation(project_id, "configure_card_execution", x_blueprint_session_id, manager_auto_service)
     try:
         return manager_service.blueprint_tools.configure_card_execution(project_id, payload)
     except ManagerPlanningError as exc:
@@ -162,9 +224,12 @@ def delete_card(
     card_id: str,
     payload: dict | None = None,
     authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     _verify_internal_token(authorization)
+    _guard_mutation(project_id, "delete_card", x_blueprint_session_id, manager_auto_service)
     try:
         body = dict(payload or {})
         body["card_id"] = card_id
@@ -191,9 +256,12 @@ def set_tool_policy(
     project_id: str,
     payload: dict,
     authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     _verify_internal_token(authorization)
+    _guard_mutation(project_id, "set_tool_policy", x_blueprint_session_id, manager_auto_service)
     try:
         return manager_service.blueprint_tools.set_tool_policy(project_id, payload)
     except ManagerPlanningError as exc:
@@ -315,11 +383,22 @@ def install_runtime_dependencies(
     project_id: str,
     payload: dict,
     authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     _verify_internal_token(authorization)
+    _guard_mutation(project_id, "install_runtime_dependencies", x_blueprint_session_id, manager_auto_service)
     try:
-        return manager_service.blueprint_tools.install_runtime_dependencies(project_id, payload)
+        response = manager_service.blueprint_tools.install_runtime_dependencies(project_id, payload)
+        if response.get("job_id"):
+            _mark_auto_running(
+                project_id,
+                x_blueprint_session_id,
+                manager_auto_service,
+                active_job_id=str(response.get("job_id")),
+            )
+        return response
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -343,11 +422,22 @@ def start_card_run(
     project_id: str,
     payload: dict,
     authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     _verify_internal_token(authorization)
+    _guard_mutation(project_id, "start_card_run", x_blueprint_session_id, manager_auto_service)
     try:
-        return manager_service.blueprint_tools.start_card_run(project_id, payload)
+        response = manager_service.blueprint_tools.start_card_run(project_id, payload)
+        if response.get("ok") and response.get("can_start", True) and response.get("run_id"):
+            _mark_auto_running(
+                project_id,
+                x_blueprint_session_id,
+                manager_auto_service,
+                active_run_id=str(response.get("run_id")),
+            )
+        return response
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -357,11 +447,22 @@ def stop_card_run(
     project_id: str,
     payload: dict,
     authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     _verify_internal_token(authorization)
+    _guard_mutation(project_id, "stop_card_run", x_blueprint_session_id, manager_auto_service)
     try:
-        return manager_service.blueprint_tools.stop_card_run(project_id, payload)
+        response = manager_service.blueprint_tools.stop_card_run(project_id, payload)
+        if response.get("stopped"):
+            _mark_auto_running(
+                project_id,
+                x_blueprint_session_id,
+                manager_auto_service,
+                clear_active_run=True,
+            )
+        return response
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -371,11 +472,22 @@ def rerun_card(
     project_id: str,
     payload: dict,
     authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     _verify_internal_token(authorization)
+    _guard_mutation(project_id, "rerun_card", x_blueprint_session_id, manager_auto_service)
     try:
-        return manager_service.blueprint_tools.rerun_card(project_id, payload)
+        response = manager_service.blueprint_tools.rerun_card(project_id, payload)
+        if response.get("ok") and response.get("run_id"):
+            _mark_auto_running(
+                project_id,
+                x_blueprint_session_id,
+                manager_auto_service,
+                active_run_id=str(response.get("run_id")),
+            )
+        return response
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -385,9 +497,12 @@ def review_card_run(
     project_id: str,
     payload: dict,
     authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     _verify_internal_token(authorization)
+    _guard_mutation(project_id, "review_card_run", x_blueprint_session_id, manager_auto_service)
     try:
         return manager_service.blueprint_tools.review_card_run(project_id, payload)
     except ManagerPlanningError as exc:
@@ -399,9 +514,12 @@ def cleanup_run_history(
     project_id: str,
     payload: dict,
     authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     _verify_internal_token(authorization)
+    _guard_mutation(project_id, "cleanup_run_history", x_blueprint_session_id, manager_auto_service)
     try:
         return manager_service.blueprint_tools.cleanup_run_history(project_id, payload)
     except ManagerPlanningError as exc:
@@ -427,9 +545,12 @@ def save_card_template(
     project_id: str,
     payload: dict,
     authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     _verify_internal_token(authorization)
+    _guard_mutation(project_id, "save_card_template", x_blueprint_session_id, manager_auto_service)
     try:
         return manager_service.blueprint_tools.save_card_template(project_id, payload)
     except ManagerPlanningError as exc:
@@ -441,9 +562,12 @@ def instantiate_card_template(
     project_id: str,
     payload: dict,
     authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     _verify_internal_token(authorization)
+    _guard_mutation(project_id, "instantiate_card_template", x_blueprint_session_id, manager_auto_service)
     try:
         return manager_service.blueprint_tools.instantiate_card_template(project_id, payload)
     except ManagerPlanningError as exc:
@@ -469,9 +593,12 @@ def write_project_memory(
     project_id: str,
     payload: dict,
     authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     _verify_internal_token(authorization)
+    _guard_mutation(project_id, "write_project_memory", x_blueprint_session_id, manager_auto_service)
     try:
         return manager_service.blueprint_tools.write_project_memory(project_id, payload)
     except ManagerPlanningError as exc:

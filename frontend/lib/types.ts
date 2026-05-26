@@ -231,11 +231,48 @@ export interface ChatSessionSummary {
   summary: string;
   created_at: string;
   updated_at: string;
+  revision: number;
+  auto_owner?: boolean | null;
+  auto_mode_state?: string | null;
+  btw_mode?: boolean | null;
   message_count: number;
 }
 
 export interface ChatSessionDetail extends ChatSessionSummary {
   messages: ChatSessionMessageRecord[];
+}
+
+export interface ManagerAutoDirective {
+  id: string;
+  message_id?: string | null;
+  text: string;
+  created_at: string;
+  status: string;
+  resolved_at?: string | null;
+  resolution_note?: string | null;
+}
+
+export interface ManagerAutoChainLimitBasis {
+  executable_card_count: number;
+  formula: string;
+}
+
+export interface ManagerAutoState {
+  enabled: boolean;
+  mode: "continuous" | "once";
+  owner_session_id?: string | null;
+  state: "idle" | "running" | "thinking" | "stopped";
+  started_at?: string | null;
+  last_wake_id?: string | null;
+  chain_count: number;
+  max_chain_count: number;
+  chain_limit_basis: ManagerAutoChainLimitBasis;
+  active_run_id?: string | null;
+  active_job_id?: string | null;
+  stopped_at?: string | null;
+  stop_reason?: string | null;
+  stop_message?: string | null;
+  pending_directives: ManagerAutoDirective[];
 }
 
 export interface ExecutionFileEntry {
@@ -425,6 +462,7 @@ export interface DiagnosticExportResponse {
 export interface ProjectSnapshot {
   summary: ProjectSummary;
   project: ProjectState;
+  manager_auto?: ManagerAutoState;
   cards: Card[];
   graph: {
     modules: Array<Record<string, unknown>>;

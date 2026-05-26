@@ -43,12 +43,14 @@ export function FilesPanel({
   projectId,
   files,
   onRefresh,
+  readOnly = false,
   onAttachAsset,
   onPreviewAsset,
 }: {
   projectId: string;
   files?: ProjectFiles;
   onRefresh: () => Promise<void>;
+  readOnly?: boolean;
   onAttachAsset: (asset: Asset) => void;
   onPreviewAsset?: (asset: Asset) => void;
 }) {
@@ -94,6 +96,10 @@ export function FilesPanel({
       setClientError("文件超过 50MB，当前上传入口不支持。");
       return;
     }
+    if (readOnly) {
+      setClientError("Auto mode 运行中，文件工作台处于只读状态。");
+      return;
+    }
     uploadMutation.mutate(file);
   }
 
@@ -121,7 +127,7 @@ export function FilesPanel({
                 className="btn primary"
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={uploadMutation.isPending}
+                disabled={readOnly || uploadMutation.isPending}
               >
                 {uploadMutation.isPending ? <Loader2 size={14} className="spinning" /> : <FolderUp size={14} />}
                 上传文件
@@ -158,6 +164,7 @@ export function FilesPanel({
         onAttachAsset={onAttachAsset}
         onPreviewAsset={onPreviewAsset}
         onDeleteAsset={(asset) => deleteAssetMutation.mutate(asset.asset_id)}
+        readOnly={readOnly}
         deletingAssetId={deleteAssetMutation.isPending ? deleteAssetMutation.variables : undefined}
       />
       <AssetSection
@@ -169,6 +176,7 @@ export function FilesPanel({
         onAttachAsset={onAttachAsset}
         onPreviewAsset={onPreviewAsset}
         onDeleteAsset={(asset) => deleteAssetMutation.mutate(asset.asset_id)}
+        readOnly={readOnly}
         deletingAssetId={deleteAssetMutation.isPending ? deleteAssetMutation.variables : undefined}
       />
       <AssetSection
@@ -180,6 +188,7 @@ export function FilesPanel({
         onAttachAsset={onAttachAsset}
         onPreviewAsset={onPreviewAsset}
         onDeleteAsset={(asset) => deleteUploadMutation.mutate(asset.asset_id)}
+        readOnly={readOnly}
         deletingAssetId={deleteUploadMutation.isPending ? deleteUploadMutation.variables : undefined}
       />
       <ExecutionFilesSection projectId={projectId} items={files?.execution_files ?? []} />
@@ -196,6 +205,7 @@ function AssetSection({
   onAttachAsset,
   onPreviewAsset,
   onDeleteAsset,
+  readOnly = false,
   deletingAssetId,
 }: {
   title: string;
@@ -206,6 +216,7 @@ function AssetSection({
   onAttachAsset: (asset: Asset) => void;
   onPreviewAsset?: (asset: Asset) => void;
   onDeleteAsset?: (asset: Asset) => void;
+  readOnly?: boolean;
   deletingAssetId?: string;
 }) {
   return (
@@ -253,7 +264,7 @@ function AssetSection({
                       className="btn danger"
                       type="button"
                       onClick={() => onDeleteAsset(asset)}
-                      disabled={deletingAssetId === asset.asset_id}
+                      disabled={readOnly || deletingAssetId === asset.asset_id}
                     >
                       {deletingAssetId === asset.asset_id ? <Loader2 size={14} className="spinning" /> : <Trash2 size={14} />}
                       删除

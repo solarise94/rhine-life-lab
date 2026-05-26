@@ -3,12 +3,94 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ROOT_DIR}/.env"
+INSTALL_INTERACTIVE=0
+
+for arg in "$@"; do
+  case "${arg}" in
+    --interactive)
+      INSTALL_INTERACTIVE=1
+      ;;
+    --yes|--non-interactive)
+      INSTALL_INTERACTIVE=0
+      ;;
+    *)
+      ;;
+  esac
+done
+
+detect_conda_base() {
+  local candidates=(
+    "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}"
+    "${CONDA_PREFIX:-}"
+    "${HOME}/miniconda3"
+    "${HOME}/miniforge3"
+    "${HOME}/anaconda3"
+    "/opt/conda"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    [[ -n "${candidate}" ]] || continue
+    if [[ -x "${candidate}/bin/conda" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+detect_default_python_runtime() {
+  local conda_base="$1"
+  [[ -n "${conda_base}" ]] || return 1
+  local candidates=(omicverse analysis base)
+  local name
+  for name in "${candidates[@]}"; do
+    if [[ "${name}" == "base" && -x "${conda_base}/bin/python" ]]; then
+      printf '%s\n' "base"
+      return 0
+    fi
+    if [[ -x "${conda_base}/envs/${name}/bin/python" ]]; then
+      printf '%s\n' "${name}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+detect_default_r_runtime() {
+  local conda_base="$1"
+  if [[ -n "${conda_base}" ]]; then
+    local candidates=(bioconductor r-bio base)
+    local name
+    for name in "${candidates[@]}"; do
+      if [[ "${name}" == "base" && -x "${conda_base}/bin/Rscript" ]]; then
+        printf '%s\n' "base"
+        return 0
+      fi
+      if [[ -x "${conda_base}/envs/${name}/bin/Rscript" ]]; then
+        printf '%s\n' "${name}"
+        return 0
+      fi
+    done
+  fi
+  if command -v Rscript >/dev/null 2>&1; then
+    printf '%s\n' "__system__"
+    return 0
+  fi
+  return 1
+}
 
 prompt_default() {
   local var_name="$1"
   local prompt_text="$2"
   local default_value="$3"
   local current_value="${!var_name:-}"
+  if [[ "${INSTALL_INTERACTIVE}" -ne 1 ]]; then
+    if [[ -n "${current_value}" ]]; then
+      return
+    fi
+    printf -v "${var_name}" "%s" "${default_value}"
+    return
+  fi
   if [[ -n "${current_value}" ]]; then
     printf "%s [%s]: " "${prompt_text}" "${current_value}"
     read -r input || true
@@ -52,6 +134,8 @@ BLUEPRINT_REVIEWER_MAX_TURNS=${BLUEPRINT_REVIEWER_MAX_TURNS}
 BLUEPRINT_EXECUTOR_SANDBOX_MODE=${BLUEPRINT_EXECUTOR_SANDBOX_MODE}
 BLUEPRINT_EXECUTOR_MAX_CONCURRENT_RUNS=${BLUEPRINT_EXECUTOR_MAX_CONCURRENT_RUNS}
 BLUEPRINT_EXECUTOR_CONDA_BASE=${BLUEPRINT_EXECUTOR_CONDA_BASE}
+BLUEPRINT_DEFAULT_PYTHON_RUNTIME=${BLUEPRINT_DEFAULT_PYTHON_RUNTIME}
+BLUEPRINT_DEFAULT_R_RUNTIME=${BLUEPRINT_DEFAULT_R_RUNTIME}
 BLUEPRINT_EXECUTOR_HOST_ROOT_READONLY=${BLUEPRINT_EXECUTOR_HOST_ROOT_READONLY}
 BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS=${BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS}
 MANAGER_WEBSEARCH_ENABLED=${MANAGER_WEBSEARCH_ENABLED}
@@ -71,14 +155,27 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +a
 fi
 
+if [[ -z "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" ]]; then
+  BLUEPRINT_EXECUTOR_CONDA_BASE="$(detect_conda_base 2>/dev/null || true)"
+fi
+if [[ -z "${BLUEPRINT_DEFAULT_PYTHON_RUNTIME:-}" ]]; then
+  BLUEPRINT_DEFAULT_PYTHON_RUNTIME="$(detect_default_python_runtime "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" 2>/dev/null || true)"
+fi
+if [[ -z "${BLUEPRINT_DEFAULT_R_RUNTIME:-}" ]]; then
+  BLUEPRINT_DEFAULT_R_RUNTIME="$(detect_default_r_runtime "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" 2>/dev/null || true)"
+fi
+
 printf "Blueprint RE installer\n"
 printf "Root: %s\n\n" "${ROOT_DIR}"
-
-prompt_default BLUEPRINT_DEEPSEEK_API_KEY "DeepSeek API key" "${BLUEPRINT_DEEPSEEK_API_KEY:-}"
-if [[ -z "${BLUEPRINT_DEEPSEEK_API_KEY:-}" ]]; then
-  echo "DeepSeek API key is required." >&2
-  exit 1
+printf "This installer can finish deployment without API keys.\n"
+printf "You can configure DeepSeek / Tavily later in the UI or by editing .env.\n\n"
+if [[ "${INSTALL_INTERACTIVE}" -eq 1 ]]; then
+  printf "Mode: interactive\n\n"
+else
+  printf "Mode: non-interactive defaults (pass --interactive to edit values during install)\n\n"
 fi
+
+prompt_default BLUEPRINT_DEEPSEEK_API_KEY "DeepSeek API key (optional for first install)" "${BLUEPRINT_DEEPSEEK_API_KEY:-}"
 
 prompt_default BLUEPRINT_DEEPSEEK_API_BASE_URL "DeepSeek Anthropic-compatible base URL" "${BLUEPRINT_DEEPSEEK_API_BASE_URL:-https://api.deepseek.com/anthropic}"
 prompt_default BLUEPRINT_PI_DEEPSEEK_BASE_URL "DeepSeek native base URL for Pi executor" "${BLUEPRINT_PI_DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
@@ -94,6 +191,8 @@ prompt_default BLUEPRINT_DEFAULT_WORKER_TYPE "Default worker type" "${BLUEPRINT_
 prompt_default BLUEPRINT_EXECUTOR_SANDBOX_MODE "Executor sandbox mode" "${BLUEPRINT_EXECUTOR_SANDBOX_MODE:-bwrap}"
 prompt_default BLUEPRINT_EXECUTOR_MAX_CONCURRENT_RUNS "Max concurrent executor runs" "${BLUEPRINT_EXECUTOR_MAX_CONCURRENT_RUNS:-3}"
 prompt_default BLUEPRINT_EXECUTOR_CONDA_BASE "Conda base path" "${BLUEPRINT_EXECUTOR_CONDA_BASE:-/home/${USER}/miniconda3}"
+prompt_default BLUEPRINT_DEFAULT_PYTHON_RUNTIME "Default Python runtime" "${BLUEPRINT_DEFAULT_PYTHON_RUNTIME:-}"
+prompt_default BLUEPRINT_DEFAULT_R_RUNTIME "Default R runtime" "${BLUEPRINT_DEFAULT_R_RUNTIME:-}"
 prompt_default BLUEPRINT_EXECUTOR_HOST_ROOT_READONLY "Host root read-only" "${BLUEPRINT_EXECUTOR_HOST_ROOT_READONLY:-true}"
 prompt_default BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS "Extra read-only binds (comma-separated)" "${BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS:-/home/${USER}/.nvm,/home/${USER}/.local}"
 prompt_default MANAGER_WEBSEARCH_ENABLED "Enable manager web search (true/false)" "${MANAGER_WEBSEARCH_ENABLED:-false}"
@@ -121,6 +220,9 @@ write_env_file
 
 echo
 echo "Wrote ${ENV_FILE}"
+echo "Detected conda base: ${BLUEPRINT_EXECUTOR_CONDA_BASE:-<none>}"
+echo "Detected default Python runtime: ${BLUEPRINT_DEFAULT_PYTHON_RUNTIME:-<none>}"
+echo "Detected default R runtime: ${BLUEPRINT_DEFAULT_R_RUNTIME:-<none>}"
 echo "Starting full deploy..."
 
 bash "${ROOT_DIR}/scripts/deploy_user_systemd.sh"
@@ -129,3 +231,4 @@ echo
 echo "Install complete."
 echo "Frontend: http://127.0.0.1:13001"
 echo "Backend:  http://127.0.0.1:18001"
+echo "API keys can be added later in the workspace settings page or by editing ${ENV_FILE}."

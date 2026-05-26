@@ -138,6 +138,10 @@ class ProjectService:
             (root / relative).mkdir(parents=True, exist_ok=True)
 
         now = utc_now()
+        runtime_preferences = ProjectRuntimePreferences(
+            python_runtime=self.settings.default_python_runtime,
+            r_runtime=self.settings.default_r_runtime,
+        )
         state = ProjectState(
             project_id=project_id,
             name=name,
@@ -146,6 +150,7 @@ class ProjectService:
             current_goal=current_goal,
             created_at=now,
             updated_at=now,
+            runtime_preferences=runtime_preferences,
         )
         store = GraphStore(root)
         store.save_project_state(state)
@@ -155,8 +160,8 @@ class ProjectService:
                 metadata={
                     "schema_version": self.settings.schema_version,
                     "runtime_preferences": state.runtime_preferences.model_dump(),
-                    "default_conda_env": None,
-                    "default_r_env": None,
+                    "default_conda_env": state.runtime_preferences.python_runtime,
+                    "default_r_env": state.runtime_preferences.r_runtime,
                 }
             )
         )

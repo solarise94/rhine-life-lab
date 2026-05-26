@@ -7,6 +7,7 @@ import {
   ChatSessionMessageRecord,
   ChatSessionSummary,
   ChatUploadResponse,
+  ManagerAutoState,
   CreateProjectPayload,
   Proposal,
   ProjectFiles,
@@ -202,10 +203,27 @@ export const api = {
   getChatSession(projectId: string, sessionId: string) {
     return request<{ session: ChatSessionDetail }>(`/projects/${projectId}/chat-sessions/${sessionId}`);
   },
-  saveChatSession(projectId: string, sessionId: string, messages: ChatSessionMessageRecord[], summary?: string) {
+  saveChatSession(
+    projectId: string,
+    sessionId: string,
+    messages: ChatSessionMessageRecord[],
+    summary?: string,
+    baseRevision?: number,
+  ) {
     return request<{ session: ChatSessionDetail }>(`/projects/${projectId}/chat-sessions/${sessionId}`, {
       method: "PUT",
-      body: JSON.stringify({ messages, summary: summary ?? null }),
+      body: JSON.stringify({ messages, summary: summary ?? null, base_revision: baseRevision ?? null }),
+    });
+  },
+  appendChatSessionMessages(
+    projectId: string,
+    sessionId: string,
+    messages: ChatSessionMessageRecord[],
+    dedupeIds: string[] = [],
+  ) {
+    return request<{ session: ChatSessionDetail }>(`/projects/${projectId}/chat-sessions/${sessionId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ messages, dedupe_ids: dedupeIds }),
     });
   },
   deleteChatSession(projectId: string, sessionId: string) {
@@ -250,6 +268,7 @@ export const api = {
     projectId: string,
     sessionMessages: ChatSessionMessageRecord[],
     thinkingEffort: "low" | "medium" | "high" = "medium",
+    sessionId?: string | null,
   ) {
     return request<{
       compact_id: string;
@@ -264,6 +283,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({
         message: "/compact",
+        session_id: sessionId ?? null,
         context: {},
         thinking_effort: thinkingEffort,
         messages: [],
@@ -301,12 +321,14 @@ export const api = {
     onEvent?: (event: ChatStreamEvent) => void,
     signal?: AbortSignal,
     context: ChatRequestContext = {},
+    sessionId?: string | null,
   ) {
     const response = await fetch(`${API_BASE}/projects/${projectId}/chat-stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         message,
+        session_id: sessionId ?? null,
         context,
         thinking_effort: thinkingEffort,
         messages,
@@ -362,11 +384,37 @@ export const api = {
     thinkingEffort: "low" | "medium" | "high" = "medium",
     messages: ChatHistoryMessage[] = [],
     context: ChatRequestContext = {},
+    sessionId?: string | null,
   ) {
     return request<{ job_id: string; status: string }>(`/projects/${projectId}/chat-jobs`, {
       method: "POST",
-      body: JSON.stringify({ message, context, thinking_effort: thinkingEffort, messages }),
+      body: JSON.stringify({ message, session_id: sessionId ?? null, context, thinking_effort: thinkingEffort, messages }),
     });
+  },
+  getManagerAuto(projectId: string, sessionId?: string | null) {
+    const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+    return request<{ state: ManagerAutoState; is_owner: boolean; btw_mode: boolean }>(`/projects/${projectId}/manager-auto${query}`);
+  },
+  enableManagerAuto(projectId: string, sessionId: string, mode: "continuous" | "once" = "continuous") {
+    return request<{ state: ManagerAutoState }>(`/projects/${projectId}/manager-auto`, {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId, mode }),
+    });
+  },
+  stopManagerAuto(projectId: string, sessionId: string, reason = "user_off", message = "Auto mode 已关闭。") {
+    return request<{ state: ManagerAutoState }>(`/projects/${projectId}/manager-auto/stop`, {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId, reason, message }),
+    });
+  },
+  addManagerAutoDirective(projectId: string, sessionId: string, text: string, messageId?: string | null) {
+    return request<{ directive: unknown; wake_event: Record<string, unknown> | null; state: ManagerAutoState }>(
+      `/projects/${projectId}/manager-auto/directives`,
+      {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId, text, message_id: messageId ?? null, trigger_wake: true }),
+      },
+    );
   },
   getChatJob(projectId: string, jobId: string) {
     return request<{

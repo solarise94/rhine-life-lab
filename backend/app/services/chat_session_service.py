@@ -4,22 +4,29 @@ import re
 from uuid import uuid4
 
 from app.models.chat import ChatSession, ChatSessionMessage, ChatSessionSummary
+from app.services.manager_auto_service import ManagerAutoService
 from app.services.project_service import ProjectService
 from app.services.utils import utc_now
 
 
 class ChatSessionService:
-    def __init__(self, project_service: ProjectService) -> None:
+    def __init__(self, project_service: ProjectService, manager_auto_service: ManagerAutoService | None = None) -> None:
         self.project_service = project_service
+        self.manager_auto_service = manager_auto_service
 
     def list_sessions(self, project_id: str) -> list[ChatSessionSummary]:
         sessions = self.project_service.graph_store(project_id).load_chat_sessions()
+        auto_state = self.manager_auto_service.get_state(project_id) if self.manager_auto_service else None
         return [
             ChatSessionSummary(
                 session_id=session.session_id,
                 summary=session.summary,
                 created_at=session.created_at,
                 updated_at=session.updated_at,
+                revision=session.revision,
+                auto_owner=bool(auto_state and auto_state.enabled and auto_state.owner_session_id == session.session_id),
+                auto_mode_state=(auto_state.state if auto_state and auto_state.enabled and auto_state.owner_session_id == session.session_id else None),
+                btw_mode=bool(auto_state and auto_state.enabled and auto_state.owner_session_id and auto_state.owner_session_id != session.session_id),
                 message_count=len(session.messages),
             )
             for session in sorted(sessions, key=lambda item: item.updated_at, reverse=True)
@@ -36,18 +43,19 @@ class ChatSessionService:
                 summary=(summary or "新会话").strip() or "新会话",
                 created_at=now,
                 updated_at=now,
+                revision=0,
                 messages=[],
             )
             sessions.append(session)
             store.save_chat_sessions(sessions)
-            return session
+            return self._decorate_session(project_id, session)
 
     def get_session(self, project_id: str, session_id: str) -> ChatSession:
         sessions = self.project_service.graph_store(project_id).load_chat_sessions()
         session = next((item for item in sessions if item.session_id == session_id), None)
         if not session:
             raise ValueError(f"Chat session not found: {session_id}")
-        return session
+        return self._decorate_session(project_id, session)
 
     def save_session(
         self,
@@ -55,6 +63,7 @@ class ChatSessionService:
         session_id: str,
         messages: list[ChatSessionMessage],
         summary: str | None = None,
+        base_revision: int | None = None,
     ) -> ChatSession:
         lock = self.project_service.lock_for(project_id)
         with lock:
@@ -63,11 +72,42 @@ class ChatSessionService:
             session = next((item for item in sessions if item.session_id == session_id), None)
             if not session:
                 raise ValueError(f"Chat session not found: {session_id}")
-            session.messages = messages
-            session.summary = self._derive_summary(messages, summary or session.summary)
+            session.messages = self._merge_messages(session.messages, messages) if base_revision is not None and base_revision != session.revision else messages
+            session.summary = self._derive_summary(session.messages, summary or session.summary)
             session.updated_at = utc_now()
+            session.revision += 1
             store.save_chat_sessions(sessions)
-            return session
+            return self._decorate_session(project_id, session)
+
+    def append_messages(
+        self,
+        project_id: str,
+        session_id: str,
+        messages: list[ChatSessionMessage],
+        dedupe_ids: list[str] | None = None,
+    ) -> ChatSession:
+        lock = self.project_service.lock_for(project_id)
+        with lock:
+            store = self.project_service.graph_store(project_id)
+            sessions = store.load_chat_sessions()
+            session = next((item for item in sessions if item.session_id == session_id), None)
+            if not session:
+                raise ValueError(f"Chat session not found: {session_id}")
+            existing_ids = {item.id for item in session.messages}
+            dedupe = set(dedupe_ids or [])
+            appended = False
+            for message in messages:
+                if message.id in existing_ids or message.id in dedupe:
+                    continue
+                session.messages.append(message)
+                existing_ids.add(message.id)
+                appended = True
+            if appended:
+                session.summary = self._derive_summary(session.messages, session.summary)
+                session.updated_at = utc_now()
+                session.revision += 1
+                store.save_chat_sessions(sessions)
+            return self._decorate_session(project_id, session)
 
     def delete_session(self, project_id: str, session_id: str) -> None:
         lock = self.project_service.lock_for(project_id)
@@ -86,3 +126,23 @@ class ChatSessionService:
             return fallback.strip() or "新会话"
         compact = re.sub(r"\s+", " ", first_user_message).strip()
         return compact[:40] + ("…" if len(compact) > 40 else "")
+
+    @staticmethod
+    def _merge_messages(existing: list[ChatSessionMessage], incoming: list[ChatSessionMessage]) -> list[ChatSessionMessage]:
+        merged = {item.id: item for item in existing}
+        order = [item.id for item in existing]
+        for item in incoming:
+            if item.id not in merged:
+                order.append(item.id)
+            merged[item.id] = item
+        return [merged[item_id] for item_id in order if item_id in merged]
+
+    def _decorate_session(self, project_id: str, session: ChatSession) -> ChatSession:
+        if self.manager_auto_service is None:
+            return session
+        auto_state = self.manager_auto_service.get_state(project_id)
+        decorated = session.model_copy(deep=True)
+        decorated.auto_owner = bool(auto_state.enabled and auto_state.owner_session_id == session.session_id)
+        decorated.auto_mode_state = auto_state.state if decorated.auto_owner and auto_state.enabled else None
+        decorated.btw_mode = bool(auto_state.enabled and auto_state.owner_session_id and auto_state.owner_session_id != session.session_id)
+        return decorated

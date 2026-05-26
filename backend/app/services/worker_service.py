@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 import json
 import logging
 from pathlib import Path
@@ -25,6 +26,7 @@ from app.models.executor import (
     RuntimeBindings,
 )
 from app.models.graph import Asset, Claim, Module, ReportItem, RunRecord
+from app.models.manager_auto import ManagerWakeEvent
 from app.models.output_contracts import CardOutputSpec
 from app.models.runs import (
     ExpectedOutput,
@@ -43,6 +45,7 @@ from app.services.executor_validation_service import ExecutorValidationService
 from app.services.library_registry_service import LibraryRegistryService
 from app.services.manifest_service import ManifestService
 from app.services.module_group_state_service import ModuleGroupStateService
+from app.services.manager_wake_service import ManagerWakeService
 from app.services.project_service import ProjectService
 from app.services.runtime_approval_service import RuntimeApprovalService
 from app.services.utils import atomic_write_json, utc_now
@@ -124,10 +127,12 @@ class WorkerService:
         manifest_service: ManifestService,
         runtime_approval_service: RuntimeApprovalService,
         library_registry_service: LibraryRegistryService | None = None,
+        manager_wake_service: ManagerWakeService | None = None,
     ) -> None:
         self.project_service = project_service
         self.manifest_service = manifest_service
         self.runtime_approval_service = runtime_approval_service
+        self.manager_wake_service = manager_wake_service
         self.library_registry_service = library_registry_service or LibraryRegistryService(
             project_service,
             AppConfigService(project_service.settings),
@@ -449,6 +454,17 @@ class WorkerService:
             process.kill()
         self._append_event(project_id, run_id, run.card_id, event_type="run_cancelled", message=message)
         self._commit_run_stage(project_id, run_id, "cancelled")
+        self._enqueue_wake_event(
+            project_id,
+            kind="card_run_cancelled",
+            source_type="run",
+            source_id=run_id,
+            card_id=run.card_id,
+            run_id=run_id,
+            severity="info",
+            message=message,
+            idempotency_key=f"run:{run_id}:cancelled",
+        )
         return {"run_id": run_id, "status": "cancelled", "summary": message}
 
     def cleanup_run(self, project_id: str, run_id: str, reason: str | None = None) -> dict:
@@ -782,6 +798,18 @@ class WorkerService:
                 if dependency_issue_message:
                     self._set_run_attention(project_id, run_id, card_id, dependency_issue_message)
                 self._commit_run_stage(project_id, run_id, "failed")
+                self._enqueue_wake_event(
+                    project_id,
+                    kind="card_run_failed",
+                    source_type="run",
+                    source_id=run_id,
+                    card_id=card_id,
+                    run_id=run_id,
+                    severity="warning",
+                    message=message,
+                    payload_summary={"reason": "timeout"},
+                    idempotency_key=f"run:{run_id}:failed_timeout",
+                )
                 return
 
             if return_code != 0 and not recovered_from_timeout:
@@ -796,6 +824,18 @@ class WorkerService:
                 if dependency_issue_message:
                     self._set_run_attention(project_id, run_id, card_id, dependency_issue_message)
                 self._commit_run_stage(project_id, run_id, "failed")
+                self._enqueue_wake_event(
+                    project_id,
+                    kind="card_run_failed",
+                    source_type="run",
+                    source_id=run_id,
+                    card_id=card_id,
+                    run_id=run_id,
+                    severity="warning",
+                    message=message,
+                    payload_summary={"reason": "return_code", "return_code": return_code},
+                    idempotency_key=f"run:{run_id}:failed_return_code",
+                )
                 return
 
             if not audit_ok:
@@ -803,6 +843,17 @@ class WorkerService:
                 self._append_event(project_id, run_id, card_id, event_type="run_failed", message=message)
                 self._set_run_status(project_id, run_id, card_id, status="failed", summary=message, progress_note=None)
                 self._commit_run_stage(project_id, run_id, "failed")
+                self._enqueue_wake_event(
+                    project_id,
+                    kind="run_filesystem_audit_failed",
+                    source_type="run",
+                    source_id=run_id,
+                    card_id=card_id,
+                    run_id=run_id,
+                    severity="warning",
+                    message=message,
+                    idempotency_key=f"run:{run_id}:filesystem_audit_failed",
+                )
                 return
 
             if dependency_issue_message:
@@ -810,6 +861,18 @@ class WorkerService:
                 self._set_run_status(project_id, run_id, card_id, status="failed", summary=dependency_issue_message, progress_note=None)
                 self._set_run_attention(project_id, run_id, card_id, dependency_issue_message)
                 self._commit_run_stage(project_id, run_id, "failed")
+                self._enqueue_wake_event(
+                    project_id,
+                    kind="runtime_dependency_missing",
+                    source_type="run",
+                    source_id=run_id,
+                    card_id=card_id,
+                    run_id=run_id,
+                    severity="warning",
+                    message=dependency_issue_message,
+                    payload_summary=dependency_issue_payload,
+                    idempotency_key=f"run:{run_id}:dependency_missing",
+                )
                 return
 
             valid, errors = self.manifest_service.validate_manifest(project_id, run_id)
@@ -818,6 +881,18 @@ class WorkerService:
                 self._append_event(project_id, run_id, card_id, event_type="run_failed", message=message)
                 self._set_run_status(project_id, run_id, card_id, status="failed", summary=message, progress_note=None)
                 self._commit_run_stage(project_id, run_id, "failed")
+                self._enqueue_wake_event(
+                    project_id,
+                    kind="manifest_validation_failed",
+                    source_type="run",
+                    source_id=run_id,
+                    card_id=card_id,
+                    run_id=run_id,
+                    severity="warning",
+                    message=message,
+                    payload_summary={"errors": errors},
+                    idempotency_key=f"run:{run_id}:manifest_validation_failed",
+                )
                 return
 
             manifest = self.manifest_service.load_manifest(project_id, run_id)
@@ -846,6 +921,18 @@ class WorkerService:
                 )
                 self._set_run_status(project_id, run_id, card_id, status="failed", summary=message, progress_note=None)
                 self._commit_run_stage(project_id, run_id, "failed")
+                self._enqueue_wake_event(
+                    project_id,
+                    kind="executor_validation_failed",
+                    source_type="run",
+                    source_id=run_id,
+                    card_id=card_id,
+                    run_id=run_id,
+                    severity="warning",
+                    message=message,
+                    payload_summary=validation_report.model_dump(),
+                    idempotency_key=f"run:{run_id}:executor_validation_failed",
+                )
                 return
             validation_warning_message = None
             if validation_report.status == "warn":
@@ -881,6 +968,18 @@ class WorkerService:
                 payload=validation_report.model_dump(),
             )
             self._commit_run_stage(project_id, run_id, "reviewed")
+            self._enqueue_wake_event(
+                project_id,
+                kind="card_run_reviewed",
+                source_type="run",
+                source_id=run_id,
+                card_id=card_id,
+                run_id=run_id,
+                severity="info",
+                message=f"Reviewer 已接受 {card_id} 的运行结果。",
+                payload_summary={"summary": summary},
+                idempotency_key=f"run:{run_id}:reviewed",
+            )
         except Exception as exc:
             message = f"执行器运行后处理失败：{exc}"
             logger.exception("Post-run handling failed for project=%s run=%s", project_id, run_id)
@@ -888,6 +987,17 @@ class WorkerService:
                 self._append_event(project_id, run_id, card_id, event_type="run_failed", message=message)
                 self._set_run_status(project_id, run_id, card_id, status="failed", summary=message, progress_note=None)
                 self._commit_run_stage(project_id, run_id, "failed")
+                self._enqueue_wake_event(
+                    project_id,
+                    kind="card_run_failed",
+                    source_type="run",
+                    source_id=run_id,
+                    card_id=card_id,
+                    run_id=run_id,
+                    severity="warning",
+                    message=message,
+                    idempotency_key=f"run:{run_id}:postrun_exception",
+                )
             except Exception as secondary_exc:
                 logger.exception("Failed to persist post-run failure state for project=%s run=%s", project_id, run_id)
                 self._write_run_fatal_error(
@@ -1152,6 +1262,18 @@ class WorkerService:
                     event_type="run_blocked_on_manager",
                     message=message,
                     payload=event.model_dump(),
+                )
+                self._enqueue_wake_event(
+                    project_id,
+                    kind="card_needs_manager",
+                    source_type="run",
+                    source_id=run_id,
+                    card_id=card_id,
+                    run_id=run_id,
+                    severity="warning",
+                    message=message,
+                    payload_summary=event.model_dump(),
+                    idempotency_key=f"run:{run_id}:needs_manager:{sha256(message.encode('utf-8')).hexdigest()[:12]}",
                 )
         else:
             message = event.summary or event.message or "Executor final report received."
@@ -1821,6 +1943,40 @@ class WorkerService:
                 )
             except Exception:
                 logger.exception("Failed to persist git commit failure event for project=%s run=%s", project_id, run_id)
+
+    def _enqueue_wake_event(
+        self,
+        project_id: str,
+        *,
+        kind: str,
+        source_type: str,
+        source_id: str,
+        message: str,
+        idempotency_key: str,
+        card_id: str | None = None,
+        run_id: str | None = None,
+        job_id: str | None = None,
+        severity: str = "info",
+        payload_summary: dict[str, Any] | None = None,
+    ) -> None:
+        if self.manager_wake_service is None:
+            return
+        event = ManagerWakeEvent(
+            wake_id=f"wake_{uuid4().hex[:12]}",
+            project_id=project_id,
+            kind=kind,
+            source_type=source_type,
+            source_id=source_id,
+            card_id=card_id,
+            run_id=run_id,
+            job_id=job_id,
+            severity=severity,
+            message=message,
+            payload_summary=payload_summary or {},
+            idempotency_key=idempotency_key,
+            created_at=utc_now(),
+        )
+        self.manager_wake_service.enqueue(event)
 
     def _mark_project_needs_git_repair(self, project_id: str, reason: str) -> None:
         root = self.project_service.project_path(project_id)

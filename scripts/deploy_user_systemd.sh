@@ -8,11 +8,82 @@ APP_RELEASE_DIR="${HOME}/.local/share/blueprint-re"
 FRONTEND_RELEASE_DIR="${APP_RELEASE_DIR}/frontend-release"
 NODE_BIN="$(command -v node)"
 
+detect_conda_base() {
+  local candidates=(
+    "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}"
+    "${CONDA_PREFIX:-}"
+    "${HOME}/miniconda3"
+    "${HOME}/miniforge3"
+    "${HOME}/anaconda3"
+    "/opt/conda"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    [[ -n "${candidate}" ]] || continue
+    if [[ -x "${candidate}/bin/conda" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+detect_default_python_runtime() {
+  local conda_base="$1"
+  local env_name="${BLUEPRINT_DEFAULT_PYTHON_RUNTIME:-}"
+  if [[ -n "${env_name}" ]]; then
+    printf '%s\n' "${env_name}"
+    return 0
+  fi
+  [[ -n "${conda_base}" ]] || return 1
+  local candidates=(omicverse analysis base)
+  local name
+  for name in "${candidates[@]}"; do
+    if [[ "${name}" == "base" && -x "${conda_base}/bin/python" ]]; then
+      printf '%s\n' "base"
+      return 0
+    fi
+    if [[ -x "${conda_base}/envs/${name}/bin/python" ]]; then
+      printf '%s\n' "${name}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+detect_default_r_runtime() {
+  local conda_base="$1"
+  local env_name="${BLUEPRINT_DEFAULT_R_RUNTIME:-}"
+  if [[ -n "${env_name}" ]]; then
+    printf '%s\n' "${env_name}"
+    return 0
+  fi
+  if [[ -n "${conda_base}" ]]; then
+    local candidates=(bioconductor r-bio base)
+    local name
+    for name in "${candidates[@]}"; do
+      if [[ "${name}" == "base" && -x "${conda_base}/bin/Rscript" ]]; then
+        printf '%s\n' "base"
+        return 0
+      fi
+      if [[ -x "${conda_base}/envs/${name}/bin/Rscript" ]]; then
+        printf '%s\n' "${name}"
+        return 0
+      fi
+    done
+  fi
+  if command -v Rscript >/dev/null 2>&1; then
+    printf '%s\n' "__system__"
+    return 0
+  fi
+  return 1
+}
+
 mkdir -p "${SYSTEMD_USER_DIR}" "${APP_ENV_DIR}" "${APP_RELEASE_DIR}"
 
 install_runtime_dependencies() {
   local missing_runtime=0
-  for command_name in bwrap python3 npm; do
+  for command_name in bwrap python3 npm git systemctl; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
       missing_runtime=1
     fi
@@ -27,19 +98,23 @@ install_runtime_dependencies() {
   if command -v apt-get >/dev/null 2>&1; then
     if [[ "$(id -u)" -eq 0 ]]; then
       apt-get update
-      apt-get install -y bubblewrap python3-venv nodejs npm
+      apt-get install -y bubblewrap python3 python3-venv python3-pip nodejs npm git systemd
     elif command -v sudo >/dev/null 2>&1; then
       sudo apt-get update
-      sudo apt-get install -y bubblewrap python3-venv nodejs npm
+      sudo apt-get install -y bubblewrap python3 python3-venv python3-pip nodejs npm git systemd
     else
       echo "Missing runtime dependencies from deploy/runtime-dependencies.yml and sudo is unavailable." >&2
       exit 1
     fi
+  else
+    echo "Automatic dependency installation currently supports apt-based hosts only." >&2
+    echo "Install the required packages from deploy/runtime-dependencies.yml, then rerun this script." >&2
+    exit 1
   fi
 }
 
 check_runtime_dependencies() {
-  for command_name in bwrap python3 npm; do
+  for command_name in bwrap python3 npm git systemctl; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
       echo "Missing required runtime command: ${command_name}. See deploy/runtime-dependencies.yml." >&2
       exit 1
@@ -60,14 +135,43 @@ check_runtime_dependencies() {
   fi
 }
 
+check_node_version() {
+  local node_major
+  node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+  if [[ -z "${node_major}" || "${node_major}" -lt 18 ]]; then
+    echo "Node.js 18+ is required. Current node: $(node -v 2>/dev/null || echo missing)" >&2
+    exit 1
+  fi
+}
+
+check_systemd_user() {
+  if ! systemctl --user show-environment >/dev/null 2>&1; then
+    echo "systemd --user is not available in the current session." >&2
+    echo "Log into a full user session or enable a user manager before deploying Blueprint RE." >&2
+    exit 1
+  fi
+}
+
 install_runtime_dependencies
 check_runtime_dependencies
+check_node_version
+check_systemd_user
 
 if [[ -f "${ROOT_DIR}/.env" ]]; then
   set -a
   # shellcheck disable=SC1091
   source "${ROOT_DIR}/.env"
   set +a
+fi
+
+CONDA_BASE=""
+DEFAULT_PYTHON_RUNTIME=""
+DEFAULT_R_RUNTIME=""
+if CONDA_BASE="$(detect_conda_base 2>/dev/null)"; then
+  DEFAULT_PYTHON_RUNTIME="$(detect_default_python_runtime "${CONDA_BASE}" 2>/dev/null || true)"
+  DEFAULT_R_RUNTIME="$(detect_default_r_runtime "${CONDA_BASE}" 2>/dev/null || true)"
+else
+  DEFAULT_R_RUNTIME="$(detect_default_r_runtime "" 2>/dev/null || true)"
 fi
 
 python3 -m venv "${ROOT_DIR}/.venv/backend"
@@ -82,6 +186,9 @@ BLUEPRINT_FRONTEND_ORIGIN=http://127.0.0.1:13001
 BLUEPRINT_MANAGER_BACKEND=pi
 BLUEPRINT_PI_MANAGER_URL=http://127.0.0.1:18002
 BLUEPRINT_BACKEND_API_BASE_URL=http://127.0.0.1:18001/api
+BLUEPRINT_DEFAULT_PYTHON_RUNTIME=${BLUEPRINT_DEFAULT_PYTHON_RUNTIME:-${DEFAULT_PYTHON_RUNTIME}}
+BLUEPRINT_DEFAULT_R_RUNTIME=${BLUEPRINT_DEFAULT_R_RUNTIME:-${DEFAULT_R_RUNTIME}}
+BLUEPRINT_EXECUTOR_CONDA_BASE=${BLUEPRINT_EXECUTOR_CONDA_BASE:-${CONDA_BASE}}
 EOF
 env | grep '^BLUEPRINT_' | sort || true
 } > "${APP_ENV_DIR}/backend.env"
@@ -164,3 +271,12 @@ systemctl --user restart blueprint-re-frontend.service
 echo "Blueprint RE deployed."
 echo "Frontend: http://127.0.0.1:13001"
 echo "Backend:  http://127.0.0.1:18001"
+if [[ -n "${CONDA_BASE}" ]]; then
+  echo "Conda base: ${CONDA_BASE}"
+fi
+if [[ -n "${DEFAULT_PYTHON_RUNTIME}" ]]; then
+  echo "Default Python runtime: ${DEFAULT_PYTHON_RUNTIME}"
+fi
+if [[ -n "${DEFAULT_R_RUNTIME}" ]]; then
+  echo "Default R runtime: ${DEFAULT_R_RUNTIME}"
+fi

@@ -319,6 +319,7 @@ async function callBackend(baseUrl, token, path, options = {}) {
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${token}`,
+      ...(options.sessionId ? { "x-blueprint-session-id": options.sessionId } : {}),
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
     signal: options.signal,
@@ -831,7 +832,7 @@ function buildToolReport(toolName, details) {
   return null;
 }
 
-async function callLoggedTool(toolName, toolCallId, projectId, baseUrl, token, path, options = {}, signal) {
+async function callLoggedTool(toolName, toolCallId, projectId, baseUrl, token, path, options = {}, signal, sessionId = null) {
   const startedAt = Date.now();
   logManagerEvent("tool_backend_start", {
     project_id: projectId,
@@ -842,7 +843,7 @@ async function callLoggedTool(toolName, toolCallId, projectId, baseUrl, token, p
     request_bytes: payloadSize(options.body),
   });
   try {
-    const payload = await callBackend(baseUrl, token, path, { ...options, signal });
+    const payload = await callBackend(baseUrl, token, path, { ...options, signal, sessionId });
     logManagerEvent("tool_backend_done", {
       project_id: projectId,
       tool_name: toolName,
@@ -865,7 +866,9 @@ async function callLoggedTool(toolName, toolCallId, projectId, baseUrl, token, p
 }
 
 function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
-  const { project_id: projectId, backend_api_base_url: baseUrl, internal_tool_token: token } = request;
+  const { project_id: projectId, backend_api_base_url: baseUrl, internal_tool_token: token, session_id: sessionId } = request;
+  const autoMode = request.auto_mode && typeof request.auto_mode === "object" ? request.auto_mode : {};
+  const btwMode = Boolean(autoMode.btw_mode);
   const tools = [
     {
       name: "inspect_project_summary",
@@ -882,6 +885,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           `/internal/manager-tools/projects/${projectId}/inspect`,
           {},
           signal,
+          sessionId,
         );
         return toolTextResult("inspect_project_summary", payload);
       },
@@ -910,6 +914,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             body: params,
           },
           signal,
+          sessionId,
         );
         return toolTextResult("find_cards", payload);
       },
@@ -940,6 +945,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             body: params,
           },
           signal,
+          sessionId,
         );
         return toolTextResult("find_assets", payload);
       },
@@ -961,6 +967,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           `/internal/manager-tools/projects/${projectId}/cards/${encodeURIComponent(params.card_id)}/detail`,
           {},
           signal,
+          sessionId,
         );
         return toolTextResult("get_card_detail", payload);
       },
@@ -982,6 +989,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           `/internal/manager-tools/projects/${projectId}/assets/${encodeURIComponent(params.asset_id)}/detail`,
           {},
           signal,
+          sessionId,
         );
         return toolTextResult("get_asset_detail", payload);
       },
@@ -1008,6 +1016,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             body: params,
           },
           signal,
+          sessionId,
         );
         return toolTextResult("plan_card_write", payload);
       },
@@ -1027,6 +1036,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           `/internal/manager-tools/projects/${projectId}/context`,
           {},
           signal,
+          sessionId,
         );
         return toolTextResult("get_project_context", payload);
       },
@@ -1046,6 +1056,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           `/internal/manager-tools/projects/${projectId}/data-assets`,
           {},
           signal,
+          sessionId,
         );
         return toolTextResult("list_data_assets", payload);
       },
@@ -1073,7 +1084,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body: params,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("list_project_memory", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "list_project_memory_failed", tool_name: "list_project_memory" });
@@ -1105,7 +1117,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body: params,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("write_project_memory", { ok: true, ...payload });
         } catch (error) {
           return toolErrorResult(error, { error_type: "write_project_memory_failed", tool_name: "write_project_memory" });
@@ -1149,7 +1162,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body: params,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("create_card", { ok: true, ...payload });
         } catch (error) {
           return toolErrorResult(error, { error_type: "create_card_failed", tool_name: "create_card" });
@@ -1194,7 +1208,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("update_card", { ok: true, ...payload });
         } catch (error) {
           return toolErrorResult(error, { error_type: "update_card_failed", tool_name: "update_card" });
@@ -1225,7 +1240,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("delete_card", { ok: true, ...payload });
         } catch (error) {
           return toolErrorResult(error, { error_type: "delete_card_failed", tool_name: "delete_card" });
@@ -1275,7 +1291,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body: params,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("configure_card_execution", { ok: true, ...payload });
         } catch (error) {
           return toolErrorResult(error, { error_type: "configure_card_execution_failed", tool_name: "configure_card_execution" });
@@ -1307,7 +1324,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body: params,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("install_runtime_dependencies", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "install_runtime_dependencies_failed", tool_name: "install_runtime_dependencies" });
@@ -1334,7 +1352,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               method: "GET",
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("get_runtime_dependency_install_status", payload);
         } catch (error) {
           return toolErrorResult(error, {
@@ -1368,7 +1387,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body: params,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("start_card_run", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "start_card_run_failed", tool_name: "start_card_run" });
@@ -1398,7 +1418,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body: params,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("stop_card_run", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "stop_card_run_failed", tool_name: "stop_card_run" });
@@ -1429,7 +1450,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body: params,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("rerun_card", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "rerun_card_failed", tool_name: "rerun_card" });
@@ -1459,7 +1481,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body: params,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("review_card_run", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "review_card_run_failed", tool_name: "review_card_run" });
@@ -1493,7 +1516,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body: params,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("cleanup_run_history", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "cleanup_run_history_failed", tool_name: "cleanup_run_history" });
@@ -1524,7 +1548,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body: params,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("search_card_templates", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "search_card_templates_failed", tool_name: "search_card_templates" });
@@ -1555,7 +1580,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body: params,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("save_card_template", payload);
         } catch (error) {
           return toolErrorResult(error, { error_type: "save_card_template_failed", tool_name: "save_card_template" });
@@ -1597,7 +1623,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
               body: params,
             },
             signal,
-          );
+          sessionId,
+        );
           return toolTextResult("instantiate_card_template", { ok: true, ...payload });
         } catch (error) {
           return toolErrorResult(error, { error_type: "instantiate_card_template_failed", tool_name: "instantiate_card_template" });
@@ -1621,6 +1648,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           `/internal/manager-tools/projects/${projectId}/assets/${params.asset_id}`,
           {},
           signal,
+          sessionId,
         );
         return toolTextResult("read_result_asset", payload);
       },
@@ -1640,6 +1668,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           `/internal/manager-tools/projects/${projectId}/skill-library`,
           {},
           signal,
+          sessionId,
         );
         return toolTextResult("list_skill_library", payload);
       },
@@ -1667,6 +1696,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             body: params,
           },
           signal,
+          sessionId,
         );
         return toolTextResult("search_skill_library", payload);
       },
@@ -1688,6 +1718,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           `/internal/manager-tools/projects/${projectId}/skill-library/${encodeURIComponent(params.skill_id)}`,
           {},
           signal,
+          sessionId,
         );
         return toolTextResult("get_skill_library_item", payload);
       },
@@ -1707,6 +1738,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           `/internal/manager-tools/projects/${projectId}/mcp-library`,
           {},
           signal,
+          sessionId,
         );
         return toolTextResult("list_mcp_library", payload);
       },
@@ -1734,6 +1766,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             body: params,
           },
           signal,
+          sessionId,
         );
         return toolTextResult("search_mcp_library", payload);
       },
@@ -1755,13 +1788,30 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           `/internal/manager-tools/projects/${projectId}/mcp-library/${encodeURIComponent(params.entry_id)}`,
           {},
           signal,
+          sessionId,
         );
         return toolTextResult("get_mcp_library_item", payload);
       },
     },
   ];
+  const mutatingTools = new Set([
+    "create_card",
+    "update_card",
+    "delete_card",
+    "configure_card_execution",
+    "install_runtime_dependencies",
+    "start_card_run",
+    "stop_card_run",
+    "rerun_card",
+    "review_card_run",
+    "cleanup_run_history",
+    "save_card_template",
+    "instantiate_card_template",
+    "write_project_memory",
+  ]);
+  let visibleTools = btwMode ? tools.filter((tool) => !mutatingTools.has(tool.name)) : tools;
   if (runtimeConfig.websearchEnabled && runtimeConfig.tavilyApiKey) {
-    tools.push(
+    visibleTools.push(
       {
         name: "web_search",
         label: "Search the web",
@@ -1815,7 +1865,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
       },
     );
   }
-  return tools;
+  return visibleTools;
 }
 
 function extractText(message) {
@@ -2311,11 +2361,18 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
   });
   const userEnvelope = {
     user_request: payload.message,
+    session_id: payload.session_id || null,
+    auto_mode: payload.auto_mode || { enabled: false, btw_mode: false },
     selected_context: payload.context || {},
     script_preference_guidance: scriptPreferenceGuidance(payload.context?.script_preference),
     runtime_preference_guidance: runtimePreferenceGuidance(payload.context || {}),
     instruction:
-      "Answer naturally. Decide whether project tools are needed. If you change the blueprint, remember that cards are the blueprint units and use create_card, update_card, delete_card, configure_card_execution, run-control, or template tools directly as needed. After ok:false tool results, correct and retry when the fix is clear.",
+      (payload.auto_mode?.btw_mode
+        ? "This session is in /btw mode. Answer questions, inspect status, explain logs, and use read-only tools only. Do not mutate blueprint or execution state."
+        : "Answer naturally. Decide whether project tools are needed. If you change the blueprint, remember that cards are the blueprint units and use create_card, update_card, delete_card, configure_card_execution, run-control, or template tools directly as needed. After ok:false tool results, correct and retry when the fix is clear.") +
+      (payload.auto_mode?.enabled && !payload.auto_mode?.btw_mode
+        ? " Auto mode is enabled. Keep the project moving, prefer safe routine fixes, and treat pending directives as higher-priority steering."
+        : ""),
   };
   const abortController = new AbortController();
   const timeoutId = setTimeout(() => {

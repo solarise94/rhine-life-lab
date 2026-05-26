@@ -110,11 +110,13 @@ export function SettingsPanels({
   project,
   pythonRuntimes,
   rRuntimes,
+  readOnly = false,
 }: {
   projectId: string;
   project: ProjectState;
   pythonRuntimes: PythonRuntime[];
   rRuntimes: RRuntime[];
+  readOnly?: boolean;
 }) {
   const appSettingsQuery = useAppSettings();
   const updateAppSettingsMutation = useUpdateAppSettingsMutation();
@@ -229,6 +231,7 @@ export function SettingsPanels({
           <label className="settings-field">
             <span>脚本偏好</span>
             <select value={scriptPreference} onChange={(event) => setScriptPreference(event.target.value as ScriptPreference)}>
+              
               <option value="auto">让 Manager 询问</option>
               <option value="prefer_python">偏好 Python</option>
               <option value="prefer_r">偏好 R</option>
@@ -237,7 +240,7 @@ export function SettingsPanels({
           </label>
           <label className="settings-field">
             <span>Python runtime</span>
-            <select value={pythonRuntime} onChange={(event) => setPythonRuntime(event.target.value)}>
+            <select value={pythonRuntime} onChange={(event) => setPythonRuntime(event.target.value)} disabled={readOnly}>
               {pythonRuntimes.map((item) => (
                 <option key={`${item.manager}:${item.name}`} value={item.name}>
                   {item.label}
@@ -247,7 +250,7 @@ export function SettingsPanels({
           </label>
           <label className="settings-field">
             <span>R runtime</span>
-            <select value={rRuntime} onChange={(event) => setRRuntime(event.target.value)}>
+            <select value={rRuntime} onChange={(event) => setRRuntime(event.target.value)} disabled={readOnly}>
               {rRuntimes.map((item) => (
                 <option key={`${item.manager}:${item.name}`} value={item.name}>
                   {item.label}
@@ -257,7 +260,7 @@ export function SettingsPanels({
           </label>
         </div>
         <div className="settings-actions">
-          <button type="button" className="settings-button" onClick={saveRuntimeSettings}>
+          <button type="button" className="settings-button" disabled={readOnly} onClick={saveRuntimeSettings}>
             保存运行时偏好
           </button>
         </div>

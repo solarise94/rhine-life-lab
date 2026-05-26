@@ -15,6 +15,12 @@ class CreateChatSessionRequest(BaseModel):
 class SaveChatSessionRequest(BaseModel):
     messages: list[ChatSessionMessage] = Field(default_factory=list)
     summary: str | None = None
+    base_revision: int | None = None
+
+
+class AppendChatSessionMessagesRequest(BaseModel):
+    messages: list[ChatSessionMessage] = Field(default_factory=list)
+    dedupe_ids: list[str] = Field(default_factory=list)
 
 
 @router.get("")
@@ -51,7 +57,28 @@ def save_chat_session(
     chat_session_service: ChatSessionService = Depends(get_chat_session_service),
 ) -> dict:
     try:
-        return {"session": chat_session_service.save_session(project_id, session_id, request.messages, request.summary)}
+        return {
+            "session": chat_session_service.save_session(
+                project_id,
+                session_id,
+                request.messages,
+                request.summary,
+                base_revision=request.base_revision,
+            )
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{session_id}/messages")
+def append_chat_session_messages(
+    project_id: str,
+    session_id: str,
+    request: AppendChatSessionMessagesRequest,
+    chat_session_service: ChatSessionService = Depends(get_chat_session_service),
+) -> dict:
+    try:
+        return {"session": chat_session_service.append_messages(project_id, session_id, request.messages, request.dedupe_ids)}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

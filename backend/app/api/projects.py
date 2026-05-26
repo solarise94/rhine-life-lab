@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import Literal
 
-from app.api.deps import get_flow_service, get_library_registry_service, get_project_service
+from app.api.deps import get_flow_service, get_library_registry_service, get_manager_auto_service, get_project_service
 from app.services.flow_service import FlowService
 from app.services.library_registry_service import LibraryRegistryService
+from app.services.manager_auto_service import ManagerAutoService
 from app.services.project_service import ProjectService
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -44,8 +45,14 @@ def delete_project(project_id: str, project_service: ProjectService = Depends(ge
 
 
 @router.get("/{project_id}")
-def get_project(project_id: str, project_service: ProjectService = Depends(get_project_service)) -> dict:
-    return project_service.get_project_snapshot(project_id)
+def get_project(
+    project_id: str,
+    project_service: ProjectService = Depends(get_project_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+) -> dict:
+    snapshot = project_service.get_project_snapshot(project_id)
+    snapshot["manager_auto"] = manager_auto_service.get_state(project_id).model_dump()
+    return snapshot
 
 
 @router.get("/{project_id}/runtime-preferences")

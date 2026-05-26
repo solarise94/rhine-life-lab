@@ -23,6 +23,7 @@ class ChatHistoryMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: str | None = None
     context: ChatContext = Field(default_factory=ChatContext)
     thinking_effort: Literal["low", "medium", "high"] = "medium"
     messages: list[ChatHistoryMessage] = Field(default_factory=list)
@@ -93,6 +94,10 @@ class ChatSession(BaseModel):
     summary: str
     created_at: str
     updated_at: str
+    revision: int = 0
+    auto_owner: bool | None = None
+    auto_mode_state: str | None = None
+    btw_mode: bool | None = None
     messages: list[ChatSessionMessage] = Field(default_factory=list)
 
 
@@ -101,4 +106,8 @@ class ChatSessionSummary(BaseModel):
     summary: str
     created_at: str
     updated_at: str
+    revision: int = 0
+    auto_owner: bool | None = None
+    auto_mode_state: str | None = None
+    btw_mode: bool | None = None
     message_count: int = 0

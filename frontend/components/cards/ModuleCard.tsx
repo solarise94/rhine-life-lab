@@ -21,6 +21,7 @@ export function ModuleCard({
   projectId,
   card,
   active,
+  readOnly = false,
   onSelect,
   onStartRun,
   onReviewRun,
@@ -41,6 +42,7 @@ export function ModuleCard({
   projectId: string;
   card: Card;
   active: boolean;
+  readOnly?: boolean;
   onSelect: (card: Card) => void;
   onStartRun: (card: Card) => void;
   onReviewRun: (card: Card) => void;
@@ -174,7 +176,7 @@ export function ModuleCard({
                       <select
                         value={selectedWorkerType ?? configuredWorkers[0]?.worker_type ?? ""}
                         onChange={(e) => onSelectWorker?.(card, e.target.value)}
-                        disabled={!configuredWorkers.length}
+                        disabled={readOnly || !configuredWorkers.length}
                       >
                         {configuredWorkers.length ? (
                           configuredWorkers.map((item) => (
@@ -192,7 +194,7 @@ export function ModuleCard({
                       <select
                         value={selectedPythonRuntime ?? "__global__"}
                         onChange={(e) => onSelectPythonRuntime?.(card, e.target.value === "__global__" ? undefined : e.target.value)}
-                        disabled={!pythonRuntimes.length}
+                        disabled={readOnly || !pythonRuntimes.length}
                       >
                         <option value="__global__">跟随全局 ({globalRuntimeLabel})</option>
                         {pythonRuntimes.map((item) => (
@@ -207,7 +209,7 @@ export function ModuleCard({
                       <select
                         value={selectedRRuntime ?? "__global__"}
                         onChange={(e) => onSelectRRuntime?.(card, e.target.value === "__global__" ? undefined : e.target.value)}
-                        disabled={!rRuntimes.length}
+                        disabled={readOnly || !rRuntimes.length}
                       >
                         <option value="__global__">跟随全局 ({globalRRuntimeLabel})</option>
                         {rRuntimes.map((item) => (
@@ -217,7 +219,7 @@ export function ModuleCard({
                         ))}
                       </select>
                     </label>
-                    <button className="btn primary" style={{ width: "100%" }} onClick={(e) => { e.stopPropagation(); onStartRun(card); }}>
+                    <button className="btn primary" disabled={readOnly} style={{ width: "100%" }} onClick={(e) => { e.stopPropagation(); onStartRun(card); }}>
                       <Play size={14} /> 开始执行
                     </button>
                   </div>
@@ -248,7 +250,7 @@ export function ModuleCard({
                   </div>
                 ) : null}
                 {card.status === "needs_review" && card.linked_runs.length ? (
-                  <button className="btn success" style={{ width: "100%", marginTop: 12 }} onClick={(e) => { e.stopPropagation(); onReviewRun(card); }}>
+                  <button className="btn success" disabled={readOnly} style={{ width: "100%", marginTop: 12 }} onClick={(e) => { e.stopPropagation(); onReviewRun(card); }}>
                     <CheckCircle2 size={14} /> 人工接受旧结果
                   </button>
                 ) : null}

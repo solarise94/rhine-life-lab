@@ -21,7 +21,7 @@ import remarkGfm from "remark-gfm";
 import { api, ChatHistoryMessage, ChatRequestContext, ChatStreamEvent, ChatTokenUsage } from "@/lib/api";
 import { useChatSession, useModifyProposalMutation } from "@/lib/hooks";
 import { queryKeys } from "@/lib/query-keys";
-import { Asset, ChatSessionDetail, ChatSessionMessageRecord, ProjectSnapshot, Proposal } from "@/lib/types";
+import { Asset, ChatSessionDetail, ChatSessionMessageRecord, ManagerAutoState, ProjectSnapshot, Proposal } from "@/lib/types";
 import { Attachment, EMPTY_ATTACHMENTS, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 
 type ThinkingEffort = "low" | "medium" | "high";
@@ -85,9 +85,28 @@ interface MentionState {
   end: number;
 }
 
+interface SlashCommandState {
+  query: string;
+  start: number;
+  end: number;
+}
+
+interface SlashCommandOption {
+  command: string;
+  label: string;
+}
+
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const MANAGER_CONTEXT_WINDOW_TOKENS = 1_000_000;
 const CHARS_PER_TOKEN_ESTIMATE = 3.6;
+const SLASH_COMMANDS: SlashCommandOption[] = [
+  { command: "/compact", label: "压缩当前会话上下文" },
+  { command: "/auto", label: "开启自动推进模式" },
+  { command: "/auto once", label: "只自动推进一轮" },
+  { command: "/auto status", label: "查看自动模式状态" },
+  { command: "/auto off", label: "关闭自动模式" },
+  { command: "/auto stop", label: "停止当前自动推进" },
+];
 
 const DEFAULT_MANAGER_MESSAGE: ChatMessage = {
   id: "welcome",
@@ -309,6 +328,36 @@ function normalizeSessionMessages(messages: ChatSessionMessageRecord[]): ChatMes
     });
 }
 
+function mergeChatMessagesById(current: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
+  const merged = new Map(current.map((message) => [message.id, message]));
+  for (const message of incoming) {
+    const existing = merged.get(message.id);
+    merged.set(
+      message.id,
+      existing
+        ? {
+            ...existing,
+            ...message,
+            attachments: message.attachments ?? existing.attachments,
+            tools: message.tools ?? existing.tools,
+            timeline: message.timeline?.length ? message.timeline : existing.timeline,
+            tokenUsage: message.tokenUsage ?? existing.tokenUsage,
+          }
+        : message,
+    );
+  }
+  const ordered: ChatMessage[] = [];
+  for (const message of current) {
+    ordered.push(merged.get(message.id) ?? message);
+  }
+  for (const message of incoming) {
+    if (!current.some((item) => item.id === message.id)) {
+      ordered.push(message);
+    }
+  }
+  return ordered.filter((message, index, list) => list.findIndex((item) => item.id === message.id) === index);
+}
+
 function serializeSessionMessages(messages: ChatMessage[]): ChatSessionMessageRecord[] {
   return messages.map((message) => ({
     id: message.id,
@@ -403,12 +452,14 @@ function upsertSessionSummary(
 export function ManagerChatPanel({
   projectId,
   sessionId,
+  managerAuto,
   proposals = [],
   mentionableAssets,
   onRefresh,
 }: {
   projectId: string;
   sessionId?: string | null;
+  managerAuto?: ManagerAutoState;
   proposals?: Proposal[];
   mentionableAssets: Asset[];
   onRefresh: () => Promise<void>;
@@ -417,7 +468,6 @@ export function ManagerChatPanel({
   const [draft, setDraft] = useState("");
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>("medium");
   const [pendingDependencyJobs, setPendingDependencyJobs] = useState<PendingDependencyInstallJob[]>([]);
-  const chatSessionQuery = useChatSession(projectId, sessionId ?? undefined, Boolean(sessionId));
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -425,6 +475,8 @@ export function ManagerChatPanel({
   const [editDraft, setEditDraft] = useState("");
   const [mentionState, setMentionState] = useState<MentionState | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
+  const [slashCommandState, setSlashCommandState] = useState<SlashCommandState | null>(null);
+  const [slashCommandIndex, setSlashCommandIndex] = useState(0);
   const [effortMenuOpen, setEffortMenuOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -438,7 +490,13 @@ export function ManagerChatPanel({
   const currentSessionIdRef = useRef<string | null>(sessionId ?? null);
   const hydratedSessionIdRef = useRef<string | null>(null);
   const lastSavedSignatureRef = useRef("[]");
+  const sessionRevisionRef = useRef(0);
   const notifiedDependencyJobsRef = useRef<Set<string>>(new Set());
+  const isAutoOwnerSession = Boolean(managerAuto?.enabled && sessionId && managerAuto.owner_session_id === sessionId);
+  const isBtwSession = Boolean(managerAuto?.enabled && sessionId && managerAuto.owner_session_id && managerAuto.owner_session_id !== sessionId);
+  const chatSessionQuery = useChatSession(projectId, sessionId ?? undefined, Boolean(sessionId), {
+    refetchInterval: managerAuto?.enabled && !activeStreamControllerRef.current ? 4_000 : false,
+  });
 
   const attachments = useWorkspaceUiStore((s) => s.attachmentsByProject[projectId] ?? EMPTY_ATTACHMENTS);
   const scriptPreference = useWorkspaceUiStore((s) => s.scriptPreferenceByProject?.[projectId] ?? "auto");
@@ -457,11 +515,12 @@ export function ManagerChatPanel({
       targetSessionId: string;
       nextMessages: ChatMessage[];
     }) =>
-      api.saveChatSession(projectId, targetSessionId, serializeSessionMessages(nextMessages)),
+      api.saveChatSession(projectId, targetSessionId, serializeSessionMessages(nextMessages), undefined, sessionRevisionRef.current),
     onSuccess: ({ session }, variables) => {
       if (currentSessionIdRef.current !== variables.targetSessionId) {
         return;
       }
+      sessionRevisionRef.current = session.revision;
       lastSavedSignatureRef.current = sessionMessagesSignature(variables.nextMessages);
       queryClient.setQueryData(queryKeys.chatSession(projectId, session.session_id), { session });
       queryClient.setQueryData(
@@ -540,6 +599,10 @@ export function ManagerChatPanel({
   }, [mentionState?.query]);
 
   useEffect(() => {
+    setSlashCommandIndex(0);
+  }, [slashCommandState?.query]);
+
+  useEffect(() => {
     if (!effortMenuOpen) return;
     function handlePointerDown(event: MouseEvent) {
       if (!effortMenuRef.current?.contains(event.target as Node)) {
@@ -567,6 +630,8 @@ export function ManagerChatPanel({
     setEditDraft("");
     setMentionState(null);
     setMentionIndex(0);
+    setSlashCommandState(null);
+    setSlashCommandIndex(0);
     setEffortMenuOpen(false);
     setPendingDependencyJobs([]);
     notifiedDependencyJobsRef.current = new Set();
@@ -578,16 +643,18 @@ export function ManagerChatPanel({
       return;
     }
     const nextMessages = normalizeSessionMessages(chatSessionQuery.data.session.messages);
-    const nextSignature = sessionMessagesSignature(nextMessages);
+    const mergedMessages = mergeChatMessagesById(messages, nextMessages);
+    const nextSignature = sessionMessagesSignature(mergedMessages);
+    sessionRevisionRef.current = chatSessionQuery.data.session.revision;
     if (hydratedSessionIdRef.current === sessionId && nextSignature === lastSavedSignatureRef.current) {
       lastSavedSignatureRef.current = nextSignature;
       return;
     }
     hydratedSessionIdRef.current = sessionId;
     lastSavedSignatureRef.current = nextSignature;
-    setMessages(nextMessages);
+    setMessages(mergedMessages);
     setError(null);
-  }, [chatSessionQuery.data, sessionId]);
+  }, [chatSessionQuery.data, messages, sessionId]);
 
   useEffect(() => {
     if (!sessionId || hydratedSessionIdRef.current !== sessionId || typeof window === "undefined") {
@@ -759,8 +826,25 @@ export function ManagerChatPanel({
       .slice(0, 8);
   }, [mentionState?.query, mentionableAssets]);
 
+  const slashCommandOptions = useMemo(() => {
+    const query = slashCommandState?.query.trim().toLowerCase() ?? "";
+    return SLASH_COMMANDS.filter(
+      (item) =>
+        !query ||
+        item.command.toLowerCase().includes(query) ||
+        item.label.toLowerCase().includes(query),
+    );
+  }, [slashCommandState?.query]);
+
   function syncMentionState(text: string, selectionStart: number | null) {
     setMentionState(getMentionState(text, selectionStart ?? text.length));
+  }
+
+  function syncComposerState(text: string, selectionStart: number | null) {
+    const cursor = selectionStart ?? text.length;
+    const nextSlashState = getSlashCommandState(text, cursor);
+    setSlashCommandState(nextSlashState);
+    setMentionState(nextSlashState ? null : getMentionState(text, cursor));
   }
 
   function insertMention(asset: Asset) {
@@ -776,6 +860,27 @@ export function ManagerChatPanel({
     addAttachment(projectId, { type: "asset", id: asset.asset_id, label: asset.title });
     setMentionState(null);
     setMentionIndex(0);
+    window.requestAnimationFrame(() => {
+      current.focus();
+      current.setSelectionRange(nextCursor, nextCursor);
+    });
+  }
+
+  function insertSlashCommand(option: SlashCommandOption) {
+    const activeSlash = slashCommandState;
+    const current = textareaRef.current;
+    if (!activeSlash || !current) {
+      setDraft(option.command);
+      window.requestAnimationFrame(() => {
+        current?.focus();
+      });
+      return;
+    }
+    const nextDraft = `${draft.slice(0, activeSlash.start)}${option.command}${draft.slice(activeSlash.end)}`;
+    const nextCursor = activeSlash.start + option.command.length;
+    setDraft(nextDraft);
+    setSlashCommandState(null);
+    setSlashCommandIndex(0);
     window.requestAnimationFrame(() => {
       current.focus();
       current.setSelectionRange(nextCursor, nextCursor);
@@ -1308,7 +1413,7 @@ export function ManagerChatPanel({
     setBusy(true);
     setError(null);
     try {
-      const response = await api.compactChatSession(projectId, serializeSessionMessages(messages), thinkingEffort);
+      const response = await api.compactChatSession(projectId, serializeSessionMessages(messages), thinkingEffort, sessionId);
       finalizeCompaction({
         id: compactId,
         kind: "compact",
@@ -1342,6 +1447,10 @@ export function ManagerChatPanel({
   async function submit() {
     if (!draft.trim() || busy || !sessionId) return;
     const text = draft.trim();
+    if (text === "/auto" || text === "/auto once" || text === "/auto status" || text === "/auto off" || text === "/auto stop") {
+      await handleAutoCommand(text);
+      return;
+    }
     if (text === "/compact") {
       await runManualCompaction();
       return;
@@ -1369,12 +1478,38 @@ export function ManagerChatPanel({
         state: "done",
         timeline: [{ id: `${userMessageId}_text`, kind: "text", content: text, status: "done" }],
       },
-      { id: managerMessageId, role: "manager", content: "", thinking: "", thinkingState: "idle", tools: [], state: "thinking", timeline: [] },
+      ...(isAutoOwnerSession && managerAuto?.enabled
+        ? []
+        : [{ id: managerMessageId, role: "manager" as const, content: "", thinking: "", thinkingState: "idle" as const, tools: [], state: "thinking" as const, timeline: [] }]),
     ]);
     setDraft("");
     setBusy(true);
     setError(null);
     stopRequestedRef.current = false;
+    if (isAutoOwnerSession && managerAuto?.enabled) {
+      try {
+        const response = await api.addManagerAutoDirective(projectId, sessionId, text, userMessageId);
+        clearAttachments(projectId);
+        const ack = response.wake_event ? "已收到追加指令，AUTO 正在处理。" : "已加入 auto 指令队列，将在下一次唤醒时处理。";
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: managerMessageId,
+            role: "manager",
+            content: ack,
+            state: "done",
+            timeline: [{ id: `${managerMessageId}_text`, kind: "text", content: ack, status: "done" }],
+          },
+        ]);
+        setDraft("");
+        await onRefresh();
+      } catch (nextError) {
+        setError(nextError instanceof Error ? nextError.message : "追加 auto 指令失败。");
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     const abortController = new AbortController();
     activeStreamControllerRef.current = abortController;
     try {
@@ -1464,6 +1599,7 @@ export function ManagerChatPanel({
         },
         abortController.signal,
         chatContext,
+        sessionId,
       );
       if (streamError) {
         throw new Error(streamError);
@@ -1506,6 +1642,67 @@ export function ManagerChatPanel({
     }
     stopRequestedRef.current = true;
     activeStreamControllerRef.current.abort(new Error("user_aborted"));
+  }
+
+  async function handleAutoCommand(command: string) {
+    if (!sessionId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (command === "/auto" || command === "/auto once") {
+        const mode = command === "/auto once" ? "once" : "continuous";
+        await api.enableManagerAuto(projectId, sessionId, mode);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: createMessageId(),
+            role: "manager",
+            content:
+              mode === "once"
+                ? "Auto once 已开启。我会处理当前阻塞或启动下一张 ready card，完成后自动退出。"
+                : "Auto mode 已开启。我会在 card 完成、依赖任务结束或出现可处理阻塞时继续推进，并把每次动作写在这里。",
+            state: "done",
+            timeline: [],
+          },
+        ]);
+      } else if (command === "/auto status") {
+        const response = await api.getManagerAuto(projectId, sessionId);
+        const state = response.state;
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: createMessageId(),
+            role: "manager",
+            content: `AUTO ${state.enabled ? "ON" : "OFF"} · state=${state.state} · chain=${state.chain_count}/${state.max_chain_count}${state.stop_message ? ` · ${state.stop_message}` : ""}`,
+            state: "done",
+            timeline: [],
+          },
+        ]);
+      } else if (command === "/auto off" || command === "/auto stop") {
+        await api.stopManagerAuto(
+          projectId,
+          sessionId,
+          command === "/auto stop" ? "user_stop" : "user_off",
+          command === "/auto stop" ? "因用户停止任务，已退出 auto 模式。" : "Auto mode 已关闭。",
+        );
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: createMessageId(),
+            role: "manager",
+            content: command === "/auto stop" ? "因用户停止任务，已退出 auto 模式。" : "Auto mode 已关闭。",
+            state: "done",
+            timeline: [],
+          },
+        ]);
+      }
+      setDraft("");
+      await onRefresh();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Auto mode 命令失败。");
+    } finally {
+      setBusy(false);
+    }
   }
 
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
@@ -1628,12 +1825,13 @@ export function ManagerChatPanel({
       title: `DeepSeek context window: ${sourceLabel}，当前约 ${historyTokens.toLocaleString()} tokens，剩余约 ${remainingTokens.toLocaleString()} tokens。上下文窗口 ${contextLimit.toLocaleString()} tokens。`,
     };
   }, [attachments, draft, messages]);
-  const slashCommandHint = draft.trim().startsWith("/")
-    ? {
-        command: "/compact",
-        label: "压缩当前会话上下文",
-      }
-    : null;
+  const autoStateLabel = useMemo(() => {
+    if (!managerAuto?.enabled) return null;
+    if (managerAuto.state === "running") return "AUTO 运行中";
+    if (managerAuto.state === "thinking") return "AUTO 推进中";
+    if (managerAuto.state === "stopped") return "AUTO 已停止";
+    return "AUTO 已开启";
+  }, [managerAuto]);
   const displayMessages = messages.length ? messages : [DEFAULT_MANAGER_MESSAGE];
   const sessionLoadError = chatSessionQuery.error instanceof Error ? chatSessionQuery.error.message : null;
   const sessionBusy = !sessionId || chatSessionQuery.isLoading;
@@ -1825,18 +2023,22 @@ export function ManagerChatPanel({
         ) : null}
 
         <div className="manager-composer-shell">
-          {slashCommandHint ? (
+          {slashCommandState && slashCommandOptions.length ? (
             <div className="manager-slash-hint">
-              <button
-                type="button"
-                onClick={() => {
-                  setDraft(slashCommandHint.command);
-                  textareaRef.current?.focus();
-                }}
-              >
-                <span className="manager-slash-command">{slashCommandHint.command}</span>
-                <span>{slashCommandHint.label}</span>
-              </button>
+              {slashCommandOptions.map((option, index) => (
+                <button
+                  key={option.command}
+                  type="button"
+                  className={index === slashCommandIndex ? "active" : ""}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    insertSlashCommand(option);
+                  }}
+                >
+                  <span className="manager-slash-command">{option.command}</span>
+                  <span>{option.label}</span>
+                </button>
+              ))}
             </div>
           ) : null}
           <div className="manager-composer">
@@ -1856,10 +2058,32 @@ export function ManagerChatPanel({
               value={draft}
               onChange={(e) => {
                 setDraft(e.target.value);
-                syncMentionState(e.target.value, e.target.selectionStart);
+                syncComposerState(e.target.value, e.target.selectionStart);
               }}
-              placeholder="给 Manager 发消息，或输入 /compact"
+              placeholder="shift + enter 快捷发送，/ 发送特殊指令"
               onKeyDown={(e) => {
+                if (slashCommandState && slashCommandOptions.length) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setSlashCommandIndex((current) => (current + 1) % slashCommandOptions.length);
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setSlashCommandIndex((current) => (current - 1 + slashCommandOptions.length) % slashCommandOptions.length);
+                    return;
+                  }
+                  if (e.key === "Enter" || e.key === "Tab") {
+                    e.preventDefault();
+                    insertSlashCommand(slashCommandOptions[slashCommandIndex] ?? slashCommandOptions[0]);
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setSlashCommandState(null);
+                    return;
+                  }
+                }
                 if (mentionState && mentionOptions.length) {
                   if (e.key === "ArrowDown") {
                     e.preventDefault();
@@ -1888,11 +2112,16 @@ export function ManagerChatPanel({
                 }
               }}
               disabled={sessionBusy || Boolean(sessionLoadError)}
-              onClick={(e) => syncMentionState(e.currentTarget.value, e.currentTarget.selectionStart)}
-              onKeyUp={(e) => syncMentionState(e.currentTarget.value, e.currentTarget.selectionStart)}
+              onClick={(e) => syncComposerState(e.currentTarget.value, e.currentTarget.selectionStart)}
+              onKeyUp={(e) => syncComposerState(e.currentTarget.value, e.currentTarget.selectionStart)}
             />
             <div className="manager-composer-actions">
               <div className="manager-effort-menu" ref={effortMenuRef}>
+                {isAutoOwnerSession && autoStateLabel ? (
+                  <span className={`manager-auto-chip ${managerAuto?.state ?? "idle"}`} title="当前 session 正在持有 auto mode">
+                    {autoStateLabel}
+                  </span>
+                ) : null}
                 <button
                   className={`manager-effort-button ${effortMenuOpen ? "open" : ""}`}
                   type="button"
@@ -1938,12 +2167,13 @@ export function ManagerChatPanel({
                   </button>
                 ) : (
                   <button
-                    className="manager-send-button"
+                    className={`manager-send-button ${isAutoOwnerSession ? "auto-owner" : ""}`}
                     onClick={submit}
                     disabled={!draft.trim() || sessionBusy || Boolean(sessionLoadError)}
                     type="button"
+                    title={isAutoOwnerSession ? "Auto mode 已开启" : "发送"}
                   >
-                    <Send size={16} />
+                    {isAutoOwnerSession ? <Sparkles size={16} /> : <Send size={16} />}
                   </button>
                 )}
               </div>
@@ -2066,6 +2296,20 @@ function getMentionState(text: string, cursor: number): MentionState | null {
   return {
     query,
     start: atIndex,
+    end: cursor,
+  };
+}
+
+function getSlashCommandState(text: string, cursor: number): SlashCommandState | null {
+  const beforeCursor = text.slice(0, cursor);
+  const match = beforeCursor.match(/^\s*[\/\\]([^\s]*)$/);
+  if (!match) {
+    return null;
+  }
+  const prefixLength = beforeCursor.length - match[0].length;
+  return {
+    query: match[1] ?? "",
+    start: prefixLength,
     end: cursor,
   };
 }

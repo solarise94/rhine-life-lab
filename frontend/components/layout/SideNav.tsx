@@ -21,7 +21,7 @@ import { api } from "@/lib/api";
 import { useChatSessions, useProjects } from "@/lib/hooks";
 import { queryKeys } from "@/lib/query-keys";
 import { ScriptPreference, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
-import { ChatSessionSummary, PythonRuntime, RRuntime } from "@/lib/types";
+import { ChatSessionSummary, ManagerAutoState, PythonRuntime, RRuntime } from "@/lib/types";
 
 const primary = [
   { href: "results", label: "结果库", icon: BarChart3 },
@@ -60,6 +60,8 @@ export function SideNav({
   globalPythonRuntime,
   globalRRuntime,
   scriptPreference = "auto",
+  managerAuto,
+  currentChatSessionId,
   onSelectGlobalPythonRuntime,
   onSelectGlobalRRuntime,
   onSelectScriptPreference,
@@ -71,16 +73,20 @@ export function SideNav({
   globalPythonRuntime?: string;
   globalRRuntime?: string;
   scriptPreference?: ScriptPreference;
+  managerAuto?: ManagerAutoState;
+  currentChatSessionId?: string | null;
   onSelectGlobalPythonRuntime?: (runtime: string) => void;
   onSelectGlobalRRuntime?: (runtime: string) => void;
   onSelectScriptPreference?: (preference: ScriptPreference) => void;
 }) {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const sessionsQuery = useChatSessions(projectId);
+  const sessionsQuery = useChatSessions(projectId, {
+    refetchInterval: managerAuto?.enabled ? 6_000 : false,
+  });
   const projectsQuery = useProjects();
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
-  const currentChatSessionId = useWorkspaceUiStore((s) => s.currentChatSessionIdByProject[projectId]);
+  const storedCurrentChatSessionId = useWorkspaceUiStore((s) => s.currentChatSessionIdByProject[projectId]);
   const setCurrentChatSessionId = useWorkspaceUiStore((s) => s.setCurrentChatSessionId);
   const clearAttachments = useWorkspaceUiStore((s) => s.clearAttachments);
   const clearDraftMessage = useWorkspaceUiStore((s) => s.clearDraftMessage);
@@ -104,6 +110,10 @@ export function SideNav({
               summary: session.summary,
               created_at: session.created_at,
               updated_at: session.updated_at,
+              revision: session.revision,
+              auto_owner: session.auto_owner ?? null,
+              auto_mode_state: session.auto_mode_state ?? null,
+              btw_mode: session.btw_mode ?? null,
               message_count: session.messages.length,
             },
             ...(previous?.items ?? []).filter((item) => item.session_id !== session.session_id),
@@ -148,7 +158,7 @@ export function SideNav({
       createSessionMutation.mutate();
       return;
     }
-    if (!currentChatSessionId || !sessions.some((item) => item.session_id === currentChatSessionId)) {
+    if (!(currentChatSessionId ?? storedCurrentChatSessionId) || !sessions.some((item) => item.session_id === (currentChatSessionId ?? storedCurrentChatSessionId))) {
       setCurrentChatSessionId(projectId, sessions[0].session_id);
     }
   }, [
@@ -265,14 +275,21 @@ export function SideNav({
           <div className="nav-session-empty">暂无 session</div>
         ) : null}
         {sessions.map((session) => {
-          const active = currentChatSessionId === session.session_id;
+      const effectiveCurrentSessionId = currentChatSessionId ?? storedCurrentChatSessionId;
+      const active = effectiveCurrentSessionId === session.session_id;
+      const isAutoOwner = Boolean(managerAuto?.enabled && managerAuto.owner_session_id === session.session_id);
+      const isBtw = Boolean(managerAuto?.enabled && managerAuto.owner_session_id && managerAuto.owner_session_id !== session.session_id);
           const title = sessionTitle(session);
           return (
-            <div key={session.session_id} className={`nav-session-item ${active ? "active" : ""}`}>
+            <div key={session.session_id} className={`nav-session-item ${active ? "active" : ""} ${isAutoOwner ? "auto-owner" : ""} ${isBtw ? "btw-session" : ""}`}>
               <button type="button" className="nav-session-main" onClick={() => openSession(session.session_id)} title={session.summary}>
                 <MessageSquareText size={14} />
                 <span className="nav-session-copy">
-                  <strong>{title}</strong>
+                  <strong>
+                    {title}
+                    {isAutoOwner ? <span className={`nav-session-mode-badge ${managerAuto?.state ?? "idle"}`}>AUTO</span> : null}
+                    {!isAutoOwner && isBtw ? <span className="nav-session-mode-badge muted">/btw</span> : null}
+                  </strong>
                   <em>{session.message_count} 条消息 · {formatSessionTime(session.updated_at)}</em>
                 </span>
               </button>

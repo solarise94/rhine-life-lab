@@ -19,6 +19,7 @@ from app.services.manager_planner import DeepSeekManagerPlanner, ManagerPlanDraf
 from app.services.manager_planner import ManagerPlanningError
 from app.services.manager_tools import ManagerToolLayer
 from app.services.library_registry_service import LibraryRegistryService
+from app.services.manager_auto_service import ManagerAutoService
 from app.services.patch_validator import PatchValidator
 from app.services.project_service import ProjectService
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
@@ -38,6 +39,7 @@ class ManagerService:
         worker_service: WorkerService | None = None,
         runtime_dependency_job_service: RuntimeDependencyJobService | None = None,
         library_registry_service: LibraryRegistryService | None = None,
+        manager_auto_service: ManagerAutoService | None = None,
     ) -> None:
         self.project_service = project_service
         self.planner = planner or DeepSeekManagerPlanner()
@@ -45,6 +47,7 @@ class ManagerService:
         self.intent_router = ManagerIntentRouter()
         self.settings = get_settings()
         self.app_config_service = AppConfigService(self.settings)
+        self.manager_auto_service = manager_auto_service
         self.blueprint_tools = ManagerBlueprintTools(
             project_service=self.project_service,
             worker_service=worker_service,
@@ -64,9 +67,11 @@ class ManagerService:
         payload = {
             "project_id": project_id,
             "message": chat_request.message,
+            "session_id": chat_request.session_id,
             "context": chat_request.context.model_dump(),
             "thinking_effort": chat_request.thinking_effort,
             "messages": [item.model_dump() for item in chat_request.messages],
+            "auto_mode": self._auto_payload(project_id, chat_request.session_id),
             "backend_api_base_url": self.settings.backend_api_base_url.rstrip("/"),
             "internal_tool_token": token,
             "manager_config": self.app_config_service.manager_agent_config(include_secrets=True),
@@ -99,9 +104,11 @@ class ManagerService:
         payload = {
             "project_id": project_id,
             "message": chat_request.message,
+            "session_id": chat_request.session_id,
             "context": chat_request.context.model_dump(),
             "thinking_effort": chat_request.thinking_effort,
             "messages": [item.model_dump() for item in chat_request.messages],
+            "auto_mode": self._auto_payload(project_id, chat_request.session_id),
             "backend_api_base_url": self.settings.backend_api_base_url.rstrip("/"),
             "internal_tool_token": token,
             "manager_config": self.app_config_service.manager_agent_config(include_secrets=True),
@@ -150,10 +157,12 @@ class ManagerService:
         payload = {
             "project_id": project_id,
             "message": chat_request.message,
+            "session_id": chat_request.session_id,
             "context": chat_request.context.model_dump(),
             "thinking_effort": chat_request.thinking_effort,
             "messages": [item.model_dump() for item in chat_request.messages],
             "session_messages": [item.model_dump() for item in chat_request.session_messages],
+            "auto_mode": self._auto_payload(project_id, chat_request.session_id),
             "backend_api_base_url": self.settings.backend_api_base_url.rstrip("/"),
             "internal_tool_token": token,
             "manager_config": self.app_config_service.manager_agent_config(include_secrets=True),
@@ -206,6 +215,19 @@ class ManagerService:
             raise ManagerPlanningError("Local manager stub did not return a text response.")
 
         return ChatResponse(message=self.tool_layer.answer(snapshot, request))
+
+    def _auto_payload(self, project_id: str, session_id: str | None) -> dict:
+        if self.manager_auto_service is None:
+            return {"enabled": False, "owner_session_id": None, "btw_mode": False, "state": "idle"}
+        view = self.manager_auto_service.get_view(project_id, session_id)
+        return {
+            "enabled": view.state.enabled,
+            "owner_session_id": view.state.owner_session_id,
+            "btw_mode": view.btw_mode,
+            "state": view.state.state,
+            "mode": view.state.mode,
+            "pending_directives": [item.model_dump() for item in view.state.pending_directives if item.status == "pending"],
+        }
 
     def _save_or_answer(self, project_id: str, snapshot: dict, draft: ManagerPlanDraft) -> ChatResponse:
         if draft.response_type == "proposal":

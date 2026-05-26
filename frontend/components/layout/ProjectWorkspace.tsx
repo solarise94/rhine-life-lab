@@ -8,6 +8,7 @@ import { ApiError, api } from "@/lib/api";
 import {
   useAdvancedGit,
   useAdvancedGraph,
+  useManagerAuto,
   useProjectFiles,
   useProjectReport,
   useProjectResults,
@@ -108,6 +109,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const refreshWorkspace = useWorkspaceRefresh(projectId);
 
   const projectQuery = useProjectSnapshot(projectId);
+  const managerAutoQuery = useManagerAuto(projectId, currentChatSessionId);
   const workOrderQuery = useWorkOrder(projectId, view === "tasks");
   const resultsQuery = useProjectResults(projectId, view === "results");
   const filesQuery = useProjectFiles(projectId, view === "files");
@@ -122,6 +124,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const [lastReportExport, setLastReportExport] = useState<ReportExportResponse | null>(null);
 
   const snapshot = projectQuery.data;
+  const managerAuto = managerAutoQuery.data?.state ?? snapshot?.manager_auto;
+  const autoEnabled = Boolean(managerAuto?.enabled);
+  const autoOwnerSessionId = managerAuto?.owner_session_id ?? null;
+  const autoLocked = autoEnabled;
   const projectRuntimePreferences = snapshot?.project.runtime_preferences;
   const defaultTaskCard = useMemo(
     () =>
@@ -376,6 +382,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
         <ManagerChatPanel
           projectId={projectId}
           sessionId={currentChatSessionId}
+          managerAuto={managerAuto}
           mentionableAssets={snapshot.graph.assets}
           onRefresh={refreshWorkspace}
         />
@@ -385,6 +392,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           workOrder={workOrderQuery.data}
           selectedCardId={selectedCard?.card_id}
           cardInteractionOrder={cardInteractionOrder}
+          readOnly={autoLocked}
           onSelect={(card) => setSelectedCard(projectId, card.card_id)}
           onClearSelection={() => setSelectedCard(projectId, null)}
           onStartRun={handleStartRun}
@@ -397,6 +405,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           workerCapabilities={snapshot.worker_capabilities}
           selectedWorkerByCard={selectedWorkerByProject}
           onSelectWorker={(card, workerType) => {
+            if (autoLocked) return;
             setSelectedWorker(projectId, card.card_id, workerType);
             setNotice(projectId, `Card ${card.card_id} 将使用 ${workerType} 执行。`);
           }}
@@ -407,10 +416,12 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           selectedPythonRuntimeByCard={selectedPythonRuntimeByProject}
           selectedRRuntimeByCard={selectedRRuntimeByProject}
           onSelectPythonRuntime={(card, runtime) => {
+            if (autoLocked) return;
             setSelectedPythonRuntime(projectId, card.card_id, runtime);
             setNotice(projectId, `Card ${card.card_id} Python runtime: ${runtime ? formatRuntime(runtime) : "follow global"}。`);
           }}
           onSelectRRuntime={(card, runtime) => {
+            if (autoLocked) return;
             setSelectedRRuntime(projectId, card.card_id, runtime);
             setNotice(projectId, `Card ${card.card_id} R runtime: ${runtime ? formatRuntime(runtime) : "follow global"}。`);
           }}
@@ -429,19 +440,24 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
         globalPythonRuntime={effectiveGlobalPythonRuntime}
         globalRRuntime={effectiveGlobalRRuntime}
         scriptPreference={effectiveScriptPreference}
+        managerAuto={managerAuto}
+        currentChatSessionId={currentChatSessionId}
         onSelectGlobalPythonRuntime={(runtime) => {
+          if (autoLocked) return;
           const normalizedRuntime = runtime === "__system__" ? undefined : runtime;
           setGlobalPythonRuntime(projectId, normalizedRuntime);
           persistRuntimePreference({ python_runtime: normalizedRuntime ?? null }, "保存 Python runtime 失败。");
           setNotice(projectId, `全局 Python runtime: ${formatRuntime(runtime)}。`);
         }}
         onSelectGlobalRRuntime={(runtime) => {
+          if (autoLocked) return;
           const normalizedRuntime = runtime === "__system__" ? undefined : runtime;
           setGlobalRRuntime(projectId, normalizedRuntime);
           persistRuntimePreference({ r_runtime: normalizedRuntime ?? null }, "保存 R runtime 失败。");
           setNotice(projectId, `全局 R runtime: ${formatRuntime(runtime)}。`);
         }}
         onSelectScriptPreference={(preference) => {
+          if (autoLocked) return;
           setScriptPreference(projectId, preference);
           persistRuntimePreference({ script_preference: preference }, "保存脚本偏好失败。");
           const label =
@@ -511,6 +527,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               projectId={projectId}
               files={filesQuery.data}
               onRefresh={refreshWorkspace}
+              readOnly={autoLocked}
               onPreviewAsset={(asset) => handleOpenAssetPreview(asset.asset_id, "files")}
               onAttachAsset={(asset) => {
                 addAttachment(projectId, { type: "asset", id: asset.asset_id, label: asset.title });
@@ -537,15 +554,18 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               <AdvancedPanels
                 graph={advancedGraphQuery.data?.graph ?? null}
                 gitItems={advancedGitQuery.data?.items ?? []}
+                readOnly={autoLocked}
                 pythonRuntimes={snapshot.python_runtimes ?? []}
                 rRuntimes={snapshot.r_runtimes ?? []}
                 globalPythonRuntime={effectiveGlobalPythonRuntime}
                 globalRRuntime={effectiveGlobalRRuntime}
                 onSelectGlobalPythonRuntime={(runtime) => {
+                  if (autoLocked) return;
                   setGlobalPythonRuntime(projectId, runtime);
                   setNotice(projectId, `全局 Python runtime: ${formatRuntime(runtime)}。`);
                 }}
                 onSelectGlobalRRuntime={(runtime) => {
+                  if (autoLocked) return;
                   setGlobalRRuntime(projectId, runtime);
                   setNotice(projectId, `全局 R runtime: ${formatRuntime(runtime)}。`);
                 }}
@@ -564,6 +584,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               project={snapshot.project}
               pythonRuntimes={snapshot.python_runtimes ?? []}
               rRuntimes={snapshot.r_runtimes ?? []}
+              readOnly={autoLocked}
             />
           ) : null}
         </div>
@@ -575,6 +596,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               <ManagerChatPanel
                 projectId={projectId}
                 sessionId={currentChatSessionId}
+                managerAuto={managerAuto}
                 mentionableAssets={snapshot.graph.assets}
                 onRefresh={refreshWorkspace}
               />
@@ -585,6 +607,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 workOrder={workOrderQuery.data}
                 selectedCardId={selectedCard?.card_id}
                 cardInteractionOrder={cardInteractionOrder}
+                readOnly={autoLocked}
                 onSelect={(card) => setSelectedCard(projectId, card.card_id)}
                 onClearSelection={() => setSelectedCard(projectId, null)}
                 onStartRun={handleStartRun}
@@ -597,6 +620,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 workerCapabilities={snapshot.worker_capabilities}
                 selectedWorkerByCard={selectedWorkerByProject}
                 onSelectWorker={(card, workerType) => {
+                  if (autoLocked) return;
                   setSelectedWorker(projectId, card.card_id, workerType);
                   setNotice(projectId, `Card ${card.card_id} 将使用 ${workerType} 执行。`);
                 }}
@@ -607,10 +631,12 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 selectedPythonRuntimeByCard={selectedPythonRuntimeByProject}
                 selectedRRuntimeByCard={selectedRRuntimeByProject}
                 onSelectPythonRuntime={(card, runtime) => {
+                  if (autoLocked) return;
                   setSelectedPythonRuntime(projectId, card.card_id, runtime);
                   setNotice(projectId, `Card ${card.card_id} Python runtime: ${runtime ? formatRuntime(runtime) : "follow global"}。`);
                 }}
                 onSelectRRuntime={(card, runtime) => {
+                  if (autoLocked) return;
                   setSelectedRRuntime(projectId, card.card_id, runtime);
                   setNotice(projectId, `Card ${card.card_id} R runtime: ${runtime ? formatRuntime(runtime) : "follow global"}。`);
                 }}
@@ -653,6 +679,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   projectId={projectId}
                   files={filesQuery.data}
                   onRefresh={refreshWorkspace}
+                  readOnly={autoLocked}
                   onPreviewAsset={(asset) => handleOpenAssetPreview(asset.asset_id, "files")}
                   onAttachAsset={(asset) => {
                     addAttachment(projectId, { type: "asset", id: asset.asset_id, label: asset.title });
@@ -666,6 +693,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   <AdvancedPanels
                     graph={advancedGraphQuery.data?.graph ?? null}
                     gitItems={advancedGitQuery.data?.items ?? []}
+                    readOnly={autoLocked}
                     pythonRuntimes={snapshot.python_runtimes ?? []}
                     rRuntimes={snapshot.r_runtimes ?? []}
                     globalPythonRuntime={effectiveGlobalPythonRuntime}
@@ -693,6 +721,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   project={snapshot.project}
                   pythonRuntimes={snapshot.python_runtimes ?? []}
                   rRuntimes={snapshot.r_runtimes ?? []}
+                  readOnly={autoLocked}
                 />
               ) : null}
             </div>

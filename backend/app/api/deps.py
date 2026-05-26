@@ -7,7 +7,10 @@ from app.services.manager_service import ManagerService
 from app.services.chat_job_service import ChatJobService
 from app.services.flow_service import FlowService
 from app.services.library_registry_service import LibraryRegistryService
+from app.services.manager_auto_service import ManagerAutoService
 from app.services.manifest_service import ManifestService
+from app.services.manager_wake_processor import ManagerWakeProcessor
+from app.services.manager_wake_service import ManagerWakeService
 from app.services.patch_apply import PatchApplyService
 from app.services.patch_validator import PatchValidator
 from app.services.project_file_service import ProjectFileService
@@ -43,6 +46,7 @@ def get_manager_service() -> ManagerService:
         worker_service=get_worker_service(),
         runtime_dependency_job_service=get_runtime_dependency_job_service(),
         library_registry_service=get_library_registry_service(),
+        manager_auto_service=get_manager_auto_service(),
     )
 
 
@@ -53,12 +57,12 @@ def get_chat_job_service() -> ChatJobService:
 
 @lru_cache
 def get_runtime_dependency_job_service() -> RuntimeDependencyJobService:
-    return RuntimeDependencyJobService()
+    return RuntimeDependencyJobService(manager_wake_service=get_manager_wake_service())
 
 
 @lru_cache
 def get_chat_session_service() -> ChatSessionService:
-    return ChatSessionService(get_project_service())
+    return ChatSessionService(get_project_service(), get_manager_auto_service())
 
 
 @lru_cache
@@ -73,6 +77,7 @@ def get_worker_service() -> WorkerService:
         get_manifest_service(),
         get_runtime_approval_service(),
         get_library_registry_service(),
+        get_manager_wake_service(),
     )
 
 
@@ -111,6 +116,27 @@ def get_library_registry_service() -> LibraryRegistryService:
     return LibraryRegistryService(
         get_project_service(),
         get_app_config_service(),
+    )
+
+
+@lru_cache
+def get_manager_auto_service() -> ManagerAutoService:
+    return ManagerAutoService(get_project_service())
+
+
+@lru_cache
+def get_manager_wake_service() -> ManagerWakeService:
+    return ManagerWakeService(get_project_service())
+
+
+@lru_cache
+def get_manager_wake_processor() -> ManagerWakeProcessor:
+    return ManagerWakeProcessor(
+        get_project_service(),
+        get_manager_auto_service(),
+        get_manager_wake_service(),
+        get_chat_session_service(),
+        get_manager_service(),
     )
 
 
