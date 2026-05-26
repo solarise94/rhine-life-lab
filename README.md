@@ -28,8 +28,8 @@ workspace/      本地运行时项目数据（不纳入仓库）
 
 需要的系统级依赖：
 
-- `python3`
-- `python3-venv`
+- `python3.13+`
+- `python3.13-venv` 或等价的 `venv` 支持
 - `node` / `npm`
 - `bubblewrap` (`bwrap`)
 - `systemd --user`
@@ -39,7 +39,7 @@ workspace/      本地运行时项目数据（不纳入仓库）
 
 默认执行器沙箱模式是 `BLUEPRINT_EXECUTOR_SANDBOX_MODE=bwrap`，部署脚本会做 smoke test，失败则直接中止。
 
-如果没有 Node.js，先装 Node 18+ 再继续。
+如果没有 Node.js，先装 Node `22.19.0+` 再继续。后端则要求 Python `3.13+`。
 
 # 安装方式
 
@@ -57,6 +57,24 @@ workspace/      本地运行时项目数据（不纳入仓库）
    - 安装：`npm install -g @earendil-works/pi-coding-agent`
 4. `what ever`
 
+建议先准备：
+
+```bash
+node -v
+npm -v
+```
+
+如果没有 Node.js，先装 Node `22.19.0+` 再继续。后端则要求 Python `3.13+`。
+
+## 给 Agent 的安装 Prompt
+
+都什么年代了，还在手动安装，复制下面这段 prompt 让 agent 帮你完成吧。
+
+灵感文案引用自 oh-my-openagent：
+`Or read the Installation Guide, but seriously, let an agent do it. Humans fat-finger configs.`
+来源：<https://github.com/code-yeongyu/oh-my-openagent/blob/dev/README.md>
+
+优先直接把下面这段 prompt 发给你已经安装好的执行器：
 
 直接把下面这段 prompt 发给你已经安装好的cli：
 ```text
@@ -70,6 +88,8 @@ workspace/      本地运行时项目数据（不纳入仓库）
 - 自动检查并尝试安装系统依赖（当前支持 apt 系）
 - 自动检查 `bubblewrap` 沙箱可用性
 - 自动探测默认 Conda、Python runtime、R runtime
+- 显式校验 backend Python `3.13+` 和 Node.js `22.19.0+`
+- 允许先跳过 DeepSeek / Tavily API key，后续再在 UI 或 `.env` 中补
 - 收集 reviewer / runtime / compaction 相关配置
 - 在仓库根目录生成本地 `.env`
 - 调用部署脚本安装前后端与 manager-agent
@@ -98,6 +118,33 @@ cp .env.example .env
 bash scripts/deploy_user_systemd.sh
 ```
 
+这会安装并启动：
+
+- `blueprint-re-backend.service`
+- `blueprint-re-manager-agent.service`
+- `blueprint-re-frontend.service`
+
+部署脚本会额外处理：
+
+- 缺失系统依赖时自动安装（apt）
+- 显式校验 backend Python `3.13+` 与 Node.js `22.19.0+`
+- `bwrap` smoke test
+- 默认 Conda / Python runtime / R runtime 探测
+- 将默认 runtime 写入后端环境，供新项目初始化使用
+
+常用命令：
+
+```bash
+systemctl --user status blueprint-re-manager-agent.service
+systemctl --user status blueprint-re-backend.service
+systemctl --user status blueprint-re-frontend.service
+systemctl --user restart blueprint-re-manager-agent.service
+systemctl --user restart blueprint-re-backend.service
+systemctl --user restart blueprint-re-frontend.service
+journalctl --user -u blueprint-re-manager-agent.service -n 100 --no-pager
+journalctl --user -u blueprint-re-backend.service -n 100 --no-pager
+journalctl --user -u blueprint-re-frontend.service -n 100 --no-pager
+```
 ## 关键配置
 
 最小必需：
@@ -130,7 +177,7 @@ BLUEPRINT_INTERNAL_TOOL_TOKEN=change-me
 后端：
 
 ```bash
-python3 -m venv .venv/backend
+python3.13 -m venv .venv/backend
 .venv/backend/bin/pip install -e backend
 .venv/backend/bin/python scripts/generate_backend_schemas.py
 .venv/backend/bin/uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 8000

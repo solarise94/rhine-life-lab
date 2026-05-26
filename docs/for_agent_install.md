@@ -20,6 +20,7 @@ bash scripts/install_blueprint_re.sh --interactive
 
 - 检查并安装基础系统依赖（当前支持 apt 主机）
 - 检查 `bubblewrap` 是否真的可用
+- 显式校验 backend Python `3.13+` 与 Node.js `22.19.0+`
 - 探测默认 Conda 目录
 - 探测默认 Python runtime
 - 探测默认 R runtime
@@ -34,6 +35,8 @@ bash scripts/install_blueprint_re.sh --interactive
 - Linux
 - 用户可用 `systemd --user`
 - 有 `apt-get`，或依赖已预装
+- 后端安装 Python `3.13+`
+- Node.js `22.19.0+`
 - 允许安装：
   - `bubblewrap`
   - `python3`
@@ -46,6 +49,8 @@ bash scripts/install_blueprint_re.sh --interactive
 - `systemd`
 
 如果主机不是 apt 系，agent 不要强行猜测包管理器；应明确告诉用户手动安装依赖后再继续。
+
+注意：apt 自动安装只负责基础包存在，不保证自动把 Python 升到 `3.13+`、或把 Node 升到 `22.19.0+`。版本不满足时，agent 应先解决语言运行时版本，再继续部署。
 
 ## Private Repo Bootstrap
 
@@ -82,6 +87,8 @@ bash scripts/install_blueprint_re.sh --interactive
 5. `~/anaconda3`
 6. `/opt/conda`
 
+后端 bootstrap Python 必须满足 `>=3.13`。如果宿主机默认 `python3` 更低版本，agent 应先安装或切换到 Python 3.13，再运行部署。
+
 默认 Python runtime 候选顺序：
 
 1. `omicverse`
@@ -94,6 +101,8 @@ bash scripts/install_blueprint_re.sh --interactive
 2. `r-bio`
 3. `base`
 4. 如果系统里有 `Rscript`，则回落为 `__system__`
+
+Node.js 也必须满足 `>=22.19.0`，因为 `frontend` 和 `manager-agent` 都按这个上限基线部署。
 
 ## After Install Verification
 

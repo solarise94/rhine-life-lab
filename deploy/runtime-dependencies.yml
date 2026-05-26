@@ -7,7 +7,6 @@ system_packages:
 runtime_checks:
   required_commands:
     - bwrap
-    - python3
     - npm
   bubblewrap_smoke_test:
     - bwrap

@@ -6,7 +6,55 @@ SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 APP_ENV_DIR="${HOME}/.config/blueprint-re"
 APP_RELEASE_DIR="${HOME}/.local/share/blueprint-re"
 FRONTEND_RELEASE_DIR="${APP_RELEASE_DIR}/frontend-release"
-NODE_BIN="$(command -v node)"
+REQUIRED_PYTHON_VERSION="3.13.0"
+REQUIRED_NODE_VERSION="22.19.0"
+NODE_BIN=""
+PYTHON_BIN=""
+
+version_gte() {
+  local actual="$1"
+  local required="$2"
+  [[ "$(printf '%s\n%s\n' "${required}" "${actual}" | sort -V | head -n1)" == "${required}" ]]
+}
+
+python_version_of() {
+  local python_bin="$1"
+  "${python_bin}" -c 'import sys; print(".".join(str(part) for part in sys.version_info[:3]))'
+}
+
+find_python_bin() {
+  local candidate
+  local version
+  for candidate in python3.13 python3; do
+    if ! command -v "${candidate}" >/dev/null 2>&1; then
+      continue
+    fi
+    version="$(python_version_of "${candidate}" 2>/dev/null || true)"
+    if [[ -n "${version}" ]] && version_gte "${version}" "${REQUIRED_PYTHON_VERSION}"; then
+      printf '%s\n' "$(command -v "${candidate}")"
+      return 0
+    fi
+  done
+  return 1
+}
+
+node_version_of() {
+  local node_bin="$1"
+  "${node_bin}" -p 'process.versions.node'
+}
+
+find_node_bin() {
+  local candidate
+  local version
+  candidate="$(command -v node 2>/dev/null || true)"
+  [[ -n "${candidate}" ]] || return 1
+  version="$(node_version_of "${candidate}" 2>/dev/null || true)"
+  if [[ -n "${version}" ]] && version_gte "${version}" "${REQUIRED_NODE_VERSION}"; then
+    printf '%s\n' "${candidate}"
+    return 0
+  fi
+  return 1
+}
 
 detect_conda_base() {
   local candidates=(
@@ -83,12 +131,15 @@ mkdir -p "${SYSTEMD_USER_DIR}" "${APP_ENV_DIR}" "${APP_RELEASE_DIR}"
 
 install_runtime_dependencies() {
   local missing_runtime=0
-  for command_name in bwrap python3 npm git systemctl; do
+  local venv_python_bin=""
+  for command_name in bwrap npm git systemctl; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
       missing_runtime=1
     fi
   done
-  if ! python3 -m venv "${ROOT_DIR}/.venv/deploy-smoke" >/dev/null 2>&1; then
+  if ! venv_python_bin="$(find_python_bin 2>/dev/null)"; then
+    missing_runtime=1
+  elif ! "${venv_python_bin}" -m venv "${ROOT_DIR}/.venv/deploy-smoke" >/dev/null 2>&1; then
     missing_runtime=1
   fi
   rm -rf "${ROOT_DIR}/.venv/deploy-smoke"
@@ -114,12 +165,16 @@ install_runtime_dependencies() {
 }
 
 check_runtime_dependencies() {
-  for command_name in bwrap python3 npm git systemctl; do
+  for command_name in bwrap npm git systemctl; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
       echo "Missing required runtime command: ${command_name}. See deploy/runtime-dependencies.yml." >&2
       exit 1
     fi
   done
+  if ! find_python_bin >/dev/null 2>&1; then
+    echo "Missing required Python ${REQUIRED_PYTHON_VERSION}+ runtime." >&2
+    exit 1
+  fi
   if ! bwrap \
     --die-with-parent \
     --ro-bind /usr /usr \
@@ -135,13 +190,21 @@ check_runtime_dependencies() {
   fi
 }
 
-check_node_version() {
-  local node_major
-  node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
-  if [[ -z "${node_major}" || "${node_major}" -lt 18 ]]; then
-    echo "Node.js 18+ is required. Current node: $(node -v 2>/dev/null || echo missing)" >&2
+check_language_versions() {
+  local python_version
+  local node_version
+  if ! PYTHON_BIN="$(find_python_bin)"; then
+    echo "Python ${REQUIRED_PYTHON_VERSION}+ is required for the backend. Current python3: $(python3 --version 2>/dev/null || echo missing)" >&2
     exit 1
   fi
+  python_version="$(python_version_of "${PYTHON_BIN}")"
+  if ! NODE_BIN="$(find_node_bin)"; then
+    echo "Node.js ${REQUIRED_NODE_VERSION}+ is required. Current node: $(node -v 2>/dev/null || echo missing)" >&2
+    exit 1
+  fi
+  node_version="$(node_version_of "${NODE_BIN}")"
+  echo "Using Python ${python_version} via ${PYTHON_BIN}"
+  echo "Using Node ${node_version} via ${NODE_BIN}"
 }
 
 check_systemd_user() {
@@ -154,7 +217,7 @@ check_systemd_user() {
 
 install_runtime_dependencies
 check_runtime_dependencies
-check_node_version
+check_language_versions
 check_systemd_user
 
 if [[ -f "${ROOT_DIR}/.env" ]]; then
@@ -174,7 +237,7 @@ else
   DEFAULT_R_RUNTIME="$(detect_default_r_runtime "" 2>/dev/null || true)"
 fi
 
-python3 -m venv "${ROOT_DIR}/.venv/backend"
+"${PYTHON_BIN}" -m venv "${ROOT_DIR}/.venv/backend"
 "${ROOT_DIR}/.venv/backend/bin/pip" install --upgrade pip
 "${ROOT_DIR}/.venv/backend/bin/pip" install -e "${ROOT_DIR}/backend"
 
@@ -193,7 +256,7 @@ EOF
 env | grep '^BLUEPRINT_' | sort || true
 } > "${APP_ENV_DIR}/backend.env"
 
-INTERNAL_TOOL_TOKEN="${BLUEPRINT_INTERNAL_TOOL_TOKEN:-$(python3 - <<'PY'
+INTERNAL_TOOL_TOKEN="${BLUEPRINT_INTERNAL_TOOL_TOKEN:-$("${PYTHON_BIN}" - <<'PY'
 import secrets
 print(secrets.token_urlsafe(32))
 PY

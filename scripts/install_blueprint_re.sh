@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ROOT_DIR}/.env"
 INSTALL_INTERACTIVE=0
+REQUIRED_PYTHON_VERSION="3.13.0"
+REQUIRED_NODE_VERSION="22.19.0"
 
 for arg in "$@"; do
   case "${arg}" in
@@ -17,6 +19,51 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+version_gte() {
+  local actual="$1"
+  local required="$2"
+  [[ "$(printf '%s\n%s\n' "${required}" "${actual}" | sort -V | head -n1)" == "${required}" ]]
+}
+
+python_version_of() {
+  local python_bin="$1"
+  "${python_bin}" -c 'import sys; print(".".join(str(part) for part in sys.version_info[:3]))'
+}
+
+find_python_bin() {
+  local candidate
+  local version
+  for candidate in python3.13 python3; do
+    if ! command -v "${candidate}" >/dev/null 2>&1; then
+      continue
+    fi
+    version="$(python_version_of "${candidate}" 2>/dev/null || true)"
+    if [[ -n "${version}" ]] && version_gte "${version}" "${REQUIRED_PYTHON_VERSION}"; then
+      printf '%s\n' "$(command -v "${candidate}")"
+      return 0
+    fi
+  done
+  return 1
+}
+
+node_version_of() {
+  local node_bin="$1"
+  "${node_bin}" -p 'process.versions.node'
+}
+
+find_node_bin() {
+  local candidate
+  local version
+  candidate="$(command -v node 2>/dev/null || true)"
+  [[ -n "${candidate}" ]] || return 1
+  version="$(node_version_of "${candidate}" 2>/dev/null || true)"
+  if [[ -n "${version}" ]] && version_gte "${version}" "${REQUIRED_NODE_VERSION}"; then
+    printf '%s\n' "${candidate}"
+    return 0
+  fi
+  return 1
+}
 
 detect_conda_base() {
   local candidates=(
@@ -155,6 +202,9 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +a
 fi
 
+PYTHON_BIN="$(find_python_bin 2>/dev/null || true)"
+NODE_BIN="$(find_node_bin 2>/dev/null || true)"
+
 if [[ -z "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" ]]; then
   BLUEPRINT_EXECUTOR_CONDA_BASE="$(detect_conda_base 2>/dev/null || true)"
 fi
@@ -169,6 +219,18 @@ printf "Blueprint RE installer\n"
 printf "Root: %s\n\n" "${ROOT_DIR}"
 printf "This installer can finish deployment without API keys.\n"
 printf "You can configure DeepSeek / Tavily later in the UI or by editing .env.\n\n"
+if [[ -z "${PYTHON_BIN}" ]]; then
+  printf "Required backend Python: %s+\n" "${REQUIRED_PYTHON_VERSION}"
+  printf "Detected python3: %s\n\n" "$(python3 --version 2>/dev/null || echo missing)"
+else
+  printf "Detected backend Python: %s (%s)\n" "$("${PYTHON_BIN}" --version 2>/dev/null)" "${PYTHON_BIN}"
+fi
+if [[ -z "${NODE_BIN}" ]]; then
+  printf "Required Node.js: %s+\n" "${REQUIRED_NODE_VERSION}"
+  printf "Detected node: %s\n\n" "$(node -v 2>/dev/null || echo missing)"
+else
+  printf "Detected Node.js: %s (%s)\n\n" "$("${NODE_BIN}" -v 2>/dev/null)" "${NODE_BIN}"
+fi
 if [[ "${INSTALL_INTERACTIVE}" -eq 1 ]]; then
   printf "Mode: interactive\n\n"
 else
@@ -207,7 +269,13 @@ prompt_default MANAGER_COMPACTION_ENABLED "Enable automatic compaction (true/fal
 prompt_default MANAGER_COMPACTION_KEEP_RECENT_TOKENS "Compaction keep-recent tokens" "${MANAGER_COMPACTION_KEEP_RECENT_TOKENS:-120000}"
 prompt_default MANAGER_COMPACTION_RESERVE_TOKENS "Compaction reserve tokens" "${MANAGER_COMPACTION_RESERVE_TOKENS:-16000}"
 
-BLUEPRINT_INTERNAL_TOOL_TOKEN="${BLUEPRINT_INTERNAL_TOOL_TOKEN:-$(python3 - <<'PY'
+TOKEN_PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 2>/dev/null || true)}"
+if [[ -z "${TOKEN_PYTHON_BIN}" ]]; then
+  echo "Python ${REQUIRED_PYTHON_VERSION}+ is required to generate install secrets and deploy the backend." >&2
+  exit 1
+fi
+
+BLUEPRINT_INTERNAL_TOOL_TOKEN="${BLUEPRINT_INTERNAL_TOOL_TOKEN:-$("${TOKEN_PYTHON_BIN}" - <<'PY'
 import secrets
 print(secrets.token_urlsafe(32))
 PY
