@@ -452,6 +452,43 @@ class TestWrapperLaunchArgvTemplateSpacePaths(unittest.TestCase):
             self.assertEqual(command[run_dir_idx + 1], str(run_dir))
             self.assertEqual(command[project_root_idx + 1], str(project_root))
 
+    def test_claude_code_prompt_file_prefix_is_preserved(self):
+        """Claude Code -p needs @path so it reads the prompt file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "Claude Project"
+            project_root.mkdir()
+            run_dir = project_root / "runs" / "task 001"
+            run_dir.mkdir(parents=True)
+
+            packet = {
+                "task_id": "task-001",
+                "project_id": "proj-001",
+                "run_context": {"result_dir": "results/current"},
+                "expected_outputs": [],
+            }
+            packet_path = run_dir / "task_packet.json"
+            packet_path.write_text(json.dumps(packet), encoding="utf-8")
+
+            template = [
+                "claude",
+                "-p",
+                "@{executor_prompt_path}",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+            ]
+
+            command = agent_cli_executor._render_launch_argv_template(
+                template,
+                provider="claude_code",
+                packet_path=packet_path,
+                run_dir=run_dir,
+                project_root=project_root,
+            )
+
+            self.assertEqual(command[0:2], ["claude", "-p"])
+            self.assertEqual(command[2], f"@{run_dir / 'executor_prompt.md'}")
+
 
 if __name__ == "__main__":
     unittest.main()

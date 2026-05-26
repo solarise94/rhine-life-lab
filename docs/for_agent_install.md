@@ -112,7 +112,7 @@ JSON argv 模板规则：
 ```env
 BLUEPRINT_PI_COMMAND_JSON=["bash","{repo_root}/scripts/blueprint_pi_launch.sh","{executor_prompt_path}"]
 BLUEPRINT_OPENCODE_COMMAND_JSON=["opencode","run","--file","{executor_prompt_path}","--format","json","--dangerously-skip-permissions","Read {executor_prompt_path} and complete the Blueprint executor contract exactly."]
-BLUEPRINT_CLAUDE_CODE_COMMAND_JSON=["claude","-p","{executor_prompt_path}","--output-format","stream-json","--verbose"]
+BLUEPRINT_CLAUDE_CODE_COMMAND_JSON=["claude","-p","@{executor_prompt_path}","--output-format","stream-json","--verbose"]
 BLUEPRINT_CODEX_COMMAND_JSON=["codex","exec","{executor_prompt_path}"]
 ```
 
