@@ -74,6 +74,12 @@ npm -v
 
 ## 给 Agent 的安装 Prompt
 
+都什么年代了，还在手动安装，复制下面这段 prompt 让 agent 帮你完成吧。
+
+灵感文案引用自 oh-my-openagent：
+`Or read the Installation Guide, but seriously, let an agent do it. Humans fat-finger configs.`
+来源：<https://github.com/code-yeongyu/oh-my-openagent/blob/dev/README.md>
+
 优先直接把下面这段 prompt 发给你已经安装好的执行器：
 
 ```text
