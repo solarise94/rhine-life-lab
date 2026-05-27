@@ -164,7 +164,7 @@ BLUEPRINT_INTERNAL_TOOL_TOKEN=change-me
 - `MANAGER_CONTEXT_WINDOW_TOKENS=1000000`
 - `MANAGER_COMPACTION_ENABLED=true`
 
-完整模板见 [.env.example](/home/solarise/blueprint_re_v3/.env.example:1)。
+完整模板见 [.env.example](.env.example)。
 
 ## 执行器配置（注：执行器兼容性仍需测试）
 
@@ -247,10 +247,10 @@ node --check manager-agent/src/server.js
 
 如果你要从这个项目继续分叉为新的科研管理系统，优先看这些文档：
 
-- [docs/13_fork_architecture_and_product_logic.md](/home/solarise/blueprint_re_v3/docs/13_fork_architecture_and_product_logic.md:1)
-- [docs/15_manager_runtime_libraries_and_report_plan.md](/home/solarise/blueprint_re_v3/docs/15_manager_runtime_libraries_and_report_plan.md:1)
-- [docs/16_skill_mcp_registry_and_wrapper_attachment_plan.md](/home/solarise/blueprint_re_v3/docs/16_skill_mcp_registry_and_wrapper_attachment_plan.md:1)
-- [docs/17_explicit_output_contract_and_submission_validation_plan.md](/home/solarise/blueprint_re_v3/docs/17_explicit_output_contract_and_submission_validation_plan.md:1)
-- [docs/22_dependency_attention_and_provider_hardening.md](/home/solarise/blueprint_re_v3/docs/22_dependency_attention_and_provider_hardening.md:1)
+- [docs/13_fork_architecture_and_product_logic.md](docs/13_fork_architecture_and_product_logic.md)
+- [docs/15_manager_runtime_libraries_and_report_plan.md](docs/15_manager_runtime_libraries_and_report_plan.md)
+- [docs/16_skill_mcp_registry_and_wrapper_attachment_plan.md](docs/16_skill_mcp_registry_and_wrapper_attachment_plan.md)
+- [docs/17_explicit_output_contract_and_submission_validation_plan.md](docs/17_explicit_output_contract_and_submission_validation_plan.md)
+- [docs/22_dependency_attention_and_provider_hardening.md](docs/22_dependency_attention_and_provider_hardening.md)
 
 这些文档基本覆盖了 manager、执行器 wrapper、skill/MCP registry、结果契约和报告链路。

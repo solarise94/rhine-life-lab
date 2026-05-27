@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -154,7 +155,7 @@ class TestInstallDeployBehavior(unittest.TestCase):
 
             # Python wrapper: intercept "python -m venv" so we can inject a stub pip
             # into the created venv. This avoids flaky network calls during tests.
-            real_python = "/usr/bin/python3.13"
+            real_python = sys.executable
             python_wrapper = (
                 '#!/bin/bash\n'
                 f'REAL_PYTHON="{real_python}"\n'
@@ -267,6 +268,26 @@ class TestInstallDeployBehavior(unittest.TestCase):
             ".local",
             binds,
             "Default extra_ro_binds must include ~/.local",
+        )
+
+    def test_deploy_extra_ro_binds_allows_explicit_empty_override(self) -> None:
+        """An explicit empty BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS must remain empty
+        instead of falling back to the deploy default."""
+        result, parsed = self._run_deploy_with_stubs([
+            "BLUEPRINT_DEEPSEEK_API_KEY=test-key",
+            "BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS=",
+        ])
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(
+            "BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS",
+            parsed,
+            "backend.env must preserve the explicit empty override",
+        )
+        self.assertEqual(
+            parsed["BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS"],
+            "",
+            "Explicit empty extra_ro_binds must not fall back to ~/.nvm,~/.local",
         )
 
     def test_deploy_codex_passthrough(self) -> None:

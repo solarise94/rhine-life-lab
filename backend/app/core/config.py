@@ -5,6 +5,29 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings
 
 
+def default_conda_base() -> Path:
+    return Path.home() / "miniconda3"
+
+
+def default_conda_base_candidates(configured_base: Path | None = None) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in (
+        configured_base,
+        Path.home() / "miniforge3",
+        Path.home() / "miniconda3",
+        Path.home() / "anaconda3",
+        Path("/opt/conda"),
+    ):
+        if candidate is None:
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        candidates.append(candidate)
+    return candidates
+
+
 class Settings(BaseSettings):
     app_name: str = "Blueprint RE v3"
     api_prefix: str = "/api"
@@ -50,7 +73,7 @@ class Settings(BaseSettings):
     worker_timeout_seconds: int = 900
     executor_sandbox_mode: str = "bwrap"
     executor_max_concurrent_runs: int = 3
-    executor_conda_base: Path = Path("/home/solarise/miniconda3")
+    executor_conda_base: Path = Field(default_factory=default_conda_base)
     default_python_runtime: str | None = None
     default_r_runtime: str | None = None
     executor_host_root_readonly: bool = True

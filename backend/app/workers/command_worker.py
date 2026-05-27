@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 
+from app.core.config import default_conda_base, default_conda_base_candidates
 from app.models.runs import TaskPacket
 from app.workers.base import PermissionRequest, WorkerAdapter, WorkerLaunchSpec
 
@@ -207,12 +208,8 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
 
     @staticmethod
     def _resolve_conda_runtime(conda_env: str, settings: object) -> tuple[Path, Path]:
-        configured_base = Path(getattr(settings, "executor_conda_base", Path("/home/solarise/miniconda3")))
-        candidates = [
-            configured_base,
-            Path("/home/solarise/miniforge3"),
-            Path("/home/solarise/miniconda3"),
-        ]
+        configured_base = Path(getattr(settings, "executor_conda_base", default_conda_base()))
+        candidates = default_conda_base_candidates(configured_base)
         if conda_env.startswith("/"):
             env_path = Path(conda_env)
             return env_path.parent.parent if env_path.parent.name == "envs" else configured_base, env_path
@@ -249,12 +246,8 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
                 return runtime_path
             rscript_path = runtime_path / "bin" / "Rscript"
             return rscript_path if rscript_path.exists() else None
-        configured_base = Path(getattr(settings, "executor_conda_base", Path("/home/solarise/miniconda3")))
-        candidates = [
-            configured_base,
-            Path("/home/solarise/miniforge3"),
-            Path("/home/solarise/miniconda3"),
-        ]
+        configured_base = Path(getattr(settings, "executor_conda_base", default_conda_base()))
+        candidates = default_conda_base_candidates(configured_base)
         for base in candidates:
             rscript_path = base / "envs" / r_env / "bin" / "Rscript"
             if rscript_path.exists():
@@ -362,7 +355,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
                 str(project_root),
             ]
         )
-        conda_base = Path(getattr(settings, "executor_conda_base", Path("/home/solarise/miniconda3")))
+        conda_base = Path(getattr(settings, "executor_conda_base", default_conda_base()))
         if not host_root_readonly and conda_base.exists() and str(conda_base) not in {"/bin", "/usr", "/lib", "/lib64", "/etc", "/opt"}:
             bind_args.extend(["--ro-bind", str(conda_base), str(conda_base)])
             readonly_binds.append(conda_base)

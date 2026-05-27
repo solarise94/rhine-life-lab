@@ -8,7 +8,7 @@ from threading import RLock
 
 from fastapi import HTTPException
 
-from app.core.config import get_settings
+from app.core.config import default_conda_base_candidates, get_settings
 from app.core.paths import (
     ARTIFACT_POINTERS_DIR,
     ARTIFACT_STORE_DIR,
@@ -547,12 +547,16 @@ class ProjectService:
     def _python_runtimes(self) -> list[dict]:
         runtimes: list[dict] = [{"name": "__system__", "label": "System Python", "path": None, "manager": "system", "exists": True}]
         seen = {"__system__"}
-        for manager, base in (
-            ("miniforge", Path("/home/solarise/miniforge3")),
-            ("miniconda", Path("/home/solarise/miniconda3")),
-        ):
+        manager_labels = {
+            "miniforge3": "miniforge",
+            "miniconda3": "miniconda",
+            "anaconda3": "anaconda",
+            "conda": "conda",
+        }
+        for base in default_conda_base_candidates(self.settings.executor_conda_base):
             if not base.exists():
                 continue
+            manager = manager_labels.get(base.name, base.name)
             base_python = base / "bin" / "python"
             if base_python.exists() and f"{manager}:base" not in seen:
                 runtimes.append(
@@ -596,12 +600,16 @@ class ProjectService:
             }
         ]
         seen = {"__system__"}
-        for manager, base in (
-            ("miniforge", Path("/home/solarise/miniforge3")),
-            ("miniconda", Path("/home/solarise/miniconda3")),
-        ):
+        manager_labels = {
+            "miniforge3": "miniforge",
+            "miniconda3": "miniconda",
+            "anaconda3": "anaconda",
+            "conda": "conda",
+        }
+        for base in default_conda_base_candidates(self.settings.executor_conda_base):
             if not base.exists():
                 continue
+            manager = manager_labels.get(base.name, base.name)
             base_rscript = base / "bin" / "Rscript"
             if base_rscript.exists() and f"{manager}:base" not in seen:
                 runtimes.append(
