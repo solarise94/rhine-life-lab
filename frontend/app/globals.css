@@ -352,6 +352,59 @@ button {
   gap: 12px;
 }
 
+.settings-form-grid.compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-provider-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-provider-card {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.04), transparent 48%),
+    var(--panel-2);
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.settings-provider-card-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.settings-provider-card-header div {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-provider-card-header strong {
+  font-size: 13px;
+}
+
+.settings-provider-card-header span,
+.settings-inline-help {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-provider-card-header em {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
 .settings-field {
   display: grid;
   gap: 6px;
@@ -3495,6 +3548,7 @@ button {
   }
 
   .settings-form-grid,
+  .settings-form-grid.compact,
   .settings-library-grid {
     grid-template-columns: 1fr;
   }

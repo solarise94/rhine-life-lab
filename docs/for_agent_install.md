@@ -2,6 +2,38 @@
 
 本文件给接手仓库的 agent 使用。目标不是解释产品，而是让 agent 能稳定把程序装起来。
 
+## Agent Task Protocol
+
+安装 agent 必须按四个阶段推进，不要只启动服务就结束。
+
+1. 环境探查与依赖解决
+   - 检查 OS、shell、`systemd --user`、`git`/`gh`、Python `3.13+`、Node.js `22.19.0+`、`npm`、Conda/Mamba、R/Rscript、`bubblewrap`。
+   - 检查 `pi`、`opencode`、`claude`、`codex` CLI 是否存在。
+   - 判断 systemd 服务是否能看到这些 CLI；如果不能，改用绝对路径 `*_COMMAND_JSON`。
+   - 如果是 WSL 或路径包含空格，必须使用 JSON argv。
+   - 缺依赖时先解决；不能因为 `bwrap` 失败而切到无沙箱。
+
+2. 项目下载与部署
+   - 私有仓库先处理 GitHub 登录。
+   - clone/pull 项目后运行安装脚本或部署脚本。
+   - 生成 `.env` 和 `~/.config/blueprint-re/*.env`。
+   - 启动 `blueprint-re-backend.service`、`blueprint-re-frontend.service`、`blueprint-re-manager-agent.service`。
+   - 检查服务状态、后端 `healthz`、前端 HTTP 响应。
+
+3. 配置与本机烟雾测试
+   - 询问用户选择：输入项目 API key/base URL 做 `project_api` smoke，或使用本机已登录的 CLI 做 `cli_native` smoke。
+   - 默认推荐 `pi` 的 `project_api`；`opencode` 支持 `project_api` 和 `cli_native`；`claude_code`、`codex` 只做 `cli_native`。
+   - 根据本机结果调整 `*_COMMAND_JSON`、API base URL、executor profile 和 CLI 绝对路径。
+   - 确认 Claude Code 使用 `"-p", "@{executor_prompt_path}"`。
+   - 有 API key 或用户明确要求真实 smoke 时，再创建最小临时项目/卡片跑真实执行器；否则只做服务、profile、CLI 可用性 smoke。
+
+4. 部署完成后的总结
+   - 输出前端/后端 URL。
+   - 输出三个 systemd service 状态。
+   - 输出默认执行器和可用 profiles。
+   - 列出已自动修复的本机兼容性配置。
+   - 列出仍需用户手动处理的 API key、CLI 登录、系统依赖或权限问题。
+
 ## Preferred Path
 
 优先使用：
@@ -168,6 +200,108 @@ systemctl --user status blueprint-re-frontend.service
 curl -fsS http://127.0.0.1:18001/healthz
 curl -I http://127.0.0.1:13001
 ```
+
+## Local Compatibility Smoke And Self-Repair
+
+安装 agent 不能只验证服务启动。必须在当前宿主机做本机兼容性烟测，并根据结果自行调整配置。
+
+### 1. Host command discovery
+
+检查当前用户 shell 里能否找到执行器 CLI：
+
+```bash
+command -v pi || true
+command -v opencode || true
+command -v claude || true
+command -v codex || true
+```
+
+如果 shell 能找到但 systemd 服务找不到，优先把 `*_COMMAND_JSON` 改成绝对路径，不要依赖交互 shell 的 `PATH`。
+
+### 2. JSON argv and path-space check
+
+必须确认安装生成的是 `*_COMMAND_JSON`，而不是只依赖旧的 `*_COMMAND` 字符串模板。
+
+检查位置：
+
+```bash
+grep -E 'BLUEPRINT_.*COMMAND_JSON' .env ~/.config/blueprint-re/backend.env 2>/dev/null || true
+```
+
+如果仓库路径或 workspace 路径包含空格，必须使用 JSON argv。不要尝试用 shell quoting 修 `conda run /mnt/c/Users/.../New project/...` 这类问题。
+
+Claude Code 特别注意：
+
+```env
+BLUEPRINT_CLAUDE_CODE_COMMAND_JSON=["/absolute/path/to/claude","-p","@{executor_prompt_path}","--output-format","stream-json","--verbose"]
+```
+
+`-p` 后面必须是 `@{executor_prompt_path}`，否则 Claude Code 会把路径字符串当成 prompt 内容。
+
+### 3. bwrap smoke
+
+部署脚本会做 bwrap smoke test。安装 agent 不允许因为 bwrap 失败而改成无沙箱执行。
+
+如果失败，应报告宿主机 namespace/setuid/bubblewrap 配置问题，并停止执行器部署修复；不要把 `BLUEPRINT_EXECUTOR_SANDBOX_MODE` 静默改成 `none`。
+
+### 4. Native login checks
+
+对 `cli_native` profile，只能使用宿主机已有登录态；wrapper 不注入项目 API key。
+
+安装 agent 应检查但不要修改这些目录内容：
+
+```bash
+test -d "$HOME/.claude" && echo "Claude Code login dir present"
+test -d "$HOME/.codex" && echo "Codex login dir present"
+test -d "${XDG_CONFIG_HOME:-$HOME/.config}/opencode" && echo "OpenCode config dir present"
+```
+
+如果目录缺失或 CLI 要求重新登录，告诉用户在宿主机执行对应 CLI 登录。不要在 bwrap run 内尝试刷新登录。
+
+### 5. Service-level smoke
+
+修改 `.env` 或 `~/.config/blueprint-re/*.env` 后重启服务：
+
+```bash
+systemctl --user restart blueprint-re-backend.service
+systemctl --user restart blueprint-re-manager-agent.service
+systemctl --user restart blueprint-re-frontend.service
+```
+
+然后重新检查：
+
+```bash
+systemctl --user status blueprint-re-backend.service --no-pager
+systemctl --user status blueprint-re-manager-agent.service --no-pager
+systemctl --user status blueprint-re-frontend.service --no-pager
+curl -fsS http://127.0.0.1:18001/healthz
+curl -fsS http://127.0.0.1:18001/api/executor-profiles
+```
+
+### 6. Executor smoke policy
+
+如果用户没有提供项目 API key，不要强行跑会消耗外部模型调用的真实执行器 smoke。此时只验证：
+
+- 服务启动。
+- `/api/executor-profiles` 返回 profile 列表。
+- `pi` 是默认最佳兼容 profile。
+- `opencode`、`claude_code`、`codex` 的 CLI 可用性和登录态状态被如实记录。
+
+如果用户已配置 API key 或明确要求真实 smoke，创建一个临时项目/卡片做最小 run，检查 run 能产生 `agent_trace.json`、`manifest.json` 或清晰的失败原因。失败时优先修本机兼容性配置：
+
+- CLI 绝对路径。
+- `*_COMMAND_JSON`。
+- API base URL。
+- 原生登录态。
+- bwrap 只读挂载可见性。
+
+最后输出安装报告，必须包含：
+
+- 前端/后端 URL。
+- 三个 systemd service 状态。
+- 当前默认执行器和可用 profiles。
+- 已修复的本机兼容性配置。
+- 仍需用户手动处理的 API key、CLI 登录或系统依赖。
 
 ## Manual Fallback
 

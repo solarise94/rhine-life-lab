@@ -350,6 +350,40 @@ class TestOpenCodeRenderer(unittest.TestCase):
             self.assertEqual(result.config_file_paths, [str(config_path)])
             self.assertEqual(result.environment_overlay["OPENCODE_CONFIG_DIR"], str(config_path.parent))
 
+    def test_project_api_uses_settings_fallbacks(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            renderer = OpenCodeRenderer()
+            run_dir = tmp_path / "run"
+            run_dir.mkdir()
+            profile = ExecutorProfileSpec(
+                profile_id="opencode-project",
+                display_name="OpenCode project API",
+                worker_type="opencode",
+                auth_mode=AUTH_MODE_PROJECT_API,
+                api_protocol="openai_compatible",
+                provider_id="openai",
+                model="gpt-4o-mini",
+            )
+            settings = _make_settings(
+                openai_api_key=SimpleNamespace(get_secret_value=lambda: "sk-openai-fallback-123"),
+                openai_api_base_url="https://gateway.example.com/v1",
+            )
+            result = renderer.render(
+                auth_mode=AUTH_MODE_PROJECT_API,
+                profile=profile,
+                prompt_path=_make_prompt(tmp_path),
+                run_dir=run_dir,
+                project_root=tmp_path,
+                settings=settings,
+            )
+            self.assertTrue(result.is_supported)
+            self.assertEqual(result.environment_overlay["OPENAI_API_KEY"], "sk-openai-fallback-123")
+            self.assertEqual(result.provider_config_plan["credential_ref"], "project:openai_api_key")
+            self.assertEqual(result.provider_config_plan["base_url"], "https://gateway.example.com/v1")
+            config = json.loads((run_dir / "opencode-config" / "opencode.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["provider"]["openai"]["options"]["baseURL"], "https://gateway.example.com/v1")
+
     def test_project_api_writes_capability_config(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)

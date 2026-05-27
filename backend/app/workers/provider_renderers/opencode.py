@@ -122,13 +122,13 @@ class OpenCodeRenderer(ProviderRenderer):
     ) -> ProviderRenderResult:
         capabilities = resolve_capability_inputs(packet=packet, run_dir=run_dir)
         model = getattr(profile, "model", None) or getattr(settings, "executor_model", "gpt-4o-mini")
-        base_url = getattr(profile, "base_url", None) or "https://api.openai.com/v1"
+        base_url = getattr(profile, "base_url", None) or getattr(settings, "openai_api_base_url", "https://api.openai.com/v1")
         provider_id = getattr(profile, "provider_id", None) or "openai"
         api_protocol = getattr(profile, "api_protocol", None) or "openai_compatible"
 
         env_overlay: dict[str, str] = {}
 
-        credential_ref = getattr(profile, "credential_ref", None)
+        credential_ref = getattr(profile, "credential_ref", None) or "project:openai_api_key"
         credential_injected = False
         if credential_ref:
             resolved_key = self._resolve_credential(credential_ref, settings)

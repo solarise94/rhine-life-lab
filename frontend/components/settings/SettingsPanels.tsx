@@ -163,7 +163,13 @@ export function SettingsPanels({
   const exportDiagnosticsMutation = useExportDiagnosticsMutation(projectId);
 
   const [deepseekKey, setDeepseekKey] = useState("");
+  const [openaiKey, setOpenaiKey] = useState("");
+  const [anthropicKey, setAnthropicKey] = useState("");
   const [tavilyKey, setTavilyKey] = useState("");
+  const [clearDeepseekKey, setClearDeepseekKey] = useState(false);
+  const [clearOpenaiKey, setClearOpenaiKey] = useState(false);
+  const [clearAnthropicKey, setClearAnthropicKey] = useState(false);
+  const [clearTavilyKey, setClearTavilyKey] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [managerModel, setManagerModel] = useState(appSettingsQuery.data?.deepseek.manager_model ?? "deepseek-v4-pro");
   const [executorModel, setExecutorModel] = useState(appSettingsQuery.data?.deepseek.executor_model ?? "deepseek-v4-flash");
@@ -176,6 +182,10 @@ export function SettingsPanels({
   );
   const [piDeepseekBaseUrl, setPiDeepseekBaseUrl] = useState(
     appSettingsQuery.data?.deepseek.pi_base_url ?? "https://api.deepseek.com",
+  );
+  const [openaiApiBaseUrl, setOpenaiApiBaseUrl] = useState(appSettingsQuery.data?.openai.api_base_url ?? "https://api.openai.com/v1");
+  const [anthropicApiBaseUrl, setAnthropicApiBaseUrl] = useState(
+    appSettingsQuery.data?.anthropic.api_base_url ?? "https://api.anthropic.com",
   );
   const [webSearchEnabled, setWebSearchEnabled] = useState(appSettingsQuery.data?.web_search.enabled ?? false);
   const [tavilyBaseUrl, setTavilyBaseUrl] = useState(appSettingsQuery.data?.web_search.base_url ?? "https://api.tavily.com");
@@ -204,6 +214,8 @@ export function SettingsPanels({
     setSummarizerModel(appSettingsQuery.data.deepseek.library_summarizer_model);
     setDeepseekApiBaseUrl(appSettingsQuery.data.deepseek.api_base_url);
     setPiDeepseekBaseUrl(appSettingsQuery.data.deepseek.pi_base_url);
+    setOpenaiApiBaseUrl(appSettingsQuery.data.openai.api_base_url);
+    setAnthropicApiBaseUrl(appSettingsQuery.data.anthropic.api_base_url);
     setWebSearchEnabled(appSettingsQuery.data.web_search.enabled);
     setTavilyBaseUrl(appSettingsQuery.data.web_search.base_url);
   }, [appSettingsQuery.data]);
@@ -213,6 +225,7 @@ export function SettingsPanels({
     try {
       await updateAppSettingsMutation.mutateAsync({
         deepseek_api_key: deepseekKey || null,
+        clear_deepseek_api_key: clearDeepseekKey,
         deepseek_api_base_url: deepseekApiBaseUrl,
         pi_deepseek_base_url: piDeepseekBaseUrl,
         manager_model: managerModel,
@@ -221,10 +234,23 @@ export function SettingsPanels({
         library_summarizer_model: summarizerModel,
         manager_websearch_enabled: webSearchEnabled,
         tavily_api_key: tavilyKey || null,
+        clear_tavily_api_key: clearTavilyKey,
         tavily_base_url: tavilyBaseUrl,
+        openai_api_key: openaiKey || null,
+        clear_openai_api_key: clearOpenaiKey,
+        openai_api_base_url: openaiApiBaseUrl,
+        anthropic_api_key: anthropicKey || null,
+        clear_anthropic_api_key: clearAnthropicKey,
+        anthropic_api_base_url: anthropicApiBaseUrl,
       });
       setDeepseekKey("");
+      setOpenaiKey("");
+      setAnthropicKey("");
       setTavilyKey("");
+      setClearDeepseekKey(false);
+      setClearOpenaiKey(false);
+      setClearAnthropicKey(false);
+      setClearTavilyKey(false);
       setStatus("API 设置已保存。");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "API 设置保存失败。");
@@ -309,60 +335,192 @@ export function SettingsPanels({
         <div className="settings-section-header">
           <div>
             <h3>API Settings</h3>
-            <p>Manager、reviewer、library summarizer 和 Tavily web search 共用的运行时 API 配置。</p>
+            <p>配置 Manager API、执行器项目 API 注入和 Tavily web search。执行器原生登录模式不会读取这里的 key。</p>
           </div>
         </div>
-        <div className="settings-form-grid">
-          <label className="settings-field">
-            <span>DeepSeek key</span>
-            <input
-              type="password"
-              value={deepseekKey}
-              onChange={(event) => setDeepseekKey(event.target.value)}
-              placeholder={appSettingsQuery.data?.deepseek.api_key_configured ? "已配置，留空保持不变" : "输入 DeepSeek API key"}
-            />
-          </label>
-          <label className="settings-field">
-            <span>Manager model</span>
-            <input value={managerModel} onChange={(event) => setManagerModel(event.target.value)} />
-          </label>
-          <label className="settings-field">
-            <span>Executor model</span>
-            <input value={executorModel} onChange={(event) => setExecutorModel(event.target.value)} />
-          </label>
-          <label className="settings-field">
-            <span>Reviewer model</span>
-            <input value={reviewerModel} onChange={(event) => setReviewerModel(event.target.value)} />
-          </label>
-          <label className="settings-field">
-            <span>Library summarizer</span>
-            <input value={summarizerModel} onChange={(event) => setSummarizerModel(event.target.value)} />
-          </label>
-          <label className="settings-field">
-            <span>DeepSeek API base</span>
-            <input value={deepseekApiBaseUrl} onChange={(event) => setDeepseekApiBaseUrl(event.target.value)} />
-          </label>
-          <label className="settings-field">
-            <span>Pi DeepSeek base</span>
-            <input value={piDeepseekBaseUrl} onChange={(event) => setPiDeepseekBaseUrl(event.target.value)} />
-          </label>
-          <label className="settings-field">
-            <span>Tavily key</span>
-            <input
-              type="password"
-              value={tavilyKey}
-              onChange={(event) => setTavilyKey(event.target.value)}
-              placeholder={appSettingsQuery.data?.web_search.api_key_configured ? "已配置，留空保持不变" : "输入 Tavily API key"}
-            />
-          </label>
-          <label className="settings-field">
-            <span>Tavily base</span>
-            <input value={tavilyBaseUrl} onChange={(event) => setTavilyBaseUrl(event.target.value)} />
-          </label>
-          <label className="settings-check">
-            <input type="checkbox" checked={webSearchEnabled} onChange={(event) => setWebSearchEnabled(event.target.checked)} />
-            <span>启用 Tavily web search</span>
-          </label>
+        <div className="settings-provider-grid">
+          <div className="settings-provider-card">
+            <div className="settings-provider-card-header">
+              <div>
+                <strong>Manager API</strong>
+                <span>Manager、reviewer、library summarizer 使用。默认可填 DeepSeek Anthropic-compatible 地址，也可以手动换成兼容地址。</span>
+              </div>
+              <em>{appSettingsQuery.data?.deepseek.api_key_configured ? "key configured" : "key missing"}</em>
+            </div>
+            <div className="settings-form-grid compact">
+              <label className="settings-field">
+                <span>API key</span>
+                <input
+                  type="password"
+                  value={deepseekKey}
+                  onChange={(event) => setDeepseekKey(event.target.value)}
+                  disabled={clearDeepseekKey}
+                  placeholder={appSettingsQuery.data?.deepseek.api_key_configured ? "已配置，留空保持不变" : "输入 Manager API key"}
+                />
+              </label>
+              {appSettingsQuery.data?.deepseek.api_key_configured ? (
+                <label className="settings-check">
+                  <input
+                    type="checkbox"
+                    checked={clearDeepseekKey}
+                    onChange={(event) => setClearDeepseekKey(event.target.checked)}
+                  />
+                  <span>清除已保存的 Manager API key</span>
+                </label>
+              ) : null}
+              <label className="settings-field">
+                <span>Anthropic-compatible base URL</span>
+                <input value={deepseekApiBaseUrl} onChange={(event) => setDeepseekApiBaseUrl(event.target.value)} />
+              </label>
+              <label className="settings-field">
+                <span>Manager model</span>
+                <input value={managerModel} onChange={(event) => setManagerModel(event.target.value)} />
+              </label>
+              <label className="settings-field">
+                <span>Reviewer model</span>
+                <input value={reviewerModel} onChange={(event) => setReviewerModel(event.target.value)} />
+              </label>
+              <label className="settings-field">
+                <span>Library summarizer</span>
+                <input value={summarizerModel} onChange={(event) => setSummarizerModel(event.target.value)} />
+              </label>
+              <label className="settings-field">
+                <span>Default executor model</span>
+                <input value={executorModel} onChange={(event) => setExecutorModel(event.target.value)} />
+              </label>
+            </div>
+          </div>
+
+          <div className="settings-provider-card">
+            <div className="settings-provider-card-header">
+              <div>
+                <strong>Pi Project API</strong>
+                <span>用于默认 Pi 执行器。这里不是原生登录，而是 wrapper 注入项目 API。</span>
+              </div>
+              <em>best compatibility</em>
+            </div>
+            <div className="settings-form-grid compact">
+              <label className="settings-field">
+                <span>Pi provider base URL</span>
+                <input value={piDeepseekBaseUrl} onChange={(event) => setPiDeepseekBaseUrl(event.target.value)} />
+              </label>
+              <div className="settings-inline-help">
+                API key 复用 Manager API key。Pi 当前只支持 project_api，UI 中标记为最佳兼容。
+              </div>
+            </div>
+          </div>
+
+          <div className="settings-provider-card">
+            <div className="settings-provider-card-header">
+              <div>
+                <strong>OpenAI-Compatible Executor API</strong>
+                <span>用于 OpenCode project_api 注入。可填写 OpenAI 或任何 OpenAI-compatible 网关地址。</span>
+              </div>
+              <em>{appSettingsQuery.data?.openai.api_key_configured ? "key configured" : "optional"}</em>
+            </div>
+            <div className="settings-form-grid compact">
+              <label className="settings-field">
+                <span>API key</span>
+                <input
+                  type="password"
+                  value={openaiKey}
+                  onChange={(event) => setOpenaiKey(event.target.value)}
+                  disabled={clearOpenaiKey}
+                  placeholder={appSettingsQuery.data?.openai.api_key_configured ? "已配置，留空保持不变" : "输入 OpenAI-compatible key"}
+                />
+              </label>
+              {appSettingsQuery.data?.openai.api_key_configured ? (
+                <label className="settings-check">
+                  <input
+                    type="checkbox"
+                    checked={clearOpenaiKey}
+                    onChange={(event) => setClearOpenaiKey(event.target.checked)}
+                  />
+                  <span>清除已保存的 OpenAI-compatible key</span>
+                </label>
+              ) : null}
+              <label className="settings-field">
+                <span>Base URL</span>
+                <input value={openaiApiBaseUrl} onChange={(event) => setOpenaiApiBaseUrl(event.target.value)} />
+              </label>
+            </div>
+          </div>
+
+          <div className="settings-provider-card">
+            <div className="settings-provider-card-header">
+              <div>
+                <strong>Anthropic-Compatible Executor API</strong>
+                <span>暂未使用，仅预留给未来 Anthropic-compatible 项目 API。Claude Code 当前仅支持原生 CLI 登录，不会注入这里的 key。</span>
+              </div>
+              <em>{appSettingsQuery.data?.anthropic.api_key_configured ? "reserved key configured" : "reserved / unused"}</em>
+            </div>
+            <div className="settings-form-grid compact">
+              <label className="settings-field">
+                <span>API key</span>
+                <input
+                  type="password"
+                  value={anthropicKey}
+                  onChange={(event) => setAnthropicKey(event.target.value)}
+                  disabled={clearAnthropicKey}
+                  placeholder={appSettingsQuery.data?.anthropic.api_key_configured ? "已配置，留空保持不变" : "输入 Anthropic-compatible key"}
+                />
+              </label>
+              {appSettingsQuery.data?.anthropic.api_key_configured ? (
+                <label className="settings-check">
+                  <input
+                    type="checkbox"
+                    checked={clearAnthropicKey}
+                    onChange={(event) => setClearAnthropicKey(event.target.checked)}
+                  />
+                  <span>清除已保存的 Anthropic-compatible key</span>
+                </label>
+              ) : null}
+              <label className="settings-field">
+                <span>Base URL</span>
+                <input value={anthropicApiBaseUrl} onChange={(event) => setAnthropicApiBaseUrl(event.target.value)} />
+              </label>
+            </div>
+          </div>
+
+          <div className="settings-provider-card">
+            <div className="settings-provider-card-header">
+              <div>
+                <strong>Web Search</strong>
+                <span>Tavily 仅供 Manager 搜索使用，不参与执行器 API 注入。</span>
+              </div>
+              <em>{webSearchEnabled ? "enabled" : "disabled"}</em>
+            </div>
+            <div className="settings-form-grid compact">
+              <label className="settings-field">
+                <span>Tavily key</span>
+                <input
+                  type="password"
+                  value={tavilyKey}
+                  onChange={(event) => setTavilyKey(event.target.value)}
+                  disabled={clearTavilyKey}
+                  placeholder={appSettingsQuery.data?.web_search.api_key_configured ? "已配置，留空保持不变" : "输入 Tavily API key"}
+                />
+              </label>
+              {appSettingsQuery.data?.web_search.api_key_configured ? (
+                <label className="settings-check">
+                  <input
+                    type="checkbox"
+                    checked={clearTavilyKey}
+                    onChange={(event) => setClearTavilyKey(event.target.checked)}
+                  />
+                  <span>清除已保存的 Tavily key</span>
+                </label>
+              ) : null}
+              <label className="settings-field">
+                <span>Tavily base</span>
+                <input value={tavilyBaseUrl} onChange={(event) => setTavilyBaseUrl(event.target.value)} />
+              </label>
+              <label className="settings-check">
+                <input type="checkbox" checked={webSearchEnabled} onChange={(event) => setWebSearchEnabled(event.target.checked)} />
+                <span>启用 Tavily web search</span>
+              </label>
+            </div>
+          </div>
         </div>
         <div className="settings-actions">
           <button type="button" className="settings-button" onClick={saveApiSettings}>

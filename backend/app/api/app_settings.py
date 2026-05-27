@@ -22,6 +22,12 @@ class UpdateAppSettingsRequest(BaseModel):
     tavily_api_key: str | None = None
     clear_tavily_api_key: bool = False
     tavily_base_url: str | None = None
+    anthropic_api_key: str | None = None
+    clear_anthropic_api_key: bool = False
+    anthropic_api_base_url: str | None = None
+    openai_api_key: str | None = None
+    clear_openai_api_key: bool = False
+    openai_api_base_url: str | None = None
 
 
 @router.get("")

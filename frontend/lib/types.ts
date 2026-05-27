@@ -414,6 +414,14 @@ export interface AppSettings {
     api_key_configured: boolean;
     base_url: string;
   };
+  anthropic: {
+    api_key_configured: boolean;
+    api_base_url: string;
+  };
+  openai: {
+    api_key_configured: boolean;
+    api_base_url: string;
+  };
 }
 
 export interface UpdateAppSettingsPayload {
@@ -429,6 +437,12 @@ export interface UpdateAppSettingsPayload {
   tavily_api_key?: string | null;
   clear_tavily_api_key?: boolean;
   tavily_base_url?: string | null;
+  anthropic_api_key?: string | null;
+  clear_anthropic_api_key?: boolean;
+  anthropic_api_base_url?: string | null;
+  openai_api_key?: string | null;
+  clear_openai_api_key?: boolean;
+  openai_api_base_url?: string | null;
 }
 
 export interface UpdateProjectRuntimePreferencesPayload {

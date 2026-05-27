@@ -131,8 +131,8 @@ def validate_profile(spec: ExecutorProfileSpec, *, settings: object | None = Non
                     f"OpenCode project API mode requires api_protocol in (openai_compatible, provider_native), got {spec.api_protocol}."
                 )
             if not spec.credential_ref:
-                warnings.append("OpenCode project API mode has no credential_ref configured.")
-                auth_configured = False
+                warnings.append("OpenCode project API mode will default to credential_ref=project:openai_api_key.")
+                auth_configured = True
             else:
                 auth_configured = True
         elif worker_type == "pi":
