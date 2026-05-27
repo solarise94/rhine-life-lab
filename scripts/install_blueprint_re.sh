@@ -218,8 +218,8 @@ fi
 
 printf "Blueprint RE installer\n"
 printf "Root: %s\n\n" "${ROOT_DIR}"
-printf "This installer can finish deployment without API keys.\n"
-printf "You can configure DeepSeek / Tavily later in the UI or by editing .env.\n\n"
+printf "Managed deployment requires BLUEPRINT_DEEPSEEK_API_KEY.\n"
+printf "TAVILY_API_KEY remains optional and can be configured later.\n\n"
 if [[ -z "${PYTHON_BIN}" ]]; then
   printf "Required backend Python: %s+\n" "${REQUIRED_PYTHON_VERSION}"
   printf "Detected python3: %s\n\n" "$(python3 --version 2>/dev/null || echo missing)"
@@ -238,7 +238,7 @@ else
   printf "Mode: non-interactive defaults (pass --interactive to edit values during install)\n\n"
 fi
 
-prompt_default BLUEPRINT_DEEPSEEK_API_KEY "DeepSeek API key (optional for first install)" "${BLUEPRINT_DEEPSEEK_API_KEY:-}"
+prompt_default BLUEPRINT_DEEPSEEK_API_KEY "DeepSeek API key (required)" "${BLUEPRINT_DEEPSEEK_API_KEY:-}"
 
 prompt_default BLUEPRINT_DEEPSEEK_API_BASE_URL "DeepSeek Anthropic-compatible base URL" "${BLUEPRINT_DEEPSEEK_API_BASE_URL:-https://api.deepseek.com/anthropic}"
 prompt_default BLUEPRINT_PI_DEEPSEEK_BASE_URL "DeepSeek native base URL for Pi executor" "${BLUEPRINT_PI_DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
@@ -293,6 +293,14 @@ echo "Wrote ${ENV_FILE}"
 echo "Detected conda base: ${BLUEPRINT_EXECUTOR_CONDA_BASE:-<none>}"
 echo "Detected default Python runtime: ${BLUEPRINT_DEFAULT_PYTHON_RUNTIME:-<none>}"
 echo "Detected default R runtime: ${BLUEPRINT_DEFAULT_R_RUNTIME:-<none>}"
+
+if [[ -z "${BLUEPRINT_DEEPSEEK_API_KEY:-}" ]]; then
+  echo
+  echo "ERROR: BLUEPRINT_DEEPSEEK_API_KEY is required for managed deployment." >&2
+  echo "Set it in ${ENV_FILE} or environment, then rerun this script." >&2
+  exit 1
+fi
+
 echo "Starting full deploy..."
 
 bash "${ROOT_DIR}/scripts/deploy_user_systemd.sh"
@@ -301,4 +309,8 @@ echo
 echo "Install complete."
 echo "Frontend: http://127.0.0.1:13001"
 echo "Backend:  http://127.0.0.1:18001"
-echo "API keys can be added later in the workspace settings page or by editing ${ENV_FILE}."
+echo "Runtime config files:"
+echo "  backend.env      -> ~/.config/blueprint-re/backend.env"
+echo "  manager-agent.env -> ~/.config/blueprint-re/manager-agent.env"
+echo "  frontend.env     -> ~/.config/blueprint-re/frontend.env"
+echo "Note: editing ${ENV_FILE} requires rerunning deploy to update running services."

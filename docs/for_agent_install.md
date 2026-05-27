@@ -8,8 +8,9 @@
 
 1. 环境探查与依赖解决
    - 检查 OS、shell、`systemd --user`、`git`/`gh`、Python `3.13+`、Node.js `22.19.0+`、`npm`、Conda/Mamba、R/Rscript、`bubblewrap`。
-   - 检查 `pi`、`opencode`、`claude`、`codex` CLI 是否存在。
-   - 判断 systemd 服务是否能看到这些 CLI；如果不能，改用绝对路径 `*_COMMAND_JSON`。
+   - **检查 `pi` CLI 是否存在。这是安装主路径的唯一必需执行器。**
+   - 可选检查 `opencode`、`claude`、`codex` CLI 是否存在并记录状态；不要因它们缺失而阻塞安装。
+   - 判断 systemd 服务是否能看到 `pi`；如果不能，改用绝对路径 `*_COMMAND_JSON`。
    - 如果是 WSL 或路径包含空格，必须使用 JSON argv。
    - 缺依赖时先解决；不能因为 `bwrap` 失败而切到无沙箱。
 
@@ -96,17 +97,25 @@ bash scripts/install_blueprint_re.sh --interactive
 
 ## API Key Policy
 
-首次安装不要求用户立刻输入 API key。
+Managed deployment requires `BLUEPRINT_DEEPSEEK_API_KEY`.
 
-允许空值完成安装：
+- `BLUEPRINT_DEEPSEEK_API_KEY` — **Required** for the install/deploy path. The manager agent and pi executor both depend on it.
+- `TAVILY_API_KEY` — Optional. Can be left empty during install and configured later via the workspace settings page.
 
-- `BLUEPRINT_DEEPSEEK_API_KEY`
-- `TAVILY_API_KEY`
+If the user has not provided a key, stop and ask for one before proceeding with deploy. Do not promise "install succeeds without a key" for the managed systemd path.
 
-后续再通过两种方式补：
+## Config Ownership
 
-1. 前端工作台设置页。
-2. 仓库根目录 `.env`。
+部署后运行中的 systemd 服务，以 `~/.config/blueprint-re/*.env` 为唯一运行时真源。
+
+职责边界：
+
+- **仓库根 `.env`**：安装输入 / 部署种子。`scripts/install_blueprint_re.sh` 生成它，`scripts/deploy_user_systemd.sh` 消费它来创建 systemd env 文件。
+- **`~/.config/blueprint-re/backend.env`**：backend 服务真正读取的运行时环境。
+- **`~/.config/blueprint-re/manager-agent.env`**：manager agent 服务真正读取的运行时环境。
+- **`~/.config/blueprint-re/frontend.env`**：frontend 服务真正读取的运行时环境。
+
+**重要**：修改仓库根 `.env` 后，必须重新执行 `bash scripts/deploy_user_systemd.sh`，或至少手动重新生成 `~/.config/blueprint-re/*.env` 并重启 systemd 服务。直接改根 `.env` 不会让运行中服务生效。
 
 ## Executor Selection And Auth
 
@@ -139,13 +148,15 @@ JSON argv 模板规则：
 - `{repo_root}` 指仓库根目录，适合引用仓库内脚本。
 - `{executor_prompt_path}` 指当前 run 的 executor prompt。
 
-推荐默认值：
+推荐默认值（install/deploy 主路径自动配置前三项，`codex` 仅作为手工扩展示例）：
 
 ```env
 BLUEPRINT_PI_COMMAND_JSON=["bash","{repo_root}/scripts/blueprint_pi_launch.sh","{executor_prompt_path}"]
 BLUEPRINT_OPENCODE_COMMAND_JSON=["opencode","run","--file","{executor_prompt_path}","--format","json","--dangerously-skip-permissions","Read {executor_prompt_path} and complete the Blueprint executor contract exactly."]
 BLUEPRINT_CLAUDE_CODE_COMMAND_JSON=["claude","-p","@{executor_prompt_path}","--output-format","stream-json","--verbose"]
-BLUEPRINT_CODEX_COMMAND_JSON=["codex","exec","{executor_prompt_path}"]
+# BLUEPRINT_CODEX_COMMAND_JSON — current install/deploy defaults do NOT auto-write this.
+# If the user needs codex, add it manually based on host setup:
+# BLUEPRINT_CODEX_COMMAND_JSON=["codex","exec","{executor_prompt_path}"]
 ```
 
 旧变量 `BLUEPRINT_PI_COMMAND`、`BLUEPRINT_OPENCODE_COMMAND`、`BLUEPRINT_CLAUDE_CODE_COMMAND`、`BLUEPRINT_CODEX_COMMAND` 仍可作为兼容 fallback，但如果路径里有空格，agent 应改成 JSON argv，而不是尝试手写复杂 shell quoting。
@@ -211,6 +222,7 @@ curl -I http://127.0.0.1:13001
 
 ```bash
 command -v pi || true
+# Optional inventory — do NOT block install if missing
 command -v opencode || true
 command -v claude || true
 command -v codex || true
@@ -248,12 +260,14 @@ BLUEPRINT_CLAUDE_CODE_COMMAND_JSON=["/absolute/path/to/claude","-p","@{executor_
 
 对 `cli_native` profile，只能使用宿主机已有登录态；wrapper 不注入项目 API key。
 
-安装 agent 应检查但不要修改这些目录内容：
+安装 agent 应检查但不要修改这些目录内容。`pi` 登录态通常通过 `PI_CODING_AGENT_DIR` 或 `~/.pi/agent` 管理：
 
 ```bash
-test -d "$HOME/.claude" && echo "Claude Code login dir present"
-test -d "$HOME/.codex" && echo "Codex login dir present"
+test -d "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" && echo "Pi login dir present"
 test -d "${XDG_CONFIG_HOME:-$HOME/.config}/opencode" && echo "OpenCode config dir present"
+test -d "$HOME/.claude" && echo "Claude Code login dir present"
+# Codex is optional; only check if the user explicitly asked for it
+test -d "$HOME/.codex" && echo "Codex login dir present"
 ```
 
 如果目录缺失或 CLI 要求重新登录，告诉用户在宿主机执行对应 CLI 登录。不要在 bwrap run 内尝试刷新登录。
@@ -319,5 +333,5 @@ bash scripts/deploy_user_systemd.sh
 - 不要因为 `bwrap` 失败而静默降级到无沙箱执行。
 - 不要把 API key 写进文档、日志或提交。
 - 不要假设用户已经准备好 R/Bioconductor；如果没有，先装主程序，再让用户后续补 runtime。
-- 如果 agent 只负责把工作台跑起来，空 API key 是允许的；此时 manager/online features 运行时会明确提示缺少 key。
+- 受管部署（systemd 服务）要求 `BLUEPRINT_DEEPSEEK_API_KEY`。安装脚本会在调用 deploy 之前校验并失败。
 - 默认优先无交互安装；只有在用户明确要求时才切到 `--interactive`。
