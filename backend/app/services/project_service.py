@@ -75,8 +75,7 @@ class ProjectService:
             if child.name.startswith("_"):
                 continue
             try:
-                snapshot = self.get_project_snapshot(child.name)
-                projects.append(snapshot["summary"])
+                projects.append(self._project_summary(child.name))
             except Exception as exc:
                 logger.exception("Failed to load project summary for %s", child.name)
                 self._write_project_recovery_marker(child, f"Project failed to load during list_projects: {exc}")
@@ -95,6 +94,17 @@ class ProjectService:
                     )
                 )
         return projects
+
+    def _project_summary(self, project_id: str) -> ProjectSummary:
+        store = self.graph_store(project_id)
+        project = self._project_state_with_runtime_preferences(store)
+        cards = store.load_cards()
+        assets = store.load_assets()
+        return ProjectSummary(
+            **project.model_dump(),
+            card_counts=self._count_by(cards, "status"),
+            result_counts=self._count_by(assets, "status"),
+        )
 
     @staticmethod
     def _write_project_recovery_marker(root: Path, reason: str) -> None:
@@ -512,8 +522,7 @@ class ProjectService:
 
     def _project_state_with_runtime_preferences(self, store: GraphStore) -> ProjectState:
         project = store.load_project_state()
-        graph = store.load_graph()
-        metadata = graph.metadata if isinstance(graph.metadata, dict) else {}
+        metadata = store.load_metadata()
         runtime_preferences = metadata.get("runtime_preferences")
         if isinstance(runtime_preferences, dict):
             try:

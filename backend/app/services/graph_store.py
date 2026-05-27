@@ -55,14 +55,23 @@ class GraphStore:
     def save_runs(self, runs: list[RunRecord]) -> None:
         atomic_write_json(self._path("graph", "runs.json"), [item.model_dump() for item in runs])
 
+    def get_run_status(self, run_id: str) -> str | None:
+        for run in self.load_runs():
+            if run.run_id == run_id:
+                return run.status
+        return None
+
     def load_report_items(self) -> list[ReportItem]:
         return [ReportItem.model_validate(item) for item in read_json(self._path("graph", "report.json"), [])]
 
     def save_report_items(self, items: list[ReportItem]) -> None:
         atomic_write_json(self._path("graph", "report.json"), [item.model_dump() for item in items])
 
+    def load_metadata(self) -> dict:
+        return read_json(self._path("graph", "graph.json"), {"schema_version": "0.1.0"})
+
     def load_graph(self) -> GraphState:
-        metadata = read_json(self._path("graph", "graph.json"), {"schema_version": "0.1.0"})
+        metadata = self.load_metadata()
         return GraphState(
             modules=self.load_modules(),
             assets=self.load_assets(),
@@ -98,6 +107,13 @@ class GraphStore:
 
     def save_run_events(self, run_id: str, events: list[RunEvent]) -> None:
         atomic_write_json(self._path("runs", run_id, "events.json"), [item.model_dump() for item in events])
+
+    def append_run_events(self, run_id: str, new_events: list[RunEvent]) -> None:
+        if not new_events:
+            return
+        events = self.load_run_events(run_id)
+        events.extend(new_events)
+        self.save_run_events(run_id, events)
 
     def load_chat_sessions(self) -> list[ChatSession]:
         return [ChatSession.model_validate(item) for item in read_json(self._path("chat", "sessions.json"), [])]

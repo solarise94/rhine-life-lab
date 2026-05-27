@@ -16,6 +16,8 @@ from app.services.utils import utc_now
 
 logger = logging.getLogger(__name__)
 
+WAKE_POLL_INTERVAL_SECONDS = 5.0
+
 
 class ManagerWakeProcessor:
     def __init__(
@@ -49,7 +51,7 @@ class ManagerWakeProcessor:
             self._thread.join(timeout=1)
 
     def _loop(self) -> None:
-        while not self._stop_event.wait(1.0):
+        while not self._stop_event.wait(WAKE_POLL_INTERVAL_SECONDS):
             for project in self.project_service.list_projects():
                 lock = self._lock_for(project.project_id)
                 if not lock.acquire(blocking=False):

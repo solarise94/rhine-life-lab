@@ -2825,6 +2825,34 @@ manifest = {
         run_record = next(item for item in snapshot["graph"].runs if item.run_id == run["run_id"])
         self.assertEqual("Local scaffold worker completed successfully.", run_record.summary)
 
+    def test_executor_output_events_are_buffered_until_flush(self) -> None:
+        run_id = "run_event_buffer_test"
+        store = self.project_service.graph_store("test-project")
+        store.save_run_events(run_id, [])
+
+        for index in range(3):
+            self.worker._append_event(
+                "test-project",
+                run_id,
+                "card_enrichment_group",
+                event_type="executor_output",
+                message=f"line {index}",
+            )
+
+        self.assertEqual([], store.load_run_events(run_id))
+
+        self.worker._append_event(
+            "test-project",
+            run_id,
+            "card_enrichment_group",
+            event_type="run_started",
+            message="flush lifecycle event",
+        )
+
+        events = store.load_run_events(run_id)
+        self.assertEqual(["executor_output", "executor_output", "executor_output", "run_started"], [event.event_type for event in events])
+        self.assertEqual(["evt_run_event_buffer_test_001", "evt_run_event_buffer_test_002", "evt_run_event_buffer_test_003", "evt_run_event_buffer_test_004"], [event.event_id for event in events])
+
     def test_cancel_run_from_needs_approval_resets_card_to_planned(self) -> None:
         self.worker.registry["needs_approval_stub"] = NeedsApprovalWorkerAdapter()
         run = self.worker.start_run("test-project", "card_enrichment_group", worker_type="needs_approval_stub")

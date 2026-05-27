@@ -156,6 +156,7 @@ def _make_settings(**overrides) -> SimpleNamespace:
         "manager_model": "deepseek-v4-pro",
         "executor_model": "deepseek-v4-flash",
         "reviewer_model": "deepseek-v4-flash",
+        "library_summarizer_model": "deepseek-v4-flash",
         "manager_temperature": 0.2,
         "manager_max_tokens": 2400,
         "manager_timeout_seconds": 600,
@@ -622,6 +623,20 @@ class TestRendererRegistry(unittest.TestCase):
 
 
 class TestExecutorProfileResolution(unittest.TestCase):
+    def test_app_config_cache_reloads_when_file_changes(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = _make_settings(data_root=tmp_dir)
+            service = AppConfigService(settings)
+            config_path = Path(tmp_dir) / "_app_settings.json"
+            config_path.write_text(
+                json.dumps({"openai_api_base_url": "https://example.test/v1"}),
+                encoding="utf-8",
+            )
+
+            secret_settings = service.get_secret_settings()
+
+            self.assertEqual(secret_settings["openai_api_base_url"], "https://example.test/v1")
+
     def test_stored_profiles_do_not_hide_missing_defaults(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             settings = _make_settings(data_root=tmp_dir)

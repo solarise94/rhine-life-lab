@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from pydantic import SecretStr
@@ -17,6 +18,9 @@ class AppConfigService:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self.path = Path(self.settings.data_root) / "_app_settings.json"
+        self._cache_lock = RLock()
+        self._cache_mtime_ns: int | None = None
+        self._cache_payload: dict[str, Any] | None = None
         self._apply_runtime_overrides(self._load())
 
     def get_public_settings(self) -> dict[str, Any]:
@@ -156,21 +160,38 @@ class AppConfigService:
         }
 
     def _load(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {}
-        try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
+        with self._cache_lock:
+            try:
+                mtime_ns = self.path.stat().st_mtime_ns
+            except OSError:
+                self._cache_mtime_ns = None
+                self._cache_payload = {}
+                return {}
+            if self._cache_payload is not None and self._cache_mtime_ns == mtime_ns:
+                return dict(self._cache_payload)
+            try:
+                payload = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            self._cache_mtime_ns = mtime_ns
+            self._cache_payload = dict(payload)
+            return dict(payload)
 
     def _save(self, payload: dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        try:
-            self.path.chmod(0o600)
-        except OSError:
-            pass
+        with self._cache_lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            try:
+                self.path.chmod(0o600)
+            except OSError:
+                pass
+            try:
+                self._cache_mtime_ns = self.path.stat().st_mtime_ns
+            except OSError:
+                self._cache_mtime_ns = None
+            self._cache_payload = dict(payload)
 
     def _apply_runtime_overrides(self, config: dict[str, Any]) -> None:
         if config.get("deepseek_api_base_url"):

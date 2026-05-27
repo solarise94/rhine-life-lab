@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 
 _SENSITIVE_COMMAND_KEYS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+_EVENT_FLUSH_BATCH_SIZE = 25
 
 
 def _is_sensitive_command_key(value: str) -> bool:
@@ -146,6 +147,8 @@ class WorkerService:
         self._execution_locks: dict[str, Lock] = {}
         self._execution_semaphores: dict[str, Semaphore] = {}
         self._card_locks: dict[tuple[str, str], Lock] = {}
+        self._event_buffers: dict[tuple[str, str], list[RunEvent]] = {}
+        self._event_sequences: dict[tuple[str, str], int] = {}
         self._execution_locks_guard = Lock()
         self._reconcile_active_runs()
 
@@ -777,15 +780,18 @@ class WorkerService:
                 with transcript_path.open("a", encoding="utf-8") as transcript:
                     if process.stdout is None:
                         return
-                    for raw_line in process.stdout:
-                        line = raw_line.rstrip()
-                        if not line:
-                            continue
-                        transcript.write(f"- {line}\n")
-                        transcript.flush()
-                        if self._handle_structured_executor_event(project_id, run_id, card_id, line):
-                            continue
-                        self._append_event(project_id, run_id, card_id, event_type="executor_output", message=line)
+                    try:
+                        for raw_line in process.stdout:
+                            line = raw_line.rstrip()
+                            if not line:
+                                continue
+                            transcript.write(f"- {line}\n")
+                            transcript.flush()
+                            if self._handle_structured_executor_event(project_id, run_id, card_id, line):
+                                continue
+                            self._append_event(project_id, run_id, card_id, event_type="executor_output", message=line)
+                    finally:
+                        self._flush_run_event_buffer(project_id, run_id)
 
             reader = Thread(target=pump_stdout, daemon=True)
             reader.start()
@@ -1050,6 +1056,7 @@ class WorkerService:
                     secondary_exception=secondary_exc,
                 )
         finally:
+            self._flush_run_event_buffer(project_id, run_id, clear_sequence=True)
             self._processes.pop(run_id, None)
             self._threads.pop(run_id, None)
 
@@ -1167,8 +1174,9 @@ class WorkerService:
         with lock:
             store = self.project_service.graph_store(project_id)
             cards = store.load_cards()
-            graph = store.load_graph()
-            run = next((item for item in graph.runs if item.run_id == run_id), None)
+            runs = store.load_runs()
+            modules = store.load_modules()
+            run = next((item for item in runs if item.run_id == run_id), None)
             if run is None:
                 return
             card = next(item for item in cards if item.card_id == card_id)
@@ -1182,9 +1190,10 @@ class WorkerService:
                 card.status = "failed"
                 card.manager_review = summary
             card.progress_note = progress_note
-            ModuleGroupStateService.sync_linked_module_status_from_card(card, graph.modules)
-            ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
-            store.save_graph(graph)
+            ModuleGroupStateService.sync_linked_module_status_from_card(card, modules)
+            ModuleGroupStateService.sync_group_hierarchy(cards, modules)
+            store.save_runs(runs)
+            store.save_modules(modules)
             store.save_cards(cards)
 
     def _append_event(
@@ -1201,25 +1210,59 @@ class WorkerService:
         lock = self.project_service.lock_for(project_id)
         with lock:
             store = self.project_service.graph_store(project_id)
-            events = store.load_run_events(run_id)
-            sequence = sequence_hint or (len(events) + 1)
-            events.append(
-                RunEvent(
-                    event_id=f"evt_{run_id}_{sequence:03d}",
-                    run_id=run_id,
-                    card_id=card_id,
-                    source="executor" if event_type in {"executor_output", "executor_progress", "executor_issue"} else "manager",
-                    event_type=event_type,
-                    visibility="bubble",
-                    preview_id=f"bubble_{card_id}",
-                    utterance_id=f"utt_{run_id}_{sequence:03d}",
-                    stream_state="complete",
-                    message=message,
-                    created_at=utc_now(),
-                    payload=payload or {},
-                )
+            if sequence_hint:
+                sequence = sequence_hint
+                key = (project_id, run_id)
+                self._event_sequences[key] = max(self._event_sequences.get(key, 0), sequence)
+            else:
+                sequence = self._next_event_sequence_locked(project_id, run_id, store)
+            event = RunEvent(
+                event_id=f"evt_{run_id}_{sequence:03d}",
+                run_id=run_id,
+                card_id=card_id,
+                source="executor" if event_type in {"executor_output", "executor_progress", "executor_issue"} else "manager",
+                event_type=event_type,
+                visibility="bubble",
+                preview_id=f"bubble_{card_id}",
+                utterance_id=f"utt_{run_id}_{sequence:03d}",
+                stream_state="complete",
+                message=message,
+                created_at=utc_now(),
+                payload=payload or {},
             )
-            store.save_run_events(run_id, events)
+            key = (project_id, run_id)
+            if event_type == "executor_output":
+                buffer = self._event_buffers.setdefault(key, [])
+                buffer.append(event)
+                if len(buffer) >= _EVENT_FLUSH_BATCH_SIZE:
+                    self._flush_event_buffer_locked(project_id, run_id, store)
+                return
+            self._flush_event_buffer_locked(project_id, run_id, store)
+            store.append_run_events(run_id, [event])
+
+    def _next_event_sequence_locked(self, project_id: str, run_id: str, store: Any) -> int:
+        key = (project_id, run_id)
+        current = self._event_sequences.get(key)
+        if current is None:
+            current = len(store.load_run_events(run_id))
+        current += 1
+        self._event_sequences[key] = current
+        return current
+
+    def _flush_event_buffer_locked(self, project_id: str, run_id: str, store: Any) -> None:
+        key = (project_id, run_id)
+        events = self._event_buffers.pop(key, None)
+        if not events:
+            return
+        store.append_run_events(run_id, events)
+
+    def _flush_run_event_buffer(self, project_id: str, run_id: str, *, clear_sequence: bool = False) -> None:
+        lock = self.project_service.lock_for(project_id)
+        with lock:
+            store = self.project_service.graph_store(project_id)
+            self._flush_event_buffer_locked(project_id, run_id, store)
+            if clear_sequence:
+                self._event_sequences.pop((project_id, run_id), None)
 
     def _write_run_fatal_error(
         self,
@@ -1711,16 +1754,14 @@ class WorkerService:
         lock = self.project_service.lock_for(project_id)
         with lock:
             store = self.project_service.graph_store(project_id)
-            graph = store.load_graph()
+            runs = store.load_runs()
             active = self._active_run_statuses()
-            return any(run.status in active for run in graph.runs)
+            return any(run.status in active for run in runs)
 
     def _run_status(self, project_id: str, run_id: str) -> str | None:
         lock = self.project_service.lock_for(project_id)
         with lock:
-            graph = self.project_service.graph_store(project_id).load_graph()
-            run = next((item for item in graph.runs if item.run_id == run_id), None)
-            return run.status if run else None
+            return self.project_service.graph_store(project_id).get_run_status(run_id)
 
     @staticmethod
     def _materialize_run_assets(
