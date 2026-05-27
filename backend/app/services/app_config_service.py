@@ -773,10 +773,6 @@ class AppConfigService:
             )
             with request.urlopen(http_request, timeout=timeout_seconds) as response:
                 response.read(4096)
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            result = {"ok": True, "message": "Model test succeeded.", "latency_ms": elapsed_ms}
-            self._save_provider_test_result(config, provider, result)
-            return result
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:1200]
             result = {
@@ -786,16 +782,18 @@ class AppConfigService:
                 "detail": detail,
                 "latency_ms": int((time.monotonic() - started) * 1000),
             }
-            self._save_provider_test_result(config, provider, result)
-            return result
         except Exception as exc:
             result = {
                 "ok": False,
                 "message": f"Model test failed: {exc}",
                 "latency_ms": int((time.monotonic() - started) * 1000),
             }
-            self._save_provider_test_result(config, provider, result)
-            return result
+        else:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            result = {"ok": True, "message": "Model test succeeded.", "latency_ms": elapsed_ms}
+
+        self._save_provider_test_result(config, provider, result)
+        return result
 
     @staticmethod
     def _anthropic_messages_url(base_url: str) -> str:

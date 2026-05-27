@@ -30,11 +30,17 @@ import {
 type ScriptPreference = "auto" | "prefer_python" | "prefer_r" | "prefer_mixed";
 type EditableProviderProfile = Omit<ApiProviderProfile, "api_key_configured"> & { api_key_configured?: boolean };
 
+function hasTestResult(
+  profile: ApiProviderProfile,
+): profile is ApiProviderProfile & { test_result: TestApiProviderResponse } {
+  return profile.test_result != null;
+}
+
 function testResultsFromProfiles(profiles: ApiProviderProfile[]) {
   return Object.fromEntries(
     profiles
-      .filter((profile) => profile.test_result)
-      .map((profile) => [profile.provider_id, profile.test_result as TestApiProviderResponse]),
+      .filter(hasTestResult)
+      .map((profile) => [profile.provider_id, profile.test_result]),
   );
 }
 
