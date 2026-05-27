@@ -59,6 +59,7 @@ class ConfigureCardExecutionPayload(BaseModel):
 class StartCardRunPayload(BaseModel):
     card_id: str
     worker_type: str | None = None
+    profile_id: str | None = None
     python_runtime: str | None = None
     r_runtime: str | None = None
 
@@ -739,6 +740,7 @@ class ManagerBlueprintTools:
                 project_id,
                 request.card_id,
                 worker_type=request.worker_type,
+                profile_id=request.profile_id,
                 python_runtime=request.python_runtime,
                 r_runtime=request.r_runtime,
             )
@@ -784,6 +786,7 @@ class ManagerBlueprintTools:
                 project_id,
                 request.card_id,
                 worker_type=request.worker_type,
+                profile_id=request.profile_id,
                 python_runtime=request.python_runtime,
                 r_runtime=request.r_runtime,
             )

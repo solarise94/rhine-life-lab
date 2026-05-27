@@ -28,6 +28,16 @@ class UpdateAppSettingsRequest(BaseModel):
     openai_api_key: str | None = None
     clear_openai_api_key: bool = False
     openai_api_base_url: str | None = None
+    api_provider_profiles: list[dict[str, Any]] | None = None
+    api_provider_keys: dict[str, str | None] | None = None
+    clear_api_provider_keys: list[str] | None = None
+    provider_bindings: dict[str, dict[str, str | None]] | None = None
+    default_worker_type: str | None = None
+
+
+class TestApiProviderRequest(BaseModel):
+    provider: dict[str, Any]
+    api_key: str | None = None
 
 
 @router.get("")
@@ -41,3 +51,11 @@ def update_app_settings(
     config_service: AppConfigService = Depends(get_app_config_service),
 ) -> dict[str, Any]:
     return config_service.update_settings(request.model_dump(exclude_unset=True))
+
+
+@router.post("/test-provider")
+def test_api_provider(
+    request: TestApiProviderRequest,
+    config_service: AppConfigService = Depends(get_app_config_service),
+) -> dict[str, Any]:
+    return config_service.test_api_provider(request.provider, api_key=request.api_key)

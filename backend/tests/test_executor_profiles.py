@@ -17,6 +17,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from fastapi import HTTPException
 from app.models.executor_profiles import (
     AUTH_MODE_CLI_NATIVE,
     AUTH_MODE_PROJECT_API,
@@ -164,6 +165,15 @@ def _make_settings(**overrides) -> SimpleNamespace:
         "anthropic_api_base_url": "https://api.anthropic.com",
         "openai_api_key": None,
         "openai_api_base_url": "https://api.openai.com/v1",
+        "default_worker_type": "pi",
+        "pi_command": None,
+        "pi_command_json": None,
+        "opencode_command": None,
+        "opencode_command_json": None,
+        "codex_command": None,
+        "codex_command_json": None,
+        "claude_code_command": None,
+        "claude_code_command_json": None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -350,6 +360,44 @@ class TestOpenCodeRenderer(unittest.TestCase):
             self.assertEqual(config["provider"]["openai"]["options"]["baseURL"], "https://api.openai.com/v1")
             self.assertEqual(result.config_file_paths, [str(config_path)])
             self.assertEqual(result.environment_overlay["OPENCODE_CONFIG_DIR"], str(config_path.parent))
+
+    def test_project_api_generates_anthropic_compatible_config(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            renderer = OpenCodeRenderer()
+            run_dir = tmp_path / "run"
+            run_dir.mkdir()
+            profile = ExecutorProfileSpec(
+                profile_id="opencode-project",
+                display_name="OpenCode project API",
+                worker_type="opencode",
+                auth_mode=AUTH_MODE_PROJECT_API,
+                api_protocol="anthropic_compatible",
+                provider_id="anthropic",
+                model="deepseek-v4-flash",
+                base_url="https://api.deepseek.com/anthropic",
+                credential_ref="project:opencode_api_key",
+            )
+            settings = _make_settings(
+                opencode_api_key=SimpleNamespace(get_secret_value=lambda: "sk-ant-opencode-123"),
+                opencode_api_base_url="https://api.deepseek.com/anthropic",
+                opencode_api_protocol="anthropic_compatible",
+            )
+            result = renderer.render(
+                auth_mode=AUTH_MODE_PROJECT_API,
+                profile=profile,
+                prompt_path=_make_prompt(tmp_path),
+                run_dir=run_dir,
+                project_root=tmp_path,
+                settings=settings,
+            )
+            self.assertTrue(result.is_supported)
+            self.assertIn("ANTHROPIC_API_KEY", result.environment_overlay)
+            self.assertNotIn("OPENAI_API_KEY", result.environment_overlay)
+            config = json.loads((run_dir / "opencode-config" / "opencode.json").read_text(encoding="utf-8"))
+            self.assertIn("anthropic", config["provider"])
+            self.assertEqual(config["model"], "anthropic/deepseek-v4-flash")
+            self.assertEqual(config["provider"]["anthropic"]["options"]["baseURL"], "https://api.deepseek.com/anthropic/v1")
 
     def test_project_api_uses_settings_fallbacks(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -625,7 +673,7 @@ class TestRendererRegistry(unittest.TestCase):
 class TestExecutorProfileResolution(unittest.TestCase):
     def test_app_config_cache_reloads_when_file_changes(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            settings = _make_settings(data_root=tmp_dir)
+            settings = _make_settings(data_root=tmp_dir, deepseek_api_key=None)
             service = AppConfigService(settings)
             config_path = Path(tmp_dir) / "_app_settings.json"
             config_path.write_text(
@@ -661,6 +709,171 @@ class TestExecutorProfileResolution(unittest.TestCase):
             service = AppConfigService(settings)
 
             self.assertIsNone(service.resolve_executor_profile("pi", profile_id="opencode-cli-native"))
+
+    def test_api_provider_bindings_override_role_settings(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = _make_settings(data_root=tmp_dir)
+            service = AppConfigService(settings)
+
+            public = service.update_settings(
+                {
+                    "api_provider_profiles": [
+                        {
+                            "provider_id": "anthropic-gateway",
+                            "display_name": "Anthropic Gateway",
+                            "protocol": "anthropic_compatible",
+                            "model": "manager-model",
+                            "base_url": "https://gateway.example.com/anthropic",
+                            "native_base_url": "https://gateway.example.com",
+                        },
+                        {
+                            "provider_id": "opencode-gateway",
+                            "display_name": "OpenCode Gateway",
+                            "protocol": "anthropic_compatible",
+                            "model": "opencode-model",
+                            "base_url": "https://opencode.example.com/anthropic",
+                        },
+                    ],
+                    "api_provider_keys": {
+                        "anthropic-gateway": "sk-ant-gateway",
+                        "opencode-gateway": "sk-opencode-gateway",
+                    },
+                    "provider_bindings": {
+                        "manager": {"provider_id": "anthropic-gateway"},
+                        "reviewer": {"provider_id": "anthropic-gateway"},
+                        "pi_executor": {"provider_id": "anthropic-gateway"},
+                        "opencode_executor": {"provider_id": "opencode-gateway"},
+                        "library_summarizer": {"provider_id": "anthropic-gateway"},
+                    },
+                }
+            )
+
+            self.assertTrue(
+                next(item for item in public["api_provider_profiles"] if item["provider_id"] == "anthropic-gateway")[
+                    "api_key_configured"
+                ]
+            )
+            self.assertEqual(settings.manager_api_base_url, "https://gateway.example.com/anthropic")
+            self.assertEqual(settings.manager_api_key.get_secret_value(), "sk-ant-gateway")
+            self.assertEqual(settings.manager_model, "manager-model")
+            self.assertEqual(settings.reviewer_api_base_url, "https://gateway.example.com/anthropic")
+            self.assertEqual(settings.reviewer_model, "manager-model")
+            self.assertEqual(settings.pi_anthropic_base_url, "https://gateway.example.com/anthropic")
+            self.assertEqual(settings.pi_deepseek_base_url, "https://gateway.example.com")
+            self.assertEqual(settings.pi_executor_model, "manager-model")
+            self.assertEqual(settings.opencode_api_base_url, "https://opencode.example.com/anthropic")
+            self.assertEqual(settings.opencode_api_key.get_secret_value(), "sk-opencode-gateway")
+            self.assertEqual(settings.opencode_api_protocol, "anthropic_compatible")
+            self.assertEqual(settings.opencode_executor_model, "opencode-model")
+
+    def test_empty_api_provider_profiles_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = _make_settings(data_root=tmp_dir)
+            service = AppConfigService(settings)
+
+            with self.assertRaises(HTTPException) as ctx:
+                service.update_settings({"api_provider_profiles": []})
+
+            self.assertEqual(400, ctx.exception.status_code)
+            self.assertIn("At least one API provider profile", str(ctx.exception.detail))
+
+    def test_unknown_provider_binding_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = _make_settings(data_root=tmp_dir)
+            service = AppConfigService(settings)
+
+            with self.assertRaises(HTTPException) as ctx:
+                service.update_settings(
+                    {
+                        "api_provider_profiles": [
+                            {
+                                "provider_id": "anthropic-gateway",
+                                "display_name": "Anthropic Gateway",
+                                "protocol": "anthropic_compatible",
+                                "model": "manager-model",
+                                "base_url": "https://gateway.example.com/anthropic",
+                            }
+                        ],
+                        "provider_bindings": {
+                            "manager": {"provider_id": "missing-provider"},
+                        },
+                    }
+                )
+
+            self.assertEqual(400, ctx.exception.status_code)
+            self.assertIn("Unknown provider bindings", str(ctx.exception.detail))
+
+    def test_incompatible_provider_binding_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = _make_settings(data_root=tmp_dir)
+            service = AppConfigService(settings)
+
+            with self.assertRaises(HTTPException) as ctx:
+                service.update_settings(
+                    {
+                        "api_provider_profiles": [
+                            {
+                                "provider_id": "openai-gateway",
+                                "display_name": "OpenAI Gateway",
+                                "protocol": "openai_compatible",
+                                "model": "gpt-compatible",
+                                "base_url": "https://gateway.example.com/v1",
+                            },
+                            {
+                                "provider_id": "anthropic-gateway",
+                                "display_name": "Anthropic Gateway",
+                                "protocol": "anthropic_compatible",
+                                "model": "manager-model",
+                                "base_url": "https://gateway.example.com/anthropic",
+                            },
+                        ],
+                        "provider_bindings": {
+                            "manager": {"provider_id": "anthropic-gateway"},
+                            "reviewer": {"provider_id": "openai-gateway"},
+                            "pi_executor": {"provider_id": "anthropic-gateway"},
+                            "opencode_executor": {"provider_id": "anthropic-gateway"},
+                            "library_summarizer": {"provider_id": "anthropic-gateway"},
+                        },
+                    }
+                )
+
+            self.assertEqual(400, ctx.exception.status_code)
+            self.assertIn("Incompatible provider bindings", str(ctx.exception.detail))
+            self.assertIn("reviewer=openai-gateway(openai_compatible)", str(ctx.exception.detail))
+
+    def test_clearing_default_provider_key_clears_legacy_secret(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = _make_settings(data_root=tmp_dir)
+            service = AppConfigService(settings)
+            service.update_settings({"deepseek_api_key": "sk-legacy"})
+
+            public = service.update_settings({"clear_api_provider_keys": ["deepseek"]})
+
+            deepseek = next(item for item in public["api_provider_profiles"] if item["provider_id"] == "deepseek")
+            self.assertFalse(deepseek["api_key_configured"])
+            self.assertIsNone(settings.deepseek_api_key)
+
+    def test_saved_provider_list_does_not_append_default_openai(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = _make_settings(data_root=tmp_dir)
+            service = AppConfigService(settings)
+
+            public = service.update_settings(
+                {
+                    "api_provider_profiles": [
+                        {
+                            "provider_id": "deepseek",
+                            "display_name": "DeepSeek",
+                            "protocol": "anthropic_compatible",
+                            "model": "deepseek-v4-flash",
+                            "base_url": "https://api.deepseek.com/anthropic",
+                        }
+                    ]
+                }
+            )
+
+            provider_ids = [item["provider_id"] for item in public["api_provider_profiles"]]
+            self.assertEqual(provider_ids, ["deepseek"])
 
 
 if __name__ == "__main__":

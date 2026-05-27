@@ -10,6 +10,7 @@ REQUIRED_PYTHON_VERSION="3.13.0"
 REQUIRED_NODE_VERSION="22.19.0"
 NODE_BIN=""
 PYTHON_BIN=""
+PI_BIN=""
 OPENCODE_BIN=""
 CLAUDE_BIN=""
 
@@ -210,10 +211,14 @@ check_language_versions() {
     exit 1
   fi
   node_version="$(node_version_of "${NODE_BIN}")"
+  PI_BIN="$(find_optional_bin pi)"
   OPENCODE_BIN="$(find_optional_bin opencode)"
   CLAUDE_BIN="$(find_optional_bin claude)"
   echo "Using Python ${python_version} via ${PYTHON_BIN}"
   echo "Using Node ${node_version} via ${NODE_BIN}"
+  [[ -n "${PI_BIN}" ]] && echo "Pi CLI found: ${PI_BIN}" || echo "Pi CLI not found (optional)"
+  [[ -n "${OPENCODE_BIN}" ]] && echo "OpenCode found: ${OPENCODE_BIN}" || echo "OpenCode not found (optional)"
+  [[ -n "${CLAUDE_BIN}" ]] && echo "Claude Code found: ${CLAUDE_BIN}" || echo "Claude Code not found (optional)"
 }
 
 check_systemd_user() {
@@ -262,6 +267,7 @@ import secrets
 print(secrets.token_urlsafe(32))
 PY
 )}"
+DEFAULT_PI_COMMAND_JSON="[\"${PI_BIN:-pi}\",\"--no-session\",\"-p\",\"@{executor_prompt_path}\"]"
 DEFAULT_OPENCODE_COMMAND_JSON="[\"${OPENCODE_BIN:-opencode}\",\"run\",\"--file\",\"{executor_prompt_path}\",\"--format\",\"json\",\"--dangerously-skip-permissions\",\"Read {executor_prompt_path} and complete the Blueprint executor contract exactly.\"]"
 DEFAULT_CLAUDE_CODE_COMMAND_JSON="[\"${CLAUDE_BIN:-claude}\",\"-p\",\"@{executor_prompt_path}\",\"--output-format\",\"stream-json\",\"--verbose\"]"
 
@@ -292,6 +298,7 @@ _write_env_once "${APP_ENV_DIR}/backend.env" \
   "BLUEPRINT_PI_DEEPSEEK_BASE_URL=${BLUEPRINT_PI_DEEPSEEK_BASE_URL:-https://api.deepseek.com}" \
   "BLUEPRINT_MANAGER_MODEL=${BLUEPRINT_MANAGER_MODEL:-deepseek-v4-pro}" \
   "BLUEPRINT_INTERNAL_TOOL_TOKEN=${INTERNAL_TOOL_TOKEN}" \
+  "BLUEPRINT_PI_COMMAND_JSON=${BLUEPRINT_PI_COMMAND_JSON:-${DEFAULT_PI_COMMAND_JSON}}" \
   "BLUEPRINT_OPENCODE_COMMAND_JSON=${BLUEPRINT_OPENCODE_COMMAND_JSON:-${DEFAULT_OPENCODE_COMMAND_JSON}}" \
   "BLUEPRINT_CLAUDE_CODE_COMMAND_JSON=${BLUEPRINT_CLAUDE_CODE_COMMAND_JSON:-${DEFAULT_CLAUDE_CODE_COMMAND_JSON}}"
 

@@ -23,6 +23,8 @@ import {
   LibraryListResponse,
   RunEvent,
   StartRunResponse,
+  TestApiProviderPayload,
+  TestApiProviderResponse,
   ExecutorProfile,
   ExecutorProfileListResponse,
   ExecutorProfileValidation,
@@ -162,6 +164,12 @@ export const api = {
   updateAppSettings(payload: UpdateAppSettingsPayload) {
     return request<AppSettings>("/app-settings", {
       method: "PUT",
+      body: JSON.stringify(payload),
+    });
+  },
+  testApiProvider(payload: TestApiProviderPayload) {
+    return request<TestApiProviderResponse>("/app-settings/test-provider", {
+      method: "POST",
       body: JSON.stringify(payload),
     });
   },
@@ -497,10 +505,15 @@ export const api = {
       method: "POST",
     });
   },
-  rerunCard(projectId: string, cardId: string, workerType?: string, pythonRuntime?: string, rRuntime?: string) {
+  rerunCard(projectId: string, cardId: string, workerType?: string, profileId?: string, pythonRuntime?: string, rRuntime?: string) {
     return request<StartRunResponse>(`/projects/${projectId}/cards/${cardId}/rerun`, {
       method: "POST",
-      body: JSON.stringify({ worker_type: workerType ?? null, python_runtime: pythonRuntime ?? null, r_runtime: rRuntime ?? null }),
+      body: JSON.stringify({
+        worker_type: workerType ?? null,
+        profile_id: profileId ?? null,
+        python_runtime: pythonRuntime ?? null,
+        r_runtime: rRuntime ?? null,
+      }),
     });
   },
   getRunEvents(projectId: string, runId: string) {

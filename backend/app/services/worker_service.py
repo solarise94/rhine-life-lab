@@ -163,7 +163,24 @@ class WorkerService:
     ) -> dict:
         python_runtime = self._normalize_python_runtime(python_runtime)
         r_runtime = self._normalize_r_runtime(r_runtime)
-        resolved_worker_type = self._resolve_worker_type(worker_type)
+        config_service = AppConfigService(self.project_service.settings)
+        resolved_worker_type = worker_type
+        resolved_profile_id = profile_id
+        if resolved_worker_type is None and resolved_profile_id:
+            resolved_profile = self._resolve_profile_across_workers(config_service, resolved_profile_id)
+            if resolved_profile is None:
+                raise HTTPException(status_code=409, detail=f"Executor profile {resolved_profile_id} is not configured.")
+            resolved_worker_type = str(resolved_profile.get("worker_type") or "")
+            resolved_profile_id = str(resolved_profile.get("profile_id") or resolved_profile_id)
+        resolved_worker_type = self._resolve_worker_type(resolved_worker_type)
+        if resolved_profile_id:
+            resolved_profile = config_service.resolve_executor_profile(resolved_worker_type, profile_id=resolved_profile_id)
+            if resolved_profile is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Executor profile {resolved_profile_id} is not configured for worker_type={resolved_worker_type}.",
+                )
+            resolved_profile_id = str(resolved_profile.get("profile_id") or resolved_profile_id)
         adapter = self.registry.get(resolved_worker_type)
         if adapter is None:
             raise HTTPException(status_code=400, detail=f"Unknown worker_type: {resolved_worker_type}")
@@ -182,7 +199,7 @@ class WorkerService:
                 adapter,
                 execution_guard,
                 guard_kind,
-                profile_id=profile_id,
+                profile_id=resolved_profile_id,
                 python_runtime=python_runtime,
                 r_runtime=r_runtime,
             )
@@ -565,11 +582,13 @@ class WorkerService:
         project_id: str,
         card_id: str,
         worker_type: str | None = None,
+        profile_id: str | None = None,
         python_runtime: str | None = None,
         r_runtime: str | None = None,
     ) -> dict:
         python_runtime = self._normalize_python_runtime(python_runtime)
         r_runtime = self._normalize_r_runtime(r_runtime)
+        requested_profile_id = profile_id
         old_execution_run_ids: list[str] = []
         lock = self.project_service.lock_for(project_id)
         with lock:
@@ -590,6 +609,12 @@ class WorkerService:
                 and run.status in {"success", "failed", "cancelled", "reviewed"}
                 and not (self._threads.get(run.run_id) and self._threads[run.run_id].is_alive())
             ]
+            if requested_profile_id is None and card.executor_context is not None:
+                requested_profile_id = card.executor_context.executor_profile_id
+                if not requested_profile_id and card.executor_context.executor_profile:
+                    legacy_profile = card.executor_context.executor_profile
+                    if not legacy_profile.endswith("_worker"):
+                        requested_profile_id = legacy_profile
             if card.status != "planned":
                 previous_status = card.status
                 card.status = "planned"
@@ -600,7 +625,14 @@ class WorkerService:
                 store.save_graph(graph)
                 store.save_cards(cards)
         self._cleanup_execution_files_for_runs(project_id, old_execution_run_ids)
-        return self.start_run(project_id, card_id, worker_type=worker_type, python_runtime=python_runtime, r_runtime=r_runtime)
+        return self.start_run(
+            project_id,
+            card_id,
+            worker_type=worker_type,
+            profile_id=requested_profile_id,
+            python_runtime=python_runtime,
+            r_runtime=r_runtime,
+        )
 
     def review_run(self, project_id: str, run_id: str, accept: bool = True) -> dict:
         valid, errors = self.manifest_service.validate_manifest(project_id, run_id)
@@ -1517,6 +1549,9 @@ class WorkerService:
         )
         if card.executor_context is not None:
             context = self._merge_executor_context(default_context, card.executor_context)
+            if profile_id is not None:
+                context.executor_profile = f"{worker_type}_worker"
+                context.executor_profile_id = profile_id
             if python_runtime:
                 context.runtime_bindings.conda_env = python_runtime
                 context.runtime_bindings.env["BLUEPRINT_PYTHON_RUNTIME"] = python_runtime
@@ -2089,15 +2124,31 @@ class WorkerService:
                 claim.status = "superseded"
 
     def _resolve_worker_type(self, worker_type: str | None) -> str:
-        if worker_type:
-            return worker_type
-        candidate = self.project_service.settings.default_worker_type or "pi"
-        if self._is_worker_configured(candidate):
+        candidate = worker_type or self.project_service.settings.default_worker_type
+        if candidate and self._is_worker_configured(candidate):
             return candidate
+        if worker_type:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Executor {worker_type} is not configured. "
+                    "Set the matching command template before starting a run."
+                ),
+            )
         raise HTTPException(
             status_code=409,
-            detail="No configured executor is available. Configure BLUEPRINT_PI_COMMAND for the real pi CLI.",
+            detail=(
+                f"Default executor {candidate or '<unset>'} is not configured. "
+                "Set the matching command template before starting a run."
+            ),
         )
+
+    def _resolve_profile_across_workers(self, config_service: AppConfigService, profile_id: str) -> dict[str, Any] | None:
+        for worker_type in self.registry:
+            profile = config_service.resolve_executor_profile(worker_type, profile_id=profile_id)
+            if profile:
+                return profile
+        return None
 
     def _is_worker_configured(self, worker_type: str) -> bool:
         adapter = self.registry.get(worker_type)

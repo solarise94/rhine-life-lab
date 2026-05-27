@@ -422,7 +422,27 @@ export interface AppSettings {
     api_key_configured: boolean;
     api_base_url: string;
   };
+  api_provider_profiles: ApiProviderProfile[];
+  provider_bindings: ProviderBindings;
+  default_worker_type: string;
+  available_executors: string[];
 }
+
+export type ApiProviderProtocol = "anthropic_compatible" | "openai_compatible";
+
+export interface ApiProviderProfile {
+  provider_id: string;
+  display_name: string;
+  protocol: ApiProviderProtocol;
+  model: string;
+  base_url: string;
+  native_base_url?: string;
+  api_key_configured: boolean;
+}
+
+export type ProviderRole = "manager" | "reviewer" | "pi_executor" | "opencode_executor" | "library_summarizer";
+
+export type ProviderBindings = Record<ProviderRole, { provider_id: string; model?: string }>;
 
 export interface UpdateAppSettingsPayload {
   deepseek_api_key?: string | null;
@@ -443,6 +463,24 @@ export interface UpdateAppSettingsPayload {
   openai_api_key?: string | null;
   clear_openai_api_key?: boolean;
   openai_api_base_url?: string | null;
+  api_provider_profiles?: Array<Omit<ApiProviderProfile, "api_key_configured">> | null;
+  api_provider_keys?: Record<string, string | null>;
+  clear_api_provider_keys?: string[];
+  provider_bindings?: ProviderBindings | null;
+  default_worker_type?: string | null;
+}
+
+export interface TestApiProviderPayload {
+  provider: Omit<ApiProviderProfile, "api_key_configured">;
+  api_key?: string | null;
+}
+
+export interface TestApiProviderResponse {
+  ok: boolean;
+  message: string;
+  latency_ms?: number;
+  status_code?: number;
+  detail?: string;
 }
 
 export interface UpdateProjectRuntimePreferencesPayload {

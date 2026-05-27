@@ -38,6 +38,8 @@ function resolveManagerConfig(payload = {}) {
       typeof config.websearch_enabled === "boolean" ? config.websearch_enabled : MANAGER_WEBSEARCH_ENABLED,
     tavilyApiKey: config.tavily_api_key || TAVILY_API_KEY,
     tavilyBaseUrl: config.tavily_base_url || TAVILY_BASE_URL,
+    providerProtocol: config.provider_protocol || null,
+    selectedProviderId: config.selected_provider_id || null,
   };
 }
 
@@ -46,15 +48,38 @@ function normalizeBaseUrl(value) {
 }
 
 function resolveModel(runtimeConfig) {
-  const model = getModel(runtimeConfig.provider, runtimeConfig.model);
-  if (!model) {
-    return null;
+  // 1. Try registry first
+  let model = getModel(runtimeConfig.provider, runtimeConfig.model);
+  if (model) {
+    if (runtimeConfig.provider === "deepseek") {
+      const deepseekBaseUrl = normalizeBaseUrl(runtimeConfig.piDeepseekBaseUrl);
+      if (deepseekBaseUrl) return { ...model, baseUrl: deepseekBaseUrl };
+    }
+    return model;
   }
-  const deepseekBaseUrl = normalizeBaseUrl(runtimeConfig.piDeepseekBaseUrl);
-  if (runtimeConfig.provider === "deepseek" && deepseekBaseUrl) {
-    return { ...model, baseUrl: deepseekBaseUrl };
+  // 2. Registry miss — build from protocol
+  const protocol = runtimeConfig.providerProtocol;
+  if (protocol === "anthropic_compatible") {
+    return {
+      id: runtimeConfig.model,
+      provider: runtimeConfig.selectedProviderId || runtimeConfig.provider,
+      name: runtimeConfig.model,
+      api: "anthropic-messages",
+      baseUrl: normalizeBaseUrl(runtimeConfig.deepseekApiBaseUrl) || "https://api.anthropic.com",
+      contextWindow: 200000,
+    };
   }
-  return model;
+  if (protocol === "openai_compatible") {
+    return {
+      id: runtimeConfig.model,
+      provider: runtimeConfig.selectedProviderId || runtimeConfig.provider,
+      name: runtimeConfig.model,
+      api: "openai-completions",
+      baseUrl: normalizeBaseUrl(runtimeConfig.deepseekApiBaseUrl) || "https://api.openai.com/v1",
+      contextWindow: 128000,
+    };
+  }
+  return null;
 }
 
 let startupValidation = null;
@@ -68,7 +93,7 @@ function validateStartupConfig() {
   if (!runtimeConfig.apiKey) {
     errors.push("MANAGER_AGENT_API_KEY or BLUEPRINT_DEEPSEEK_API_KEY is not configured.");
   }
-  const model = getModel(runtimeConfig.provider, runtimeConfig.model);
+  const model = resolveModel(runtimeConfig);
   if (!model) {
     errors.push(`Manager model not found: provider=${runtimeConfig.provider}, model=${runtimeConfig.model}`);
   }

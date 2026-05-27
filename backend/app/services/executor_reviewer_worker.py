@@ -76,11 +76,11 @@ class ExecutorReviewerWorker:
         manifest: Manifest,
         deterministic_issues: list[ValidationIssue],
     ) -> dict[str, Any]:
-        api_key = self.settings.deepseek_api_key.get_secret_value() if self.settings.deepseek_api_key else ""
+        api_key = self._reviewer_api_key()
         if not api_key:
             return {
                 "verdict": "warn",
-                "summary": "Reviewer skipped because BLUEPRINT_DEEPSEEK_API_KEY is not configured.",
+                "summary": "Reviewer skipped because reviewer API key is not configured.",
                 "issues": [],
                 "mode": "reviewer_worker_skipped",
             }
@@ -266,7 +266,7 @@ class ExecutorReviewerWorker:
             "tool_choice": {"type": "any"},
         }
         http_request = request.Request(
-            f"{self.settings.deepseek_api_base_url.rstrip('/')}/v1/messages",
+            f"{self._reviewer_api_base_url().rstrip('/')}/v1/messages",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             method="POST",
             headers={
@@ -294,6 +294,13 @@ class ExecutorReviewerWorker:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ManagerPlanningError("Reviewer DeepSeek returned invalid JSON at the HTTP layer.") from exc
+
+    def _reviewer_api_key(self) -> str:
+        value = self.settings.reviewer_api_key or self.settings.deepseek_api_key
+        return value.get_secret_value() if value else ""
+
+    def _reviewer_api_base_url(self) -> str:
+        return self.settings.reviewer_api_base_url or self.settings.deepseek_api_base_url
 
     def _max_review_turns(self) -> int:
         return max(1, int(self.settings.reviewer_max_turns or DEFAULT_MAX_REVIEW_TURNS))

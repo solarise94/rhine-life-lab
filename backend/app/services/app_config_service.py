@@ -2,14 +2,35 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 from pathlib import Path
 from threading import RLock
 from typing import Any
+from urllib import error, request
 
+from fastapi import HTTPException
 from pydantic import SecretStr
 
 from app.core.config import Settings, get_settings
 from app.models.executor_profiles import default_profiles
+
+API_PROVIDER_PROTOCOLS = {"anthropic_compatible", "openai_compatible"}
+DEFAULT_PROVIDER_BINDINGS = {
+    "manager": {"provider_id": "deepseek"},
+    "reviewer": {"provider_id": "deepseek"},
+    "pi_executor": {"provider_id": "deepseek"},
+    "opencode_executor": {"provider_id": "deepseek"},
+    "library_summarizer": {"provider_id": "deepseek"},
+}
+ROLE_PROVIDER_PROTOCOLS = {
+    # These roles use Anthropic Messages-compatible requests in the backend today.
+    "manager": {"anthropic_compatible"},
+    "reviewer": {"anthropic_compatible"},
+    "pi_executor": {"anthropic_compatible"},
+    "opencode_executor": {"anthropic_compatible"},
+    "library_summarizer": {"anthropic_compatible"},
+}
 
 
 class AppConfigService:
@@ -21,7 +42,7 @@ class AppConfigService:
         self._cache_lock = RLock()
         self._cache_mtime_ns: int | None = None
         self._cache_payload: dict[str, Any] | None = None
-        self._apply_runtime_overrides(self._load())
+        self._apply_runtime_overrides(self._load(), strict=False)
 
     def get_public_settings(self) -> dict[str, Any]:
         config = self._load()
@@ -29,6 +50,7 @@ class AppConfigService:
         tavily_key = self._effective_tavily_api_key(config)
         anthropic_key = self._effective_anthropic_api_key(config)
         openai_key = self._effective_openai_api_key(config)
+        provider_profiles = self._public_api_provider_profiles(config)
         websearch_enabled = self._effective_bool(
             config.get("manager_websearch_enabled"),
             os.environ.get("MANAGER_WEBSEARCH_ENABLED"),
@@ -59,6 +81,12 @@ class AppConfigService:
                 "api_key_configured": bool(openai_key),
                 "api_base_url": str(config.get("openai_api_base_url") or self.settings.openai_api_base_url),
             },
+            "api_provider_profiles": provider_profiles,
+            "provider_bindings": self._public_provider_bindings(config, provider_profiles=provider_profiles),
+            "default_worker_type": str(
+                config.get("default_worker_type") or self.settings.default_worker_type
+            ),
+            "available_executors": self._available_executors(),
         }
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -83,8 +111,14 @@ class AppConfigService:
         if "manager_websearch_enabled" in payload:
             config["manager_websearch_enabled"] = bool(payload["manager_websearch_enabled"])
 
+        if "default_worker_type" in payload and payload["default_worker_type"] is not None:
+            value = str(payload["default_worker_type"]).strip()
+            if value in {"pi", "opencode", "codex", "claude_code"}:
+                config["default_worker_type"] = value
+
         if payload.get("clear_deepseek_api_key"):
             config.pop("deepseek_api_key", None)
+            self.settings.deepseek_api_key = None
         elif "deepseek_api_key" in payload and payload["deepseek_api_key"] is not None:
             value = str(payload["deepseek_api_key"]).strip()
             if value:
@@ -99,6 +133,7 @@ class AppConfigService:
 
         if payload.get("clear_anthropic_api_key"):
             config.pop("anthropic_api_key", None)
+            self.settings.anthropic_api_key = None
         elif "anthropic_api_key" in payload and payload["anthropic_api_key"] is not None:
             value = str(payload["anthropic_api_key"]).strip()
             if value:
@@ -106,22 +141,76 @@ class AppConfigService:
 
         if payload.get("clear_openai_api_key"):
             config.pop("openai_api_key", None)
+            self.settings.openai_api_key = None
         elif "openai_api_key" in payload and payload["openai_api_key"] is not None:
             value = str(payload["openai_api_key"]).strip()
             if value:
                 config["openai_api_key"] = value
 
+        if "api_provider_profiles" in payload and payload["api_provider_profiles"] is not None:
+            provider_profiles = self._sanitize_api_provider_profiles(payload["api_provider_profiles"])
+            if not provider_profiles:
+                raise HTTPException(status_code=400, detail="At least one API provider profile must remain configured.")
+            config["api_provider_profiles"] = provider_profiles
+
+        provider_profiles = self._api_provider_profiles(config)
+        merged_provider_bindings = {
+            role: dict(self._resolve_role_binding(config, role))
+            for role in DEFAULT_PROVIDER_BINDINGS
+        }
+        if "provider_bindings" in payload and payload["provider_bindings"] is not None:
+            merged_provider_bindings.update(self._sanitize_provider_bindings(payload["provider_bindings"]))
+        self._validate_provider_bindings(merged_provider_bindings, provider_profiles)
+        if merged_provider_bindings:
+            config["provider_bindings"] = merged_provider_bindings
+        else:
+            config.pop("provider_bindings", None)
+
+        api_provider_keys = config.get("api_provider_keys")
+        if not isinstance(api_provider_keys, dict):
+            api_provider_keys = {}
+        for provider_id, value in (payload.get("api_provider_keys") or {}).items():
+            clean_id = self._clean_provider_id(provider_id)
+            clean_value = str(value or "").strip()
+            if clean_id and clean_value:
+                api_provider_keys[clean_id] = clean_value
+        for provider_id in payload.get("clear_api_provider_keys") or []:
+            clean_id = self._clean_provider_id(provider_id)
+            if clean_id:
+                api_provider_keys.pop(clean_id, None)
+                if clean_id == "deepseek":
+                    config.pop("deepseek_api_key", None)
+                    self.settings.deepseek_api_key = None
+                elif clean_id == "openai":
+                    config.pop("openai_api_key", None)
+                    self.settings.openai_api_key = None
+                elif clean_id == "anthropic":
+                    config.pop("anthropic_api_key", None)
+                    self.settings.anthropic_api_key = None
+        if api_provider_keys:
+            config["api_provider_keys"] = api_provider_keys
+        else:
+            config.pop("api_provider_keys", None)
+
         self._save(config)
-        self._apply_runtime_overrides(config)
+        self._apply_runtime_overrides(config, strict=True)
         return self.get_public_settings()
 
     def manager_agent_config(self, *, include_secrets: bool = False) -> dict[str, Any]:
         config = self._load()
+        manager_binding = self._resolve_role_binding(config, "manager")
+        manager_provider = self._require_api_provider(config, manager_binding.get("provider_id"), role="manager")
+        base_url = str(manager_provider.get("base_url") or config.get("deepseek_api_base_url") or self.settings.deepseek_api_base_url)
         payload = {
+            # The Node sidecar resolves providers through pi-ai's provider registry; keep the
+            # runtime provider stable and pass custom endpoints through base URLs.
             "provider": os.environ.get("MANAGER_AGENT_PROVIDER") or "deepseek",
-            "model": str(config.get("manager_model") or self.settings.manager_model),
-            "deepseek_api_base_url": str(config.get("deepseek_api_base_url") or self.settings.deepseek_api_base_url),
-            "pi_deepseek_base_url": str(config.get("pi_deepseek_base_url") or self.settings.pi_deepseek_base_url),
+            "selected_provider_id": manager_provider.get("provider_id") or "deepseek",
+            "provider_protocol": manager_provider.get("protocol"),
+            "model": str(manager_provider.get("model") or config.get("manager_model") or self.settings.manager_model),
+            "deepseek_api_base_url": base_url,
+            "pi_deepseek_base_url": self._provider_native_base_url(manager_provider)
+            or str(config.get("pi_deepseek_base_url") or self.settings.pi_deepseek_base_url),
             "websearch_enabled": self._effective_bool(
                 config.get("manager_websearch_enabled"),
                 os.environ.get("MANAGER_WEBSEARCH_ENABLED"),
@@ -130,12 +219,13 @@ class AppConfigService:
             "tavily_base_url": str(config.get("tavily_base_url") or os.environ.get("TAVILY_BASE_URL") or "https://api.tavily.com"),
         }
         if include_secrets:
-            payload["api_key"] = self._effective_deepseek_api_key(config)
+            payload["api_key"] = self._api_provider_key(config, manager_provider) or self._effective_deepseek_api_key(config)
             payload["tavily_api_key"] = self._effective_tavily_api_key(config)
         return payload
 
     def get_secret_settings(self) -> dict[str, Any]:
         config = self._load()
+        providers = self._secret_api_provider_profiles(config)
         return {
             "deepseek_api_key": self._effective_deepseek_api_key(config),
             "deepseek_api_base_url": str(config.get("deepseek_api_base_url") or self.settings.deepseek_api_base_url),
@@ -157,6 +247,8 @@ class AppConfigService:
             "anthropic_api_base_url": str(config.get("anthropic_api_base_url") or self.settings.anthropic_api_base_url),
             "openai_api_key": self._effective_openai_api_key(config),
             "openai_api_base_url": str(config.get("openai_api_base_url") or self.settings.openai_api_base_url),
+            "api_provider_profiles": providers,
+            "provider_bindings": self._public_provider_bindings(config, provider_profiles=self._public_api_provider_profiles(config)),
         }
 
     def _load(self) -> dict[str, Any]:
@@ -193,7 +285,9 @@ class AppConfigService:
                 self._cache_mtime_ns = None
             self._cache_payload = dict(payload)
 
-    def _apply_runtime_overrides(self, config: dict[str, Any]) -> None:
+    def _apply_runtime_overrides(self, config: dict[str, Any], *, strict: bool) -> None:
+        if config.get("default_worker_type"):
+            self.settings.default_worker_type = str(config["default_worker_type"])
         if config.get("deepseek_api_base_url"):
             self.settings.deepseek_api_base_url = str(config["deepseek_api_base_url"])
         if config.get("pi_deepseek_base_url"):
@@ -211,14 +305,77 @@ class AppConfigService:
         if config.get("openai_api_base_url"):
             self.settings.openai_api_base_url = str(config["openai_api_base_url"])
         deepseek_key = self._effective_deepseek_api_key(config)
-        if deepseek_key:
-            self.settings.deepseek_api_key = SecretStr(deepseek_key)
+        self.settings.deepseek_api_key = SecretStr(deepseek_key) if deepseek_key else None
         anthropic_key = self._effective_anthropic_api_key(config)
-        if anthropic_key:
-            self.settings.anthropic_api_key = SecretStr(anthropic_key)
+        self.settings.anthropic_api_key = SecretStr(anthropic_key) if anthropic_key else None
         openai_key = self._effective_openai_api_key(config)
-        if openai_key:
-            self.settings.openai_api_key = SecretStr(openai_key)
+        self.settings.openai_api_key = SecretStr(openai_key) if openai_key else None
+        try:
+            self._apply_provider_binding_overrides(config)
+        except HTTPException:
+            if strict:
+                raise
+
+    def _apply_provider_binding_overrides(self, config: dict[str, Any]) -> None:
+        self.settings.manager_api_key = None
+        self.settings.manager_api_base_url = None
+        self.settings.reviewer_api_key = None
+        self.settings.reviewer_api_base_url = None
+        self.settings.pi_api_key = None
+        self.settings.pi_anthropic_base_url = None
+        self.settings.opencode_api_key = None
+        self.settings.opencode_api_base_url = None
+        self.settings.opencode_api_protocol = None
+
+        manager_binding = self._resolve_role_binding(config, "manager")
+        manager_provider = self._require_api_provider(config, manager_binding.get("provider_id"), role="manager")
+        if manager_provider.get("protocol") == "anthropic_compatible":
+            manager_key = self._api_provider_key(config, manager_provider)
+            self.settings.manager_api_base_url = str(manager_provider.get("base_url") or self.settings.deepseek_api_base_url)
+            self.settings.manager_api_key = SecretStr(manager_key) if manager_key else None
+            if manager_provider.get("provider_id") == "deepseek":
+                self.settings.deepseek_api_base_url = self.settings.manager_api_base_url
+                self.settings.deepseek_api_key = SecretStr(manager_key) if manager_key else self.settings.deepseek_api_key
+        if manager_provider.get("model"):
+            self.settings.manager_model = str(manager_provider["model"])
+
+        reviewer_binding = self._resolve_role_binding(config, "reviewer")
+        reviewer_provider = self._require_api_provider(config, reviewer_binding.get("provider_id"), role="reviewer")
+        if reviewer_provider.get("protocol") == "anthropic_compatible":
+            reviewer_key = self._api_provider_key(config, reviewer_provider)
+            self.settings.reviewer_api_base_url = str(reviewer_provider.get("base_url") or self.settings.deepseek_api_base_url)
+            self.settings.reviewer_api_key = SecretStr(reviewer_key) if reviewer_key else None
+        if reviewer_provider.get("model"):
+            self.settings.reviewer_model = str(reviewer_provider["model"])
+
+        pi_binding = self._resolve_role_binding(config, "pi_executor")
+        pi_provider = self._require_api_provider(config, pi_binding.get("provider_id"), role="pi_executor")
+        if pi_provider.get("protocol") == "anthropic_compatible":
+            pi_key = self._api_provider_key(config, pi_provider)
+            self.settings.pi_anthropic_base_url = str(pi_provider.get("base_url") or self.settings.deepseek_api_base_url)
+            self.settings.pi_api_key = SecretStr(pi_key) if pi_key else None
+            native_base_url = self._provider_native_base_url(pi_provider) or str(self.settings.pi_deepseek_base_url)
+            if native_base_url:
+                self.settings.pi_deepseek_base_url = native_base_url
+        if pi_provider.get("model"):
+            self.settings.pi_executor_model = str(pi_provider["model"])
+
+        opencode_binding = self._resolve_role_binding(config, "opencode_executor")
+        opencode_provider = self._require_api_provider(config, opencode_binding.get("provider_id"), role="opencode_executor")
+        if opencode_provider.get("protocol") == "openai_compatible":
+            openai_key = self._api_provider_key(config, opencode_provider)
+            self.settings.openai_api_base_url = str(opencode_provider.get("base_url") or self.settings.openai_api_base_url)
+            self.settings.openai_api_key = SecretStr(openai_key) if openai_key else None
+            self.settings.opencode_api_base_url = self.settings.openai_api_base_url
+            self.settings.opencode_api_key = SecretStr(openai_key) if openai_key else None
+            self.settings.opencode_api_protocol = "openai_compatible"
+        elif opencode_provider.get("protocol") == "anthropic_compatible":
+            opencode_key = self._api_provider_key(config, opencode_provider)
+            self.settings.opencode_api_base_url = str(opencode_provider.get("base_url") or self.settings.deepseek_api_base_url)
+            self.settings.opencode_api_key = SecretStr(opencode_key) if opencode_key else None
+            self.settings.opencode_api_protocol = "anthropic_compatible"
+        if opencode_provider.get("model"):
+            self.settings.opencode_executor_model = str(opencode_provider["model"])
 
     def _effective_deepseek_api_key(self, config: dict[str, Any]) -> str:
         configured = str(config.get("deepseek_api_key") or "").strip()
@@ -250,6 +407,221 @@ class AppConfigService:
         if self.settings.openai_api_key:
             return self.settings.openai_api_key.get_secret_value()
         return os.environ.get("OPENAI_API_KEY", "").strip()
+
+    def _default_api_provider_profiles(self, config: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                "provider_id": "deepseek",
+                "display_name": "DeepSeek",
+                "protocol": "anthropic_compatible",
+                "model": str(config.get("manager_model") or self.settings.manager_model),
+                "base_url": str(config.get("deepseek_api_base_url") or self.settings.deepseek_api_base_url),
+                "native_base_url": str(config.get("pi_deepseek_base_url") or self.settings.pi_deepseek_base_url),
+            },
+            {
+                "provider_id": "openai",
+                "display_name": "OpenAI Compatible",
+                "protocol": "openai_compatible",
+                "model": "gpt-4o-mini",
+                "base_url": str(config.get("openai_api_base_url") or self.settings.openai_api_base_url),
+                "native_base_url": "",
+            },
+            {
+                "provider_id": "anthropic",
+                "display_name": "Anthropic Compatible",
+                "protocol": "anthropic_compatible",
+                "model": str(config.get("manager_model") or self.settings.manager_model),
+                "base_url": str(config.get("anthropic_api_base_url") or self.settings.anthropic_api_base_url),
+                "native_base_url": "",
+            },
+        ]
+
+    def _api_provider_profiles(self, config: dict[str, Any]) -> list[dict[str, Any]]:
+        if "api_provider_profiles" in config:
+            sanitized = self._sanitize_api_provider_profiles(config.get("api_provider_profiles") or [])
+            return sanitized or self._default_api_provider_profiles(config)
+        stored = []
+        defaults = self._default_api_provider_profiles(config)
+        merged = [*stored]
+        stored_ids = {item["provider_id"] for item in stored}
+        merged.extend(item for item in defaults if item["provider_id"] not in stored_ids)
+        return merged
+
+    def _public_api_provider_profiles(self, config: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                **profile,
+                "api_key_configured": bool(self._api_provider_key(config, profile)),
+            }
+            for profile in self._api_provider_profiles(config)
+        ]
+
+    def _secret_api_provider_profiles(self, config: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                **profile,
+                "api_key": self._api_provider_key(config, profile),
+                "api_key_configured": bool(self._api_provider_key(config, profile)),
+            }
+            for profile in self._api_provider_profiles(config)
+        ]
+
+    def _resolve_api_provider(self, config: dict[str, Any], provider_id: Any) -> dict[str, Any] | None:
+        clean_id = self._clean_provider_id(provider_id)
+        profiles = self._api_provider_profiles(config)
+        if clean_id:
+            match = next((profile for profile in profiles if profile.get("provider_id") == clean_id), None)
+            if match:
+                return match
+            return None
+        return profiles[0] if profiles else None
+
+    def _require_api_provider(self, config: dict[str, Any], provider_id: Any, *, role: str) -> dict[str, Any]:
+        provider = self._resolve_api_provider(config, provider_id)
+        if provider is None:
+            clean_id = self._clean_provider_id(provider_id) or "<missing>"
+            raise HTTPException(
+                status_code=409,
+                detail=f"Provider binding for {role} references unknown provider_id={clean_id}. Update API settings and try again.",
+            )
+        return provider
+
+    def _api_provider_key(self, config: dict[str, Any], profile: dict[str, Any]) -> str:
+        provider_id = str(profile.get("provider_id") or "").strip()
+        keys = config.get("api_provider_keys")
+        if isinstance(keys, dict):
+            configured = str(keys.get(provider_id) or "").strip()
+            if configured:
+                return configured
+        if provider_id == "deepseek":
+            return self._effective_deepseek_api_key(config)
+        if provider_id == "openai":
+            return self._effective_openai_api_key(config)
+        if provider_id == "anthropic":
+            return self._effective_anthropic_api_key(config)
+        return ""
+
+    @staticmethod
+    def _provider_native_base_url(profile: dict[str, Any]) -> str:
+        configured = str(profile.get("native_base_url") or "").strip().rstrip("/")
+        if configured:
+            return configured
+        base_url = str(profile.get("base_url") or "").strip().rstrip("/")
+        if base_url.endswith("/anthropic"):
+            return base_url.removesuffix("/anthropic")
+        return base_url
+
+    def _resolve_role_binding(self, config: dict[str, Any], role: str) -> dict[str, str]:
+        bindings = self._sanitize_provider_bindings(config.get("provider_bindings") or {})
+        default = DEFAULT_PROVIDER_BINDINGS[role]
+        resolved = dict(bindings.get(role) or {})
+        resolved.setdefault("provider_id", default["provider_id"])
+        return resolved
+
+    def _public_provider_bindings(
+        self,
+        config: dict[str, Any],
+        *,
+        provider_profiles: list[dict[str, Any]] | None = None,
+    ) -> dict[str, dict[str, str]]:
+        result: dict[str, dict[str, str]] = {}
+        for role in DEFAULT_PROVIDER_BINDINGS:
+            binding = self._resolve_role_binding(config, role)
+            result[role] = dict(binding)
+        return result
+
+    def _validate_provider_bindings(
+        self,
+        bindings: dict[str, dict[str, str]],
+        provider_profiles: list[dict[str, Any]],
+    ) -> None:
+        provider_ids = {str(profile.get("provider_id") or "").strip() for profile in provider_profiles}
+        providers_by_id = {str(profile.get("provider_id") or "").strip(): profile for profile in provider_profiles}
+        missing_roles: list[str] = []
+        unknown_bindings: list[str] = []
+        incompatible_bindings: list[str] = []
+        for role in DEFAULT_PROVIDER_BINDINGS:
+            provider_id = self._clean_provider_id((bindings.get(role) or {}).get("provider_id"))
+            if not provider_id:
+                missing_roles.append(role)
+                continue
+            if provider_id not in provider_ids:
+                unknown_bindings.append(f"{role}={provider_id}")
+                continue
+            protocol = str(providers_by_id[provider_id].get("protocol") or "")
+            allowed_protocols = ROLE_PROVIDER_PROTOCOLS.get(role, API_PROVIDER_PROTOCOLS)
+            if protocol not in allowed_protocols:
+                incompatible_bindings.append(f"{role}={provider_id}({protocol})")
+        if missing_roles or unknown_bindings or incompatible_bindings:
+            details: list[str] = []
+            if missing_roles:
+                details.append(f"Missing provider bindings for: {', '.join(missing_roles)}")
+            if unknown_bindings:
+                details.append(f"Unknown provider bindings: {', '.join(unknown_bindings)}")
+            if incompatible_bindings:
+                details.append(f"Incompatible provider bindings: {', '.join(incompatible_bindings)}")
+            raise HTTPException(status_code=400, detail="; ".join(details))
+
+    def _sanitize_api_provider_profiles(self, value: Any) -> list[dict[str, str]]:
+        if not isinstance(value, list):
+            return []
+        profiles: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            provider_id = self._clean_provider_id(item.get("provider_id"))
+            if not provider_id or provider_id in seen:
+                continue
+            protocol = str(item.get("protocol") or "").strip()
+            if protocol not in API_PROVIDER_PROTOCOLS:
+                continue
+            base_url = str(item.get("base_url") or "").strip()
+            if not base_url:
+                continue
+            profiles.append(
+                {
+                    "provider_id": provider_id,
+                    "display_name": str(item.get("display_name") or provider_id).strip() or provider_id,
+                    "protocol": protocol,
+                    "model": str(item.get("model") or "").strip(),
+                    "base_url": base_url,
+                    "native_base_url": str(item.get("native_base_url") or "").strip(),
+                }
+            )
+            seen.add(provider_id)
+        return profiles
+
+    def _sanitize_provider_bindings(self, value: Any) -> dict[str, dict[str, str]]:
+        if not isinstance(value, dict):
+            return {}
+        bindings: dict[str, dict[str, str]] = {}
+        for role in DEFAULT_PROVIDER_BINDINGS:
+            item = value.get(role)
+            if not isinstance(item, dict):
+                continue
+            provider_id = self._clean_provider_id(item.get("provider_id"))
+            binding: dict[str, str] = {}
+            if provider_id:
+                binding["provider_id"] = provider_id
+            if binding:
+                bindings[role] = binding
+        return bindings
+
+    @staticmethod
+    def _clean_provider_id(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        text = re.sub(r"[^a-z0-9_.-]+", "-", text)
+        return text.strip("-")
+
+    def _available_executors(self) -> list[str]:
+        available = []
+        for name in ("pi", "opencode", "codex", "claude_code"):
+            str_setting = getattr(self.settings, f"{name}_command", None)
+            json_setting = getattr(self.settings, f"{name}_command_json", None)
+            if str_setting or json_setting:
+                available.append(name)
+        return available
 
     @staticmethod
     def _effective_bool(config_value: Any, env_value: str | None, *, default: bool) -> bool:
@@ -292,6 +664,86 @@ class AppConfigService:
             item for item in profiles if not (isinstance(item, dict) and item.get("profile_id") == profile_id)
         ]
         self._save(config)
+
+    def test_api_provider(self, profile: dict[str, Any], *, api_key: str | None = None, timeout_seconds: int = 30) -> dict[str, Any]:
+        profiles = self._sanitize_api_provider_profiles([profile])
+        if not profiles:
+            return {"ok": False, "message": "Provider profile is incomplete. Check protocol, model, and base URL."}
+        provider = profiles[0]
+        config = self._load()
+        resolved_key = str(api_key or "").strip() or self._api_provider_key(config, provider)
+        if not resolved_key:
+            return {"ok": False, "message": "API key is missing for this provider."}
+        model = str(provider.get("model") or "").strip()
+        if not model:
+            return {"ok": False, "message": "Model name is missing."}
+
+        started = time.monotonic()
+        try:
+            if provider["protocol"] == "anthropic_compatible":
+                endpoint = self._anthropic_messages_url(str(provider["base_url"]))
+                payload = {
+                    "model": model,
+                    "max_tokens": 8,
+                    "messages": [{"role": "user", "content": [{"type": "text", "text": "Reply with OK."}]}],
+                }
+                headers = {
+                    "content-type": "application/json",
+                    "x-api-key": resolved_key,
+                    "anthropic-version": "2023-06-01",
+                }
+            else:
+                endpoint = self._openai_chat_completions_url(str(provider["base_url"]))
+                payload = {
+                    "model": model,
+                    "max_tokens": 8,
+                    "messages": [{"role": "user", "content": "Reply with OK."}],
+                }
+                headers = {
+                    "content-type": "application/json",
+                    "authorization": f"Bearer {resolved_key}",
+                }
+            http_request = request.Request(
+                endpoint,
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                method="POST",
+                headers=headers,
+            )
+            with request.urlopen(http_request, timeout=timeout_seconds) as response:
+                response.read(4096)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            return {"ok": True, "message": "Model test succeeded.", "latency_ms": elapsed_ms}
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:1200]
+            return {
+                "ok": False,
+                "message": f"Model test failed with HTTP {exc.code}.",
+                "status_code": exc.code,
+                "detail": detail,
+                "latency_ms": int((time.monotonic() - started) * 1000),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "message": f"Model test failed: {exc}",
+                "latency_ms": int((time.monotonic() - started) * 1000),
+            }
+
+    @staticmethod
+    def _anthropic_messages_url(base_url: str) -> str:
+        value = str(base_url or "").rstrip("/")
+        if value.endswith("/v1/messages"):
+            return value
+        if value.endswith("/v1"):
+            return f"{value}/messages"
+        return f"{value}/v1/messages"
+
+    @staticmethod
+    def _openai_chat_completions_url(base_url: str) -> str:
+        value = str(base_url or "").rstrip("/")
+        if value.endswith("/chat/completions"):
+            return value
+        return f"{value}/chat/completions"
 
     def resolve_executor_command(self, worker_type: str) -> str | None:
         setting_name = f"{worker_type}_command"

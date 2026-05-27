@@ -21,7 +21,7 @@ SUPPORTED_AUTH_MODES: dict[str, set[str]] = {
 
 SUPPORTED_API_PROTOCOLS: dict[str, set[str]] = {
     "pi": {"deepseek_compatible"},
-    "opencode": {"openai_compatible", "provider_native"},
+    "opencode": {"anthropic_compatible", "openai_compatible", "provider_native"},
     "claude_code": set(),
     "codex": set(),
 }
@@ -126,12 +126,17 @@ def validate_profile(spec: ExecutorProfileSpec, *, settings: object | None = Non
         elif worker_type == "claude_code":
             errors.append("Claude Code project API mode is not supported. Use cli_native with local Claude login.")
         elif worker_type == "opencode":
-            if spec.api_protocol not in {"openai_compatible", "provider_native"}:
+            if spec.api_protocol not in {"anthropic_compatible", "openai_compatible", "provider_native"}:
                 errors.append(
-                    f"OpenCode project API mode requires api_protocol in (openai_compatible, provider_native), got {spec.api_protocol}."
+                    f"OpenCode project API mode requires api_protocol in (anthropic_compatible, openai_compatible, provider_native), got {spec.api_protocol}."
                 )
             if not spec.credential_ref:
-                warnings.append("OpenCode project API mode will default to credential_ref=project:openai_api_key.")
+                default_ref = (
+                    "project:opencode_api_key"
+                    if spec.api_protocol == "anthropic_compatible"
+                    else "project:openai_api_key"
+                )
+                warnings.append(f"OpenCode project API mode will default to credential_ref={default_ref}.")
                 auth_configured = True
             else:
                 auth_configured = True
@@ -188,7 +193,8 @@ def default_profiles() -> list[ExecutorProfileSpec]:
             display_name="OpenCode (project API)",
             worker_type="opencode",
             auth_mode=AUTH_MODE_PROJECT_API,
-            api_protocol="openai_compatible",
+            api_protocol="anthropic_compatible",
+            provider_id="anthropic",
             native_auth_readonly=False,
         ),
         ExecutorProfileSpec(

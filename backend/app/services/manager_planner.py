@@ -156,9 +156,9 @@ class DeepSeekManagerPlanner:
         self.settings = settings or get_settings()
 
     def answer(self, snapshot: dict, chat_request: ChatRequest, extra_context: dict | None = None) -> str:
-        api_key = self.settings.deepseek_api_key.get_secret_value() if self.settings.deepseek_api_key else ""
+        api_key = self._manager_api_key()
         if not api_key:
-            raise ManagerPlanningError("BLUEPRINT_DEEPSEEK_API_KEY is not configured.")
+            raise ManagerPlanningError("Manager API key is not configured.")
         resolved_model = self.resolve_tool_model(self.settings.manager_model)
         context = self._build_context(snapshot, chat_request, extra_context)
         payload = {
@@ -185,9 +185,9 @@ class DeepSeekManagerPlanner:
         return text
 
     def agent_turn(self, messages: list[dict], tools: list[dict]) -> dict:
-        api_key = self.settings.deepseek_api_key.get_secret_value() if self.settings.deepseek_api_key else ""
+        api_key = self._manager_api_key()
         if not api_key:
-            raise ManagerPlanningError("BLUEPRINT_DEEPSEEK_API_KEY is not configured.")
+            raise ManagerPlanningError("Manager API key is not configured.")
         resolved_model = self.resolve_tool_model(self.settings.manager_model)
         payload = {
             "model": resolved_model,
@@ -200,9 +200,9 @@ class DeepSeekManagerPlanner:
         return self._post_messages(payload, resolved_model, api_key)
 
     def plan(self, snapshot: dict, chat_request: ChatRequest, extra_context: dict | None = None) -> ManagerPlanDraft:
-        api_key = self.settings.deepseek_api_key.get_secret_value() if self.settings.deepseek_api_key else ""
+        api_key = self._manager_api_key()
         if not api_key:
-            raise ManagerPlanningError("BLUEPRINT_DEEPSEEK_API_KEY is not configured.")
+            raise ManagerPlanningError("Manager API key is not configured.")
         resolved_model = self.resolve_tool_model(self.settings.manager_model)
 
         payload = {
@@ -240,7 +240,7 @@ class DeepSeekManagerPlanner:
         return draft
 
     def _post_messages(self, payload: dict, resolved_model: str, api_key: str) -> dict:
-        endpoint = f"{self.settings.deepseek_api_base_url.rstrip('/')}/v1/messages"
+        endpoint = f"{self._manager_api_base_url().rstrip('/')}/v1/messages"
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         http_request = request.Request(
             endpoint,
@@ -275,6 +275,13 @@ class DeepSeekManagerPlanner:
         except json.JSONDecodeError as exc:
             raise ManagerPlanningError("DeepSeek returned invalid JSON at the HTTP layer.") from exc
         return response_payload
+
+    def _manager_api_key(self) -> str:
+        value = self.settings.manager_api_key or self.settings.deepseek_api_key
+        return value.get_secret_value() if value else ""
+
+    def _manager_api_base_url(self) -> str:
+        return self.settings.manager_api_base_url or self.settings.deepseek_api_base_url
 
     @staticmethod
     def resolve_tool_model(configured_model: str) -> str:

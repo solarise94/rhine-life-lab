@@ -190,7 +190,7 @@ class ManagerFlowTest(unittest.TestCase):
         self._original_executor_extra_ro_binds = settings.executor_extra_ro_binds
         self._original_executor_conda_base = settings.executor_conda_base
         self._original_worker_timeout_seconds = settings.worker_timeout_seconds
-        settings.deepseek_api_key = None
+        settings.deepseek_api_key = SecretStr("sk-test-key")
         settings.default_worker_type = "pi"
         settings.executor_sandbox_mode = "none"
         settings.executor_extra_ro_binds = ""
@@ -1524,6 +1524,25 @@ class ManagerFlowTest(unittest.TestCase):
         finally:
             settings.opencode_command = original_command
 
+    def test_start_run_rejects_unknown_executor_profile(self) -> None:
+        settings = self.project_service.settings
+        original_command = settings.opencode_command
+        settings.opencode_command = (
+            "{python} -m app.workers.demo_executor --task-packet {task_packet_path} --run-dir {run_dir} --project-root {project_root}"
+        )
+        try:
+            with self.assertRaises(HTTPException) as ctx:
+                self.worker.start_run(
+                    "test-project",
+                    "card_enrichment_group",
+                    worker_type="opencode",
+                    profile_id="missing-opencode-profile",
+                )
+            self.assertEqual(409, ctx.exception.status_code)
+            self.assertIn("missing-opencode-profile", str(ctx.exception.detail))
+        finally:
+            settings.opencode_command = original_command
+
     def test_start_run_keeps_executor_profile_separate_from_profile_id(self) -> None:
         store = self.project_service.graph_store("test-project")
         card = next(item for item in store.load_cards() if item.card_id == "card_enrichment_group")
@@ -1537,6 +1556,30 @@ class ManagerFlowTest(unittest.TestCase):
 
         self.assertEqual("opencode_worker", context.executor_profile)
         self.assertEqual("opencode-cli-native", context.executor_profile_id)
+
+    def test_start_run_explicit_profile_overrides_card_executor_context(self) -> None:
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        card = next(item for item in cards if item.card_id == "card_enrichment_group")
+        card.executor_context = ExecutorContext.model_validate(
+            {
+                "executor_profile": "pi_worker",
+                "executor_profile_id": "pi-project-api",
+                "skills": ["deseq2"],
+            }
+        )
+        store.save_cards(cards)
+
+        context = self.worker._build_executor_context(
+            "test-project",
+            card,
+            "opencode",
+            profile_id="opencode-cli-native",
+        )
+
+        self.assertEqual("opencode_worker", context.executor_profile)
+        self.assertEqual("opencode-cli-native", context.executor_profile_id)
+        self.assertEqual(["deseq2"], context.skills)
 
     def test_pi_and_claude_code_workers_use_wrapper_contract(self) -> None:
         settings = self.project_service.settings
@@ -2915,6 +2958,31 @@ manifest = {
         second = self.worker.rerun_card("test-project", "card_enrichment_group")
         self.assertNotEqual(first["run_id"], second["run_id"])
         self._wait_for_run("test-project", second["run_id"])
+
+    def test_rerun_card_preserves_executor_profile_id(self) -> None:
+        settings = self.project_service.settings
+        original_command = settings.opencode_command
+        settings.opencode_command = (
+            "{python} -m app.workers.demo_executor --task-packet {task_packet_path} --run-dir {run_dir} --project-root {project_root}"
+        )
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        card = next(item for item in cards if item.card_id == "card_enrichment_group")
+        card.executor_context = ExecutorContext.model_validate(
+            {
+                "executor_profile": "opencode_worker",
+                "executor_profile_id": "opencode-cli-native",
+            }
+        )
+        store.save_cards(cards)
+        try:
+            run = self.worker.rerun_card("test-project", "card_enrichment_group", worker_type="opencode")
+            packet_path = self.project_service.project_path("test-project") / "runs" / run["run_id"] / "task_packet.json"
+            self.assertTrue(packet_path.exists())
+            packet = json.loads(packet_path.read_text(encoding="utf-8"))
+            self.assertEqual("opencode-cli-native", packet["executor_context"]["executor_profile_id"])
+        finally:
+            settings.opencode_command = original_command
 
     def test_tool_policy_can_enable_card_tool_audit(self) -> None:
         policy = self.manager.blueprint_tools.set_tool_policy("test-project", {"audit_card_tools": True})

@@ -121,20 +121,61 @@ class OpenCodeRenderer(ProviderRenderer):
         packet: dict[str, Any] | None = None,
     ) -> ProviderRenderResult:
         capabilities = resolve_capability_inputs(packet=packet, run_dir=run_dir)
-        model = getattr(profile, "model", None) or getattr(settings, "executor_model", "gpt-4o-mini")
-        base_url = getattr(profile, "base_url", None) or getattr(settings, "openai_api_base_url", "https://api.openai.com/v1")
-        provider_id = getattr(profile, "provider_id", None) or "openai"
-        api_protocol = getattr(profile, "api_protocol", None) or "openai_compatible"
+        model = (
+            getattr(profile, "model", None)
+            or getattr(settings, "opencode_executor_model", None)
+            or getattr(settings, "executor_model", "gpt-4o-mini")
+        )
+        api_protocol = (
+            getattr(profile, "api_protocol", None)
+            or getattr(settings, "opencode_api_protocol", None)
+            or "anthropic_compatible"
+        )
+        if api_protocol == "anthropic_compatible":
+            base_url = (
+                getattr(profile, "base_url", None)
+                or getattr(settings, "opencode_api_base_url", None)
+                or getattr(settings, "anthropic_api_base_url", "https://api.anthropic.com")
+            )
+            provider_id = getattr(profile, "provider_id", None) or "anthropic"
+        else:
+            base_url = (
+                getattr(profile, "base_url", None)
+                or getattr(settings, "opencode_api_base_url", None)
+                or getattr(settings, "openai_api_base_url", "https://api.openai.com/v1")
+            )
+            provider_id = getattr(profile, "provider_id", None) or "openai"
 
-        env_overlay: dict[str, str] = {}
+        credential_ref = getattr(profile, "credential_ref", None) or (
+            "project:opencode_api_key" if api_protocol == "anthropic_compatible" else "project:openai_api_key"
+        )
+        if not model:
+            return self.render_unsupported(
+                auth_mode="project_api",
+                error="OpenCode project API mode requires a model name.",
+            )
+        if not str(base_url or "").strip():
+            return self.render_unsupported(
+                auth_mode="project_api",
+                error="OpenCode project API mode requires a base_url.",
+            )
+        if not credential_ref:
+            return self.render_unsupported(
+                auth_mode="project_api",
+                error="OpenCode project API mode requires credential_ref to inject an API key.",
+            )
 
-        credential_ref = getattr(profile, "credential_ref", None) or "project:openai_api_key"
-        credential_injected = False
-        if credential_ref:
-            resolved_key = self._resolve_credential(credential_ref, settings)
-            if resolved_key:
-                env_overlay["OPENAI_API_KEY"] = resolved_key
-                credential_injected = True
+        resolved_key = self._resolve_credential(credential_ref, settings)
+        if not resolved_key:
+            return self.render_unsupported(
+                auth_mode="project_api",
+                error=f"OpenCode project API mode could not resolve credential_ref={credential_ref}.",
+            )
+
+        env_overlay: dict[str, str] = {
+            "ANTHROPIC_API_KEY" if api_protocol == "anthropic_compatible" else "OPENAI_API_KEY": resolved_key,
+        }
+        credential_injected = True
 
         config_content = self._build_opencode_provider_config(
             provider_id=provider_id,
@@ -276,6 +317,18 @@ class OpenCodeRenderer(ProviderRenderer):
         base_url: str,
         api_protocol: str,
     ) -> dict[str, Any]:
+        if api_protocol == "anthropic_compatible":
+            provider_id = provider_id or "anthropic"
+            return {
+                "provider": {
+                    provider_id: {
+                        "name": provider_id,
+                        "options": {"baseURL": OpenCodeRenderer._anthropic_v1_base_url(base_url)},
+                        "models": {model: {"name": model}},
+                    }
+                },
+                "model": f"{provider_id}/{model}",
+            }
         if api_protocol == "provider_native":
             return {
                 "provider": {
@@ -298,3 +351,10 @@ class OpenCodeRenderer(ProviderRenderer):
             },
             "model": f"{provider_id}/{model}",
         }
+
+    @staticmethod
+    def _anthropic_v1_base_url(base_url: str) -> str:
+        value = str(base_url or "").rstrip("/")
+        if value.endswith("/v1"):
+            return value
+        return f"{value}/v1"

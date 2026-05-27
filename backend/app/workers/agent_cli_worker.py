@@ -123,26 +123,27 @@ class AgentCliWorkerAdapter(CommandTemplateWorkerAdapter):
 
     def _resolve_profile_hints(self, packet: TaskPacket, settings: object) -> tuple[str | None, str | None, str | None]:
         """Resolve profile_id, auth_mode, and api_protocol from stored profiles."""
-        try:
-            from app.services.app_config_service import AppConfigService
-            config_service = AppConfigService(settings)
-            # Use profile_id from executor context if available (user-selected profile)
-            requested_profile_id = None
-            if packet.executor_context:
-                requested_profile_id = packet.executor_context.executor_profile_id
-                if not requested_profile_id and packet.executor_context.executor_profile:
-                    legacy_profile = packet.executor_context.executor_profile
-                    if not legacy_profile.endswith("_worker"):
-                        requested_profile_id = legacy_profile
-            if not requested_profile_id:
+        from app.services.app_config_service import AppConfigService
+
+        config_service = AppConfigService(settings)
+        requested_profile_id = None
+        requested_profile_from_legacy = False
+        if packet.executor_context:
+            requested_profile_id = packet.executor_context.executor_profile_id
+            if not requested_profile_id and packet.executor_context.executor_profile:
+                legacy_profile = packet.executor_context.executor_profile
+                if not legacy_profile.endswith("_worker"):
+                    requested_profile_id = legacy_profile
+                    requested_profile_from_legacy = True
+        if not requested_profile_id:
+            return None, None, None
+        profile = config_service.resolve_executor_profile(self.provider, profile_id=requested_profile_id)
+        if profile is None:
+            if requested_profile_from_legacy:
                 return None, None, None
-            profile = config_service.resolve_executor_profile(self.provider, profile_id=requested_profile_id)
-            if profile:
-                return (
-                    profile.get("profile_id"),
-                    profile.get("auth_mode"),
-                    profile.get("api_protocol"),
-                )
-        except Exception:
-            pass
-        return None, None, None
+            raise RuntimeError(f"Executor profile {requested_profile_id} is not configured for worker_type={self.provider}.")
+        return (
+            profile.get("profile_id"),
+            profile.get("auth_mode"),
+            profile.get("api_protocol"),
+        )

@@ -37,6 +37,12 @@ export function useUpdateAppSettingsMutation() {
   });
 }
 
+export function useTestApiProviderMutation() {
+  return useMutation({
+    mutationFn: (payload: Parameters<typeof api.testApiProvider>[0]) => api.testApiProvider(payload),
+  });
+}
+
 export function useExecutorProfiles() {
   return useQuery({
     queryKey: queryKeys.executorProfiles,
@@ -324,14 +330,16 @@ export function useRerunCardMutation(projectId: string) {
     mutationFn: ({
       cardId,
       workerType,
+      profileId,
       pythonRuntime,
       rRuntime,
     }: {
       cardId: string;
       workerType?: string;
+      profileId?: string;
       pythonRuntime?: string;
       rRuntime?: string;
-    }) => api.rerunCard(projectId, cardId, workerType, pythonRuntime, rRuntime),
+    }) => api.rerunCard(projectId, cardId, workerType, profileId, pythonRuntime, rRuntime),
     onSuccess: async () => {
       await refresh();
     },

@@ -9,15 +9,63 @@ import {
   useLibrary,
   useRefreshLibraryMutation,
   useResummarizeLibraryItemMutation,
+  useTestApiProviderMutation,
   useUpdateAppSettingsMutation,
   useUpdateProjectRuntimePreferencesMutation,
 } from "@/lib/hooks";
-import { DiagnosticExportResponse, ProjectState, PythonRuntime, RRuntime } from "@/lib/types";
+import {
+  ApiProviderProfile,
+  ApiProviderProtocol,
+  DiagnosticExportResponse,
+  ProjectState,
+  ProviderBindings,
+  ProviderRole,
+  PythonRuntime,
+  RRuntime,
+  TestApiProviderResponse,
+} from "@/lib/types";
 
 type ScriptPreference = "auto" | "prefer_python" | "prefer_r" | "prefer_mixed";
+type EditableProviderProfile = Omit<ApiProviderProfile, "api_key_configured"> & { api_key_configured?: boolean };
+
+const PROVIDER_ROLE_OPTIONS: Array<{
+  role: ProviderRole;
+  title: string;
+  description: string;
+  protocols: ApiProviderProtocol[];
+}> = [
+  {
+    role: "manager",
+    title: "Manager",
+    description: "使用 Anthropic Messages 兼容接口，负责对话、规划和工具调用。",
+    protocols: ["anthropic_compatible"],
+  },
+  {
+    role: "reviewer",
+    title: "Reviewer",
+    description: "使用 Anthropic Messages 兼容接口，对执行结果做只读审计。",
+    protocols: ["anthropic_compatible"],
+  },
+  {
+    role: "pi_executor",
+    title: "Pi 执行器",
+    description: "最佳兼容执行器。当前通过 wrapper 注入 Anthropic-compatible key，并可单独配置 CLI provider base。",
+    protocols: ["anthropic_compatible"],
+  },
+  {
+    role: "opencode_executor",
+    title: "OpenCode 执行器",
+    description: "部分兼容。project_api 注入使用 Anthropic-compatible provider；原生登录模式不会读取这里的 key。",
+    protocols: ["anthropic_compatible"],
+  },
+];
 
 function formatRuntimeLabel(runtime?: string | null) {
   return runtime && runtime !== "__system__" ? runtime : "__system__";
+}
+
+function formatProtocolLabel(protocol: ApiProviderProtocol) {
+  return protocol === "anthropic_compatible" ? "Anthropic" : "OpenAI";
 }
 
 function LibrarySection({
@@ -159,34 +207,28 @@ export function SettingsPanels({
 }) {
   const appSettingsQuery = useAppSettings();
   const updateAppSettingsMutation = useUpdateAppSettingsMutation();
+  const testApiProviderMutation = useTestApiProviderMutation();
   const updateRuntimeMutation = useUpdateProjectRuntimePreferencesMutation(projectId);
   const exportDiagnosticsMutation = useExportDiagnosticsMutation(projectId);
 
-  const [deepseekKey, setDeepseekKey] = useState("");
-  const [openaiKey, setOpenaiKey] = useState("");
-  const [anthropicKey, setAnthropicKey] = useState("");
   const [tavilyKey, setTavilyKey] = useState("");
-  const [clearDeepseekKey, setClearDeepseekKey] = useState(false);
-  const [clearOpenaiKey, setClearOpenaiKey] = useState(false);
-  const [clearAnthropicKey, setClearAnthropicKey] = useState(false);
   const [clearTavilyKey, setClearTavilyKey] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
-  const [managerModel, setManagerModel] = useState(appSettingsQuery.data?.deepseek.manager_model ?? "deepseek-v4-pro");
-  const [executorModel, setExecutorModel] = useState(appSettingsQuery.data?.deepseek.executor_model ?? "deepseek-v4-flash");
-  const [reviewerModel, setReviewerModel] = useState(appSettingsQuery.data?.deepseek.reviewer_model ?? "deepseek-v4-flash");
-  const [summarizerModel, setSummarizerModel] = useState(
-    appSettingsQuery.data?.deepseek.library_summarizer_model ?? "deepseek-v4-flash",
-  );
-  const [deepseekApiBaseUrl, setDeepseekApiBaseUrl] = useState(
-    appSettingsQuery.data?.deepseek.api_base_url ?? "https://api.deepseek.com/anthropic",
-  );
-  const [piDeepseekBaseUrl, setPiDeepseekBaseUrl] = useState(
-    appSettingsQuery.data?.deepseek.pi_base_url ?? "https://api.deepseek.com",
-  );
-  const [openaiApiBaseUrl, setOpenaiApiBaseUrl] = useState(appSettingsQuery.data?.openai.api_base_url ?? "https://api.openai.com/v1");
-  const [anthropicApiBaseUrl, setAnthropicApiBaseUrl] = useState(
-    appSettingsQuery.data?.anthropic.api_base_url ?? "https://api.anthropic.com",
-  );
+  const [providerProfiles, setProviderProfiles] = useState<EditableProviderProfile[]>([]);
+  const [providerKeys, setProviderKeys] = useState<Record<string, string>>({});
+  const [clearProviderKeys, setClearProviderKeys] = useState<Record<string, boolean>>({});
+  const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
+  const [draftProviderIds, setDraftProviderIds] = useState<Record<string, boolean>>({});
+  const [testingProviderId, setTestingProviderId] = useState<string | null>(null);
+  const [providerTestResults, setProviderTestResults] = useState<Record<string, TestApiProviderResponse>>({});
+  const [providerBindings, setProviderBindings] = useState<ProviderBindings>({
+    manager: { provider_id: "deepseek" },
+    reviewer: { provider_id: "deepseek" },
+    pi_executor: { provider_id: "deepseek" },
+    opencode_executor: { provider_id: "deepseek" },
+    library_summarizer: { provider_id: "deepseek" },
+  });
+  const [defaultWorkerType, setDefaultWorkerType] = useState("pi");
   const [webSearchEnabled, setWebSearchEnabled] = useState(appSettingsQuery.data?.web_search.enabled ?? false);
   const [tavilyBaseUrl, setTavilyBaseUrl] = useState(appSettingsQuery.data?.web_search.base_url ?? "https://api.tavily.com");
   const [scriptPreference, setScriptPreference] = useState<ScriptPreference>(project.runtime_preferences.script_preference);
@@ -208,14 +250,14 @@ export function SettingsPanels({
 
   useEffect(() => {
     if (!appSettingsQuery.data) return;
-    setManagerModel(appSettingsQuery.data.deepseek.manager_model);
-    setExecutorModel(appSettingsQuery.data.deepseek.executor_model);
-    setReviewerModel(appSettingsQuery.data.deepseek.reviewer_model);
-    setSummarizerModel(appSettingsQuery.data.deepseek.library_summarizer_model);
-    setDeepseekApiBaseUrl(appSettingsQuery.data.deepseek.api_base_url);
-    setPiDeepseekBaseUrl(appSettingsQuery.data.deepseek.pi_base_url);
-    setOpenaiApiBaseUrl(appSettingsQuery.data.openai.api_base_url);
-    setAnthropicApiBaseUrl(appSettingsQuery.data.anthropic.api_base_url);
+    setProviderProfiles(appSettingsQuery.data.api_provider_profiles);
+    setProviderBindings(appSettingsQuery.data.provider_bindings);
+    setDefaultWorkerType(appSettingsQuery.data.default_worker_type);
+    setProviderKeys({});
+    setClearProviderKeys({});
+    setEditingProviderId(null);
+    setDraftProviderIds({});
+    setTestingProviderId(null);
     setWebSearchEnabled(appSettingsQuery.data.web_search.enabled);
     setTavilyBaseUrl(appSettingsQuery.data.web_search.base_url);
   }, [appSettingsQuery.data]);
@@ -223,33 +265,27 @@ export function SettingsPanels({
   async function saveApiSettings() {
     setStatus(null);
     try {
+      const apiProviderKeys = Object.fromEntries(
+        Object.entries(providerKeys)
+          .map(([providerId, value]) => [providerId, value.trim()])
+          .filter(([, value]) => value),
+      );
       await updateAppSettingsMutation.mutateAsync({
-        deepseek_api_key: deepseekKey || null,
-        clear_deepseek_api_key: clearDeepseekKey,
-        deepseek_api_base_url: deepseekApiBaseUrl,
-        pi_deepseek_base_url: piDeepseekBaseUrl,
-        manager_model: managerModel,
-        executor_model: executorModel,
-        reviewer_model: reviewerModel,
-        library_summarizer_model: summarizerModel,
+        api_provider_profiles: providerProfiles.map(({ api_key_configured, ...profile }) => profile),
+        api_provider_keys: apiProviderKeys,
+        clear_api_provider_keys: Object.entries(clearProviderKeys)
+          .filter(([, checked]) => checked)
+          .map(([providerId]) => providerId),
+        provider_bindings: providerBindings,
+        default_worker_type: defaultWorkerType,
         manager_websearch_enabled: webSearchEnabled,
         tavily_api_key: tavilyKey || null,
         clear_tavily_api_key: clearTavilyKey,
         tavily_base_url: tavilyBaseUrl,
-        openai_api_key: openaiKey || null,
-        clear_openai_api_key: clearOpenaiKey,
-        openai_api_base_url: openaiApiBaseUrl,
-        anthropic_api_key: anthropicKey || null,
-        clear_anthropic_api_key: clearAnthropicKey,
-        anthropic_api_base_url: anthropicApiBaseUrl,
       });
-      setDeepseekKey("");
-      setOpenaiKey("");
-      setAnthropicKey("");
+      setProviderKeys({});
+      setClearProviderKeys({});
       setTavilyKey("");
-      setClearDeepseekKey(false);
-      setClearOpenaiKey(false);
-      setClearAnthropicKey(false);
       setClearTavilyKey(false);
       setStatus("API 设置已保存。");
     } catch (error) {
@@ -279,6 +315,152 @@ export function SettingsPanels({
       setStatus("诊断包已生成。");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "诊断包导出失败。");
+    }
+  }
+
+  function updateProviderProfile(providerId: string, patch: Partial<EditableProviderProfile>) {
+    setProviderProfiles((items) =>
+      items.map((item) => (item.provider_id === providerId ? { ...item, ...patch } : item)),
+    );
+    setProviderTestResults((items) => {
+      const next = { ...items };
+      delete next[providerId];
+      return next;
+    });
+  }
+
+  function addProviderProfile(protocol: ApiProviderProtocol) {
+    const baseId = protocol === "anthropic_compatible" ? "anthropic-provider" : "openai-provider";
+    let index = providerProfiles.length + 1;
+    let providerId = `${baseId}-${index}`;
+    while (providerProfiles.some((item) => item.provider_id === providerId)) {
+      index += 1;
+      providerId = `${baseId}-${index}`;
+    }
+    setProviderProfiles((items) => [
+      ...items,
+      {
+        provider_id: providerId,
+        display_name: protocol === "anthropic_compatible" ? "Anthropic-compatible Provider" : "OpenAI-compatible Provider",
+        protocol,
+        model: protocol === "anthropic_compatible" ? "claude-compatible-model" : "gpt-compatible-model",
+        base_url: protocol === "anthropic_compatible" ? "https://api.example.com/anthropic" : "https://api.example.com/v1",
+        native_base_url: "",
+      },
+    ]);
+    setDraftProviderIds((items) => ({ ...items, [providerId]: true }));
+    setEditingProviderId(providerId);
+  }
+
+  function removeProviderProfile(providerId: string) {
+    const providerToRemove = providerProfiles.find((item) => item.provider_id === providerId);
+    if (!providerToRemove) {
+      return;
+    }
+    if (providerProfiles.length <= 1) {
+      setStatus("至少保留一个 provider 配置。");
+      return;
+    }
+    const impactedRoles = PROVIDER_ROLE_OPTIONS.filter((option) => nextProviderBindingUsesProvider(providerId, option.role));
+    const blockedRoles = impactedRoles.filter(
+      (option) => !providerProfiles.some((item) => item.provider_id !== providerId && option.protocols.includes(item.protocol)),
+    );
+    if (blockedRoles.length) {
+      setStatus(`删除 ${providerToRemove.display_name || providerToRemove.provider_id} 前，请先为 ${blockedRoles.map((option) => option.title).join("、")} 选择兼容 provider。`);
+      return;
+    }
+    setProviderProfiles((items) => items.filter((item) => item.provider_id !== providerId));
+    setProviderKeys((items) => {
+      const next = { ...items };
+      delete next[providerId];
+      return next;
+    });
+    setClearProviderKeys((items) => {
+      const next = { ...items };
+      delete next[providerId];
+      return next;
+    });
+    setEditingProviderId((current) => (current === providerId ? null : current));
+    setDraftProviderIds((items) => {
+      const next = { ...items };
+      delete next[providerId];
+      return next;
+    });
+    setProviderBindings((items) => {
+      const next = { ...items };
+      for (const option of PROVIDER_ROLE_OPTIONS) {
+        if (next[option.role].provider_id !== providerId) continue;
+        const fallback = providerProfiles.find((item) => item.provider_id !== providerId && option.protocols.includes(item.protocol));
+        next[option.role] = { provider_id: fallback?.provider_id ?? next[option.role].provider_id };
+      }
+      return next;
+    });
+  }
+
+  function nextProviderBindingUsesProvider(providerId: string, role: ProviderRole) {
+    return providerBindings[role].provider_id === providerId;
+  }
+
+  function updateProviderBinding(role: ProviderRole, patch: Partial<ProviderBindings[ProviderRole]>) {
+    setProviderBindings((items) => ({
+      ...items,
+      [role]: {
+        ...items[role],
+        ...patch,
+      },
+    }));
+  }
+
+  function startEditingProvider(providerId: string) {
+    setEditingProviderId(providerId);
+  }
+
+  function cancelEditingProvider(providerId: string) {
+    if (draftProviderIds[providerId]) {
+      setProviderProfiles((items) => items.filter((item) => item.provider_id !== providerId));
+      setDraftProviderIds((items) => {
+        const next = { ...items };
+        delete next[providerId];
+        return next;
+      });
+    }
+    setEditingProviderId(null);
+  }
+
+  function finishEditingProvider(providerId: string) {
+    setDraftProviderIds((items) => {
+      const next = { ...items };
+      delete next[providerId];
+      return next;
+    });
+    setEditingProviderId(null);
+  }
+
+  async function testProvider(profile: EditableProviderProfile) {
+    setTestingProviderId(profile.provider_id);
+    setProviderTestResults((items) => {
+      const next = { ...items };
+      delete next[profile.provider_id];
+      return next;
+    });
+    try {
+      const provider = { ...profile };
+      delete provider.api_key_configured;
+      const result = await testApiProviderMutation.mutateAsync({
+        provider,
+        api_key: providerKeys[profile.provider_id]?.trim() || null,
+      });
+      setProviderTestResults((items) => ({ ...items, [profile.provider_id]: result }));
+    } catch (error) {
+      setProviderTestResults((items) => ({
+        ...items,
+        [profile.provider_id]: {
+          ok: false,
+          message: error instanceof Error ? error.message : "模型测试失败。",
+        },
+      }));
+    } finally {
+      setTestingProviderId((current) => (current === profile.provider_id ? null : current));
     }
   }
 
@@ -338,146 +520,284 @@ export function SettingsPanels({
           </div>
         </div>
         <div className="settings-provider-grid">
-          <div className="settings-provider-card">
+          <div className="settings-provider-card wide">
             <div className="settings-provider-card-header">
               <div>
-                <strong>Manager API</strong>
-                <span>Manager、reviewer、library summarizer 使用。默认可填 DeepSeek Anthropic-compatible 地址，也可以手动换成兼容地址。</span>
+                <strong>供应商配置</strong>
+                <span>先保存 OpenAI-Compatible 或 Anthropic-Compatible provider，再在下方把 provider 分配给 Manager、Reviewer 和执行器。</span>
               </div>
-              <em>{appSettingsQuery.data?.deepseek.api_key_configured ? "key configured" : "key missing"}</em>
+              <em>{providerProfiles.length} providers</em>
+            </div>
+            <div className="settings-actions">
+              <button type="button" className="settings-button secondary" onClick={() => addProviderProfile("anthropic_compatible")}>
+                添加 Anthropic-Compatible
+              </button>
+              <button type="button" className="settings-button secondary" onClick={() => addProviderProfile("openai_compatible")}>
+                添加 OpenAI-Compatible
+              </button>
+            </div>
+            <div className="settings-provider-card-grid">
+              {providerProfiles.map((provider) => {
+                const isEditing = editingProviderId === provider.provider_id;
+
+                if (isEditing) {
+                  return (
+                    <div key={provider.provider_id} className="settings-provider-edit settings-provider-card wide">
+                      <div className="settings-form-grid compact">
+                        <label className="settings-field">
+                          <span>名称</span>
+                          <input
+                            value={provider.display_name}
+                            onChange={(event) => updateProviderProfile(provider.provider_id, { display_name: event.target.value })}
+                          />
+                        </label>
+                        <label className="settings-field">
+                          <span>ID</span>
+                          <input
+                            value={provider.provider_id}
+                            disabled
+                            readOnly
+                          />
+                        </label>
+                        <label className="settings-field">
+                          <span>协议</span>
+                          <select
+                            value={provider.protocol}
+                            onChange={(event) =>
+                              updateProviderProfile(provider.provider_id, { protocol: event.target.value as ApiProviderProtocol })
+                            }
+                          >
+                            <option value="anthropic_compatible">Anthropic-Compatible</option>
+                            <option value="openai_compatible">OpenAI-Compatible</option>
+                          </select>
+                        </label>
+                        <label className="settings-field">
+                          <span>模型名</span>
+                          <input
+                            value={provider.model}
+                            onChange={(event) => updateProviderProfile(provider.provider_id, { model: event.target.value })}
+                            placeholder={provider.protocol === "anthropic_compatible" ? "deepseek-v4-pro / claude-..." : "gpt-4o / qwen-..."}
+                          />
+                        </label>
+                        <label className="settings-field">
+                          <span>Base URL</span>
+                          <input
+                            value={provider.base_url}
+                            onChange={(event) => updateProviderProfile(provider.provider_id, { base_url: event.target.value })}
+                            placeholder={provider.protocol === "anthropic_compatible" ? "https://api.example.com/anthropic" : "https://api.example.com/v1"}
+                          />
+                        </label>
+                        <label className="settings-field">
+                          <span>API key</span>
+                          <input
+                            type="password"
+                            value={providerKeys[provider.provider_id] ?? ""}
+                            disabled={clearProviderKeys[provider.provider_id] ?? false}
+                            onChange={(event) => {
+                              setProviderKeys((items) => ({ ...items, [provider.provider_id]: event.target.value }));
+                              setProviderTestResults((items) => {
+                                const next = { ...items };
+                                delete next[provider.provider_id];
+                                return next;
+                              });
+                            }}
+                            placeholder={provider.api_key_configured ? "已配置，留空保持不变" : "输入 API key"}
+                          />
+                        </label>
+                        {provider.protocol === "anthropic_compatible" ? (
+                          <label className="settings-field">
+                            <span>Native CLI base URL（高级，可选）</span>
+                            <input
+                              value={provider.native_base_url ?? ""}
+                              onChange={(event) => updateProviderProfile(provider.provider_id, { native_base_url: event.target.value })}
+                              placeholder="留空自动推导；DeepSeek 通常是 https://api.deepseek.com"
+                            />
+                          </label>
+                        ) : null}
+                      </div>
+                      {provider.protocol === "anthropic_compatible" ? (
+                        <div className="settings-inline-help">
+                          Base URL 是 Anthropic-compatible Messages 入口；Native CLI base URL 只给 Pi/sidecar 这类原生 CLI provider 用。留空时会从 Base URL 自动推导。
+                        </div>
+                      ) : null}
+                      <div className="settings-provider-edit-actions">
+                        <button
+                          type="button"
+                          className="settings-button secondary"
+                          onClick={() => testProvider(provider)}
+                          disabled={testingProviderId === provider.provider_id}
+                        >
+                          {testingProviderId === provider.provider_id ? "测试中…" : "测试模型"}
+                        </button>
+                        {provider.api_key_configured ? (
+                          <label className="settings-check">
+                            <input
+                              type="checkbox"
+                              checked={clearProviderKeys[provider.provider_id] ?? false}
+                              onChange={(event) =>
+                                setClearProviderKeys((items) => ({ ...items, [provider.provider_id]: event.target.checked }))
+                              }
+                            />
+                            <span>清除 key</span>
+                          </label>
+                        ) : null}
+                        <div className="settings-provider-edit-buttons">
+                          <button type="button" className="settings-button secondary" onClick={() => cancelEditingProvider(provider.provider_id)}>
+                            取消
+                          </button>
+                          <button type="button" className="settings-button" onClick={() => finishEditingProvider(provider.provider_id)}>
+                            完成
+                          </button>
+                        </div>
+                      </div>
+                      {providerTestResults[provider.provider_id] ? (
+                        <div className={`settings-test-result ${providerTestResults[provider.provider_id].ok ? "ok" : "error"}`}>
+                          {providerTestResults[provider.provider_id].message}
+                          {providerTestResults[provider.provider_id].latency_ms !== undefined
+                            ? ` · ${providerTestResults[provider.provider_id].latency_ms}ms`
+                            : ""}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                }
+
+                const testResult = providerTestResults[provider.provider_id];
+                const testStatusClass = testResult ? (testResult.ok ? "ok" : "error") : "missing";
+                const testStatusTitle = testResult
+                  ? testResult.ok
+                    ? "模型测试成功"
+                    : "模型测试失败"
+                  : "尚未测试模型";
+
+                return (
+                  <div key={provider.provider_id} className="settings-model-card">
+                    <div className="settings-model-card-head">
+                      <strong>{provider.display_name || provider.provider_id}</strong>
+                      <span
+                        className={`settings-model-key-dot ${testStatusClass}`}
+                        title={testStatusTitle}
+                      />
+                    </div>
+                    <div className="settings-model-card-model">{provider.model || "—"}</div>
+                    <div className="settings-model-card-meta">
+                      <span className={`settings-protocol-badge ${provider.protocol}`}>{formatProtocolLabel(provider.protocol)}</span>
+                      <span>{provider.api_key_configured ? "key configured" : "key missing"}</span>
+                      <span className="settings-model-card-url">{provider.base_url}</span>
+                    </div>
+                    <div className="settings-model-card-actions">
+                      <button
+                        type="button"
+                        className="settings-button secondary"
+                        onClick={() => testProvider(provider)}
+                        disabled={testingProviderId === provider.provider_id}
+                      >
+                        {testingProviderId === provider.provider_id ? "测试中…" : "测试"}
+                      </button>
+                      <button type="button" className="settings-button secondary" onClick={() => startEditingProvider(provider.provider_id)}>
+                        编辑
+                      </button>
+                      <button type="button" className="settings-button secondary" onClick={() => removeProviderProfile(provider.provider_id)}>
+                        删除
+                      </button>
+                    </div>
+                    {testResult ? (
+                      <div className={`settings-test-result ${testResult.ok ? "ok" : "error"}`}>
+                        {testResult.ok ? "可用" : "不可用"}
+                        {testResult.latency_ms !== undefined
+                          ? ` · ${testResult.latency_ms}ms`
+                          : ""}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="settings-provider-card wide">
+            <div className="settings-provider-card-header">
+              <div>
+                <strong>角色绑定</strong>
+                <span>Manager/Reviewer/Pi/OpenCode project_api 都优先使用 Anthropic-Compatible provider。Pi 兼容性最好，绑定无效时会直接报错。</span>
+              </div>
+              <em>role routing</em>
             </div>
             <div className="settings-form-grid compact">
-              <label className="settings-field">
-                <span>API key</span>
-                <input
-                  type="password"
-                  value={deepseekKey}
-                  onChange={(event) => setDeepseekKey(event.target.value)}
-                  disabled={clearDeepseekKey}
-                  placeholder={appSettingsQuery.data?.deepseek.api_key_configured ? "已配置，留空保持不变" : "输入 Manager API key"}
-                />
-              </label>
-              {appSettingsQuery.data?.deepseek.api_key_configured ? (
-                <label className="settings-check">
-                  <input
-                    type="checkbox"
-                    checked={clearDeepseekKey}
-                    onChange={(event) => setClearDeepseekKey(event.target.checked)}
-                  />
-                  <span>清除已保存的 Manager API key</span>
-                </label>
-              ) : null}
-              <label className="settings-field">
-                <span>Anthropic-compatible base URL</span>
-                <input value={deepseekApiBaseUrl} onChange={(event) => setDeepseekApiBaseUrl(event.target.value)} />
-              </label>
-              <label className="settings-field">
-                <span>Manager model</span>
-                <input value={managerModel} onChange={(event) => setManagerModel(event.target.value)} />
-              </label>
-              <label className="settings-field">
-                <span>Reviewer model</span>
-                <input value={reviewerModel} onChange={(event) => setReviewerModel(event.target.value)} />
-              </label>
-              <label className="settings-field">
-                <span>Library summarizer</span>
-                <input value={summarizerModel} onChange={(event) => setSummarizerModel(event.target.value)} />
-              </label>
-              <label className="settings-field">
-                <span>Default executor model</span>
-                <input value={executorModel} onChange={(event) => setExecutorModel(event.target.value)} />
-              </label>
+              {PROVIDER_ROLE_OPTIONS.map((option) => {
+                const compatibleProviders = providerProfiles.filter((provider) => option.protocols.includes(provider.protocol));
+                const binding = providerBindings[option.role];
+                return (
+                  <div key={option.role} className="settings-role-card">
+                    <div>
+                      <strong>{option.title}</strong>
+                      <span>{option.description}</span>
+                    </div>
+                    <label className="settings-field">
+                      <span>Provider</span>
+                      <select
+                        value={binding.provider_id}
+                        onChange={(event) => updateProviderBinding(option.role, { provider_id: event.target.value })}
+                      >
+                        {compatibleProviders.map((provider) => (
+                          <option key={provider.provider_id} value={provider.provider_id}>
+                            {provider.display_name} · {provider.protocol}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="settings-inline-help">
+                      模型名来自所选供应商：{" "}
+                      {providerProfiles.find((provider) => provider.provider_id === binding.provider_id)?.model || "未配置"}
+                    </div>
+                    {!compatibleProviders.length ? (
+                      <div className="settings-inline-help">暂无兼容 provider，请先添加 {option.protocols.join(" / ")}。</div>
+                    ) : null}
+                  </div>
+                );
+              })}
             </div>
           </div>
 
           <div className="settings-provider-card">
             <div className="settings-provider-card-header">
               <div>
-                <strong>Pi Project API</strong>
-                <span>用于默认 Pi 执行器。这里不是原生登录，而是 wrapper 注入项目 API。</span>
+                <strong>默认执行器</strong>
+                <span>运行任务时优先使用的执行器。如果所选执行器未配置，运行会直接报错。</span>
               </div>
-              <em>best compatibility</em>
+              <em>default executor</em>
             </div>
             <div className="settings-form-grid compact">
               <label className="settings-field">
-                <span>Pi provider base URL</span>
-                <input value={piDeepseekBaseUrl} onChange={(event) => setPiDeepseekBaseUrl(event.target.value)} />
+                <span>执行器</span>
+                <select value={defaultWorkerType} onChange={(event) => setDefaultWorkerType(event.target.value)}>
+                  {(() => {
+                    const available = new Set(appSettingsQuery.data?.available_executors ?? []);
+                    return [
+                      { value: "pi", label: "Pi" },
+                      { value: "opencode", label: "OpenCode" },
+                      { value: "codex", label: "Codex" },
+                      { value: "claude_code", label: "Claude Code" },
+                    ].map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}{available.has(option.value) ? "" : "（未配置）"}
+                      </option>
+                    ));
+                  })()}
+                </select>
               </label>
-              <div className="settings-inline-help">
-                API key 复用 Manager API key。Pi 当前只支持 project_api，UI 中标记为最佳兼容。
-              </div>
-            </div>
-          </div>
-
-          <div className="settings-provider-card">
-            <div className="settings-provider-card-header">
-              <div>
-                <strong>OpenAI-Compatible Executor API</strong>
-                <span>用于 OpenCode project_api 注入。可填写 OpenAI 或任何 OpenAI-compatible 网关地址。</span>
-              </div>
-              <em>{appSettingsQuery.data?.openai.api_key_configured ? "key configured" : "optional"}</em>
-            </div>
-            <div className="settings-form-grid compact">
-              <label className="settings-field">
-                <span>API key</span>
-                <input
-                  type="password"
-                  value={openaiKey}
-                  onChange={(event) => setOpenaiKey(event.target.value)}
-                  disabled={clearOpenaiKey}
-                  placeholder={appSettingsQuery.data?.openai.api_key_configured ? "已配置，留空保持不变" : "输入 OpenAI-compatible key"}
-                />
-              </label>
-              {appSettingsQuery.data?.openai.api_key_configured ? (
-                <label className="settings-check">
-                  <input
-                    type="checkbox"
-                    checked={clearOpenaiKey}
-                    onChange={(event) => setClearOpenaiKey(event.target.checked)}
-                  />
-                  <span>清除已保存的 OpenAI-compatible key</span>
-                </label>
-              ) : null}
-              <label className="settings-field">
-                <span>Base URL</span>
-                <input value={openaiApiBaseUrl} onChange={(event) => setOpenaiApiBaseUrl(event.target.value)} />
-              </label>
-            </div>
-          </div>
-
-          <div className="settings-provider-card">
-            <div className="settings-provider-card-header">
-              <div>
-                <strong>Anthropic-Compatible Executor API</strong>
-                <span>暂未使用，仅预留给未来 Anthropic-compatible 项目 API。Claude Code 当前仅支持原生 CLI 登录，不会注入这里的 key。</span>
-              </div>
-              <em>{appSettingsQuery.data?.anthropic.api_key_configured ? "reserved key configured" : "reserved / unused"}</em>
-            </div>
-            <div className="settings-form-grid compact">
-              <label className="settings-field">
-                <span>API key</span>
-                <input
-                  type="password"
-                  value={anthropicKey}
-                  onChange={(event) => setAnthropicKey(event.target.value)}
-                  disabled={clearAnthropicKey}
-                  placeholder={appSettingsQuery.data?.anthropic.api_key_configured ? "已配置，留空保持不变" : "输入 Anthropic-compatible key"}
-                />
-              </label>
-              {appSettingsQuery.data?.anthropic.api_key_configured ? (
-                <label className="settings-check">
-                  <input
-                    type="checkbox"
-                    checked={clearAnthropicKey}
-                    onChange={(event) => setClearAnthropicKey(event.target.checked)}
-                  />
-                  <span>清除已保存的 Anthropic-compatible key</span>
-                </label>
-              ) : null}
-              <label className="settings-field">
-                <span>Base URL</span>
-                <input value={anthropicApiBaseUrl} onChange={(event) => setAnthropicApiBaseUrl(event.target.value)} />
-              </label>
+              {appSettingsQuery.data && !appSettingsQuery.data.available_executors.includes(defaultWorkerType) ? (
+                <div className="settings-inline-help" style={{ color: "#e07020" }}>
+                  当前选择的 {defaultWorkerType} 未配置，运行时会直接报错。请在部署脚本的 backend.env 中设置 BLUEPRINT_
+                  {defaultWorkerType.toUpperCase()}_COMMAND_JSON。
+                </div>
+              ) : (
+                <div className="settings-inline-help">
+                  当前可用：{appSettingsQuery.data?.available_executors.length
+                    ? appSettingsQuery.data.available_executors.join(", ")
+                    : "无（请在环境变量中配置 *_COMMAND 或 *_COMMAND_JSON）"}
+                </div>
+              )}
             </div>
           </div>
 

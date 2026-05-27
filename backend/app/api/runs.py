@@ -42,6 +42,7 @@ class CleanupRunRequest(BaseModel):
 
 class RerunCardRequest(BaseModel):
     worker_type: str | None = None
+    profile_id: str | None = None
     python_runtime: str | None = None
     r_runtime: str | None = None
 
@@ -83,6 +84,7 @@ def rerun_card(
         project_id,
         card_id,
         worker_type=request.worker_type if request else None,
+        profile_id=request.profile_id if request else None,
         python_runtime=request.python_runtime if request else None,
         r_runtime=request.r_runtime if request else None,
     )

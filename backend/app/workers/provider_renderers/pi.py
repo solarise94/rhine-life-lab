@@ -33,14 +33,17 @@ class PiRenderer(ProviderRenderer):
             )
 
         env_overlay: dict[str, str] = {}
-        api_key = getattr(settings, "deepseek_api_key", None)
+        api_key = getattr(settings, "pi_api_key", None) or getattr(settings, "deepseek_api_key", None)
         if api_key:
             env_overlay["BLUEPRINT_DEEPSEEK_API_KEY"] = api_key.get_secret_value()
-        env_overlay["BLUEPRINT_DEEPSEEK_API_BASE_URL"] = str(getattr(settings, "deepseek_api_base_url", ""))
+        env_overlay["BLUEPRINT_DEEPSEEK_API_BASE_URL"] = str(
+            getattr(settings, "pi_anthropic_base_url", None) or getattr(settings, "deepseek_api_base_url", "")
+        )
         env_overlay["BLUEPRINT_PI_DEEPSEEK_BASE_URL"] = str(getattr(settings, "pi_deepseek_base_url", "https://api.deepseek.com"))
         env_overlay["BLUEPRINT_MANAGER_MODEL"] = str(getattr(settings, "manager_model", "deepseek-v4-pro"))
         env_overlay["BLUEPRINT_EXECUTOR_MODEL"] = str(
-            getattr(settings, "executor_model", getattr(settings, "manager_model", "deepseek-v4-flash"))
+            getattr(settings, "pi_executor_model", None)
+            or getattr(settings, "executor_model", getattr(settings, "manager_model", "deepseek-v4-flash"))
         )
         env_overlay["BLUEPRINT_REVIEWER_MODEL"] = str(
             getattr(settings, "reviewer_model", getattr(settings, "manager_model", "deepseek-v4-flash"))

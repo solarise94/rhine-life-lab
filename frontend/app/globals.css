@@ -372,6 +372,193 @@ button {
   gap: 12px;
 }
 
+.settings-provider-card.wide {
+  grid-column: 1 / -1;
+}
+
+.settings-role-card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+/* ─── Provider Card Grid & Model Cards ─── */
+
+.settings-provider-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settings-model-card {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.06), transparent 52%),
+    var(--panel-2);
+  padding: 16px;
+  display: grid;
+  gap: 10px;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.settings-model-card:hover {
+  border-color: var(--line-bright);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+
+.settings-model-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.settings-model-card-head strong {
+  font-size: 13px;
+  font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-model-key-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  background: var(--gray);
+  box-shadow: 0 0 0 2px rgba(156, 163, 175, 0.15);
+}
+
+.settings-model-key-dot.ok {
+  background: var(--green);
+  box-shadow: 0 0 0 2px var(--green-bg);
+}
+
+.settings-model-key-dot.missing {
+  background: var(--muted-light);
+  box-shadow: 0 0 0 2px rgba(134, 134, 139, 0.12);
+}
+
+.settings-model-key-dot.error {
+  background: var(--red);
+  box-shadow: 0 0 0 2px var(--red-bg);
+}
+
+.settings-model-card-model {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  line-height: 1.2;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-model-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-protocol-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  letter-spacing: 0.01em;
+}
+
+.settings-protocol-badge.anthropic_compatible {
+  background: var(--blue-bg);
+  color: var(--blue-dark);
+  border: 1px solid var(--blue-border);
+}
+
+.settings-protocol-badge.openai_compatible {
+  background: var(--purple-bg);
+  color: var(--purple-dark);
+  border: 1px solid var(--purple-border);
+}
+
+.settings-model-card-url {
+  color: var(--muted);
+  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-model-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+  margin-top: 2px;
+}
+
+.settings-test-result {
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 8px 10px;
+}
+
+.settings-test-result.ok {
+  background: var(--green-bg);
+  color: var(--green-dark);
+}
+
+.settings-test-result.error {
+  background: var(--red-bg);
+  color: var(--red-dark);
+}
+
+.settings-provider-edit {
+  gap: 12px;
+}
+
+.settings-provider-edit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.settings-provider-edit-buttons {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.settings-role-card > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-role-card strong {
+  font-size: 13px;
+}
+
+.settings-role-card span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .settings-provider-card-header {
   display: flex;
   justify-content: space-between;

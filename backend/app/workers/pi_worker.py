@@ -50,14 +50,21 @@ class PiWorkerAdapter(AgentCliWorkerAdapter):
 
     def extra_environment(self, *, packet: TaskPacket, settings: object) -> dict[str, str]:
         environment = super().extra_environment(packet=packet, settings=settings)
-        api_key = getattr(settings, "deepseek_api_key", None)
-        if api_key:
-            environment["BLUEPRINT_DEEPSEEK_API_KEY"] = api_key.get_secret_value()
-        environment["BLUEPRINT_DEEPSEEK_API_BASE_URL"] = str(getattr(settings, "deepseek_api_base_url", ""))
+        api_key = getattr(settings, "pi_api_key", None) or getattr(settings, "deepseek_api_key", None)
+        if not api_key:
+            raise RuntimeError(
+                "Pi executor cannot start: no API key available. "
+                "Configure an Anthropic-compatible provider with an API key and bind it to the pi_executor role."
+            )
+        environment["BLUEPRINT_DEEPSEEK_API_KEY"] = api_key.get_secret_value()
+        environment["BLUEPRINT_DEEPSEEK_API_BASE_URL"] = str(
+            getattr(settings, "pi_anthropic_base_url", None) or getattr(settings, "deepseek_api_base_url", "")
+        )
         environment["BLUEPRINT_PI_DEEPSEEK_BASE_URL"] = str(getattr(settings, "pi_deepseek_base_url", "https://api.deepseek.com"))
         environment["BLUEPRINT_MANAGER_MODEL"] = str(getattr(settings, "manager_model", "deepseek-v4-pro"))
         environment["BLUEPRINT_EXECUTOR_MODEL"] = str(
-            getattr(settings, "executor_model", getattr(settings, "manager_model", "deepseek-v4-flash"))
+            getattr(settings, "pi_executor_model", None)
+            or getattr(settings, "executor_model", getattr(settings, "manager_model", "deepseek-v4-flash"))
         )
         environment["BLUEPRINT_REVIEWER_MODEL"] = str(
             getattr(settings, "reviewer_model", getattr(settings, "manager_model", "deepseek-v4-flash"))
