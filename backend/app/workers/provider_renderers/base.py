@@ -26,6 +26,7 @@ def resolve_host_auth_path(cli_name: str) -> Path | None:
         "claude": "CLAUDE_CONFIG_DIR",
         "opencode": "OPENCODE_CONFIG_DIR",
         "codex": "CODEX_CONFIG_DIR",
+        "pi": "PI_CODING_AGENT_DIR",
     }
     env_var = env_map.get(cli_name)
     if env_var and os.environ.get(env_var):
@@ -38,6 +39,7 @@ def resolve_host_auth_path(cli_name: str) -> Path | None:
         "claude": "BLUEPRINT_HOST_CLAUDE_CONFIG_DIR",
         "opencode": "BLUEPRINT_HOST_OPENCODE_CONFIG_DIR",
         "codex": "BLUEPRINT_HOST_CODEX_CONFIG_DIR",
+        "pi": "BLUEPRINT_HOST_PI_CODING_AGENT_DIR",
     }
     host_env_var = host_env_map.get(cli_name)
     if host_env_var and os.environ.get(host_env_var):
@@ -59,6 +61,8 @@ def resolve_host_auth_path(cli_name: str) -> Path | None:
         candidates.append(Path(host_xdg_config) / "opencode")
     if cli_name == "opencode" and host_home:
         candidates.append(Path(host_home) / ".config" / "opencode")
+    if cli_name == "pi" and host_home:
+        candidates.append(Path(host_home) / ".pi" / "agent")
 
     for path in candidates:
         if path.exists():
@@ -83,6 +87,7 @@ def resolve_host_auth_path(cli_name: str) -> Path | None:
         "claude": "claude",
         "opencode": "opencode",
         "codex": "codex",
+        "pi": "pi",
     }
     subdir = subdir_map.get(cli_name, cli_name)
     path = base / subdir

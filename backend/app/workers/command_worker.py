@@ -458,6 +458,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         host_claude_config = os.environ.get("CLAUDE_CONFIG_DIR", "")
         host_opencode_config = os.environ.get("OPENCODE_CONFIG_DIR", "")
         host_codex_config = os.environ.get("CODEX_CONFIG_DIR", "")
+        host_pi_agent_dir = os.environ.get("PI_CODING_AGENT_DIR", "")
 
         if host_home:
             environment["BLUEPRINT_HOST_HOME"] = host_home
@@ -469,6 +470,8 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             environment["BLUEPRINT_HOST_OPENCODE_CONFIG_DIR"] = host_opencode_config
         if host_codex_config:
             environment["BLUEPRINT_HOST_CODEX_CONFIG_DIR"] = host_codex_config
+        if host_pi_agent_dir:
+            environment["BLUEPRINT_HOST_PI_CODING_AGENT_DIR"] = host_pi_agent_dir
 
         env_keys.add("BLUEPRINT_SANDBOX_PLAN")
         env_keys.add("BLUEPRINT_HOST_HOME")
@@ -476,6 +479,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         env_keys.add("BLUEPRINT_HOST_CLAUDE_CONFIG_DIR")
         env_keys.add("BLUEPRINT_HOST_OPENCODE_CONFIG_DIR")
         env_keys.add("BLUEPRINT_HOST_CODEX_CONFIG_DIR")
+        env_keys.add("BLUEPRINT_HOST_PI_CODING_AGENT_DIR")
         if "LANG" not in environment and os.environ.get("LANG"):
             environment["LANG"] = os.environ["LANG"]
         sandbox_plan = {

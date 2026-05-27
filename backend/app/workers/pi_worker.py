@@ -50,6 +50,8 @@ class PiWorkerAdapter(AgentCliWorkerAdapter):
 
     def extra_environment(self, *, packet: TaskPacket, settings: object) -> dict[str, str]:
         environment = super().extra_environment(packet=packet, settings=settings)
+        if environment.get("BLUEPRINT_AUTH_MODE") == "cli_native":
+            return environment
         api_key = getattr(settings, "pi_api_key", None) or getattr(settings, "deepseek_api_key", None)
         if not api_key:
             raise RuntimeError(

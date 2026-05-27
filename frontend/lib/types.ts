@@ -438,6 +438,7 @@ export interface ApiProviderProfile {
   base_url: string;
   native_base_url?: string;
   api_key_configured: boolean;
+  test_result?: TestApiProviderResponse | null;
 }
 
 export type ProviderRole = "manager" | "reviewer" | "pi_executor" | "opencode_executor" | "library_summarizer";
@@ -463,7 +464,7 @@ export interface UpdateAppSettingsPayload {
   openai_api_key?: string | null;
   clear_openai_api_key?: boolean;
   openai_api_base_url?: string | null;
-  api_provider_profiles?: Array<Omit<ApiProviderProfile, "api_key_configured">> | null;
+  api_provider_profiles?: Array<Omit<ApiProviderProfile, "api_key_configured" | "test_result">> | null;
   api_provider_keys?: Record<string, string | null>;
   clear_api_provider_keys?: string[];
   provider_bindings?: ProviderBindings | null;
@@ -471,7 +472,7 @@ export interface UpdateAppSettingsPayload {
 }
 
 export interface TestApiProviderPayload {
-  provider: Omit<ApiProviderProfile, "api_key_configured">;
+  provider: Omit<ApiProviderProfile, "api_key_configured" | "test_result">;
   api_key?: string | null;
 }
 

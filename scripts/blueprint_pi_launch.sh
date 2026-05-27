@@ -6,9 +6,13 @@ if [[ -z "${prompt_path}" ]]; then
   echo "BLUEPRINT pi launch error: missing executor prompt path." >&2
   exit 2
 fi
-if [[ -z "${BLUEPRINT_DEEPSEEK_API_KEY:-}" ]]; then
-  echo "BLUEPRINT pi launch error: BLUEPRINT_DEEPSEEK_API_KEY is not configured." >&2
-  exit 2
+auth_mode="${BLUEPRINT_AUTH_MODE:-project_api}"
+if [[ "${auth_mode}" == "project_api" ]]; then
+  if [[ -z "${BLUEPRINT_DEEPSEEK_API_KEY:-}" ]]; then
+    echo "BLUEPRINT pi launch error: BLUEPRINT_DEEPSEEK_API_KEY is not configured." >&2
+    exit 2
+  fi
+  export DEEPSEEK_API_KEY="${BLUEPRINT_DEEPSEEK_API_KEY}"
 fi
 
 export PATH="/home/solarise/.nvm/versions/node/v22.22.2/bin:${PATH:-}"
@@ -35,7 +39,7 @@ if [[ -n "${run_dir}" ]]; then
   mkdir -p "${PI_CODING_AGENT_SESSION_DIR}"
 fi
 
-if [[ -n "${PI_CODING_AGENT_DIR:-}" ]]; then
+if [[ "${auth_mode}" == "project_api" && -n "${PI_CODING_AGENT_DIR:-}" ]]; then
   pi_deepseek_base_url="${BLUEPRINT_PI_DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
   python3 - "${PI_CODING_AGENT_DIR}/models.json" "${pi_deepseek_base_url}" <<'PY'
 import json
@@ -72,10 +76,24 @@ if isinstance(items, list):
 PY
 )
 
+provider_args=()
+if [[ "${auth_mode}" == "project_api" ]]; then
+  provider_args+=(
+    --provider deepseek
+    --model "${BLUEPRINT_EXECUTOR_MODEL:-${BLUEPRINT_MANAGER_MODEL:-deepseek-v4-pro}}"
+    --api-key "${BLUEPRINT_DEEPSEEK_API_KEY}"
+  )
+else
+  if [[ -n "${BLUEPRINT_PI_NATIVE_PROVIDER:-}" ]]; then
+    provider_args+=(--provider "${BLUEPRINT_PI_NATIVE_PROVIDER}")
+  fi
+  if [[ -n "${BLUEPRINT_PI_NATIVE_MODEL:-}" ]]; then
+    provider_args+=(--model "${BLUEPRINT_PI_NATIVE_MODEL}")
+  fi
+fi
+
 exec "${pi_bin}" \
-  --provider deepseek \
-  --model "${BLUEPRINT_EXECUTOR_MODEL:-${BLUEPRINT_MANAGER_MODEL:-deepseek-v4-pro}}" \
-  --api-key "${BLUEPRINT_DEEPSEEK_API_KEY}" \
+  "${provider_args[@]}" \
   --no-session \
   --no-skills \
   --no-context-files \

@@ -174,7 +174,7 @@ BLUEPRINT_INTERNAL_TOOL_TOKEN=change-me
 
 | 执行器 | 兼容性 | 登录/项目 API | Tool policy 原生注入 | MCP 原生注入 | Skill 原生注入 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `pi` | 最佳兼容 | `project_api` 支持；不支持 `cli_native` | 部分支持，主要由 Blueprint prompt/bwrap 约束 | 不支持原生 MCP 注入 | 支持，转换为 `pi --skill <path>` | 默认推荐，DeepSeek/Pi 配置最完整 |
+| `pi` | 最佳兼容 | `project_api` 和 `cli_native` 均支持；默认推荐 project API 注入 | 部分支持，主要由 Blueprint prompt/bwrap 约束 | 不支持原生 MCP 注入 | 支持，转换为 `pi --skill <path>` | 默认推荐，DeepSeek/Pi 配置最完整；cli_native 使用本机 Pi 登录态 |
 | `opencode` | 部分兼容 | `cli_native` 和 `project_api` 均支持 | 部分支持，写入 run-scoped OpenCode capability config；强制边界仍靠 bwrap | 部分支持，写入 OpenCode config 并暴露 `OPENCODE_MCP_CONFIG` | 部分支持，写入 OpenCode config/env 的 skill paths | 项目 API 可走 OpenAI-compatible 或 provider-native |
 | `claude_code` | 部分兼容 | 仅 `cli_native`，不注入 Anthropic 项目 API | 支持，映射到 `--permission-mode`、`--allowedTools`/`--disallowedTools` 的安全子集 | 支持，映射到 `--mcp-config <path>` | 非原生，仅通过 Blueprint env/prompt 暴露 skill paths | 使用本机 Claude Code 登录态 |
 | `codex` | 部分兼容 | 仅 `cli_native`，不注入 OpenAI 项目 API | 不支持原生注入；仅 Blueprint prompt/bwrap 约束 | 不支持原生 MCP 注入 | 不支持原生 skill 注入 | 使用本机 Codex 登录态 |
@@ -251,5 +251,6 @@ node --check manager-agent/src/server.js
 - [docs/15_manager_runtime_libraries_and_report_plan.md](/home/solarise/blueprint_re_v3/docs/15_manager_runtime_libraries_and_report_plan.md:1)
 - [docs/16_skill_mcp_registry_and_wrapper_attachment_plan.md](/home/solarise/blueprint_re_v3/docs/16_skill_mcp_registry_and_wrapper_attachment_plan.md:1)
 - [docs/17_explicit_output_contract_and_submission_validation_plan.md](/home/solarise/blueprint_re_v3/docs/17_explicit_output_contract_and_submission_validation_plan.md:1)
+- [docs/22_dependency_attention_and_provider_hardening.md](/home/solarise/blueprint_re_v3/docs/22_dependency_attention_and_provider_hardening.md:1)
 
 这些文档基本覆盖了 manager、执行器 wrapper、skill/MCP registry、结果契约和报告链路。

@@ -83,19 +83,20 @@ Initial support should be intentionally uneven. Some combinations are useful now
 
 | Worker | `cli_native` | `project_api` | Initial project API protocol |
 | --- | --- | --- | --- |
-| `pi` | Optional later | Supported now | Pi/DeepSeek current config |
+| `pi` | Supported | Supported | Pi/DeepSeek current config |
 | `opencode` | Supported | Supported | OpenCode provider config, OpenAI-compatible or provider-native |
 | `claude_code` / `cc` | Supported | Not supported initially | Native Claude Code login only |
 | `codex` | Supported | Not supported initially | Deferred OpenAI-compatible layer |
 
 ### Pi
 
-`pi` already runs in the project API style:
+`pi` supports both project API injection and native Pi login:
 
 - `scripts/blueprint_pi_launch.sh` injects DeepSeek API key, model, and base URL.
 - Run-local Pi state is configured through `PI_CODING_AGENT_DIR` and `PI_CODING_AGENT_SESSION_DIR`.
+- `cli_native` does not inject a project API key and points Pi at the host-side `~/.pi/agent` auth directory when available.
 
-The first compatibility pass should not force `pi` into a new profile store. It can be adapted after the common profile API is stable.
+Project API remains the recommended default for repeatable deployment. Native mode is for hosts that already logged into Pi through OAuth or a local auth file.
 
 ### OpenCode
 

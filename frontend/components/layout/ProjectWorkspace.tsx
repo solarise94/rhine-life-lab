@@ -33,7 +33,7 @@ import {
   EMPTY_SELECTED_PROFILE_BY_CARD,
   useWorkspaceUiStore,
 } from "@/lib/stores/workspace-ui-store";
-import { Card, ReportExportResponse } from "@/lib/types";
+import { Card, ExecutorProfile, ReportExportResponse } from "@/lib/types";
 import { SideNav } from "./SideNav";
 import { ProjectHeader } from "./ProjectHeader";
 import { ManagerChatPanel } from "@/components/manager-chat/ManagerChatPanel";
@@ -70,6 +70,13 @@ const EMPTY_CARD_INTERACTION_ORDER: string[] = [];
 function formatRuntime(runtime?: string) {
   if (!runtime || runtime === "__system__") return "system";
   return runtime;
+}
+
+function preferredExecutorProfile(profiles: ExecutorProfile[], workerType?: string) {
+  if (!workerType) return profiles[0];
+  const candidates = workerType ? profiles.filter((profile) => profile.worker_type === workerType) : profiles;
+  const preferredAuthMode = workerType === "pi" || workerType === "opencode" ? "project_api" : "cli_native";
+  return candidates.find((profile) => profile.auth_mode === preferredAuthMode) ?? candidates[0];
 }
 
 export function ProjectWorkspace({ projectId, view }: { projectId: string; view: View }) {
@@ -320,7 +327,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
       profileId = selectedProfile.profile_id;
     } else {
       workerType = selectedWorkerByProject[card.card_id] ?? configuredWorkers[0]?.worker_type;
-      profileId = executorProfiles.find((p) => p.enabled && p.worker_type === workerType)?.profile_id;
+      profileId = preferredExecutorProfile(executorProfiles.filter((p) => p.enabled), workerType)?.profile_id;
     }
     const pythonRuntime = selectedPythonRuntimeByProject[card.card_id] ?? effectiveGlobalPythonRuntime ?? "__system__";
     const rRuntime = selectedRRuntimeByProject[card.card_id] ?? effectiveGlobalRRuntime ?? "__system__";

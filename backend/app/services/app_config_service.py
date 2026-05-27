@@ -152,6 +152,7 @@ class AppConfigService:
             if not provider_profiles:
                 raise HTTPException(status_code=400, detail="At least one API provider profile must remain configured.")
             config["api_provider_profiles"] = provider_profiles
+            self._prune_provider_test_results(config, provider_profiles)
 
         provider_profiles = self._api_provider_profiles(config)
         merged_provider_bindings = {
@@ -174,10 +175,12 @@ class AppConfigService:
             clean_value = str(value or "").strip()
             if clean_id and clean_value:
                 api_provider_keys[clean_id] = clean_value
+                self._clear_provider_test_result(config, clean_id)
         for provider_id in payload.get("clear_api_provider_keys") or []:
             clean_id = self._clean_provider_id(provider_id)
             if clean_id:
                 api_provider_keys.pop(clean_id, None)
+                self._clear_provider_test_result(config, clean_id)
                 if clean_id == "deepseek":
                     config.pop("deepseek_api_key", None)
                     self.settings.deepseek_api_key = None
@@ -452,6 +455,7 @@ class AppConfigService:
             {
                 **profile,
                 "api_key_configured": bool(self._api_provider_key(config, profile)),
+                "test_result": self._provider_test_result(config, profile),
             }
             for profile in self._api_provider_profiles(config)
         ]
@@ -500,6 +504,64 @@ class AppConfigService:
         if provider_id == "anthropic":
             return self._effective_anthropic_api_key(config)
         return ""
+
+    def _provider_test_result(self, config: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any] | None:
+        provider_id = str(profile.get("provider_id") or "").strip()
+        results = config.get("api_provider_test_results")
+        if not provider_id or not isinstance(results, dict):
+            return None
+        stored = results.get(provider_id)
+        if not isinstance(stored, dict):
+            return None
+        if stored.get("fingerprint") != self._provider_test_fingerprint(profile):
+            return None
+        result = stored.get("result")
+        return dict(result) if isinstance(result, dict) else None
+
+    def _save_provider_test_result(self, config: dict[str, Any], profile: dict[str, Any], result: dict[str, Any]) -> None:
+        provider_id = str(profile.get("provider_id") or "").strip()
+        if not provider_id:
+            return
+        results = config.get("api_provider_test_results")
+        if not isinstance(results, dict):
+            results = {}
+        results[provider_id] = {
+            "fingerprint": self._provider_test_fingerprint(profile),
+            "result": dict(result),
+        }
+        config["api_provider_test_results"] = results
+        self._save(config)
+
+    def _clear_provider_test_result(self, config: dict[str, Any], provider_id: str) -> None:
+        results = config.get("api_provider_test_results")
+        if isinstance(results, dict):
+            results.pop(provider_id, None)
+            if not results:
+                config.pop("api_provider_test_results", None)
+
+    def _prune_provider_test_results(self, config: dict[str, Any], profiles: list[dict[str, Any]]) -> None:
+        results = config.get("api_provider_test_results")
+        if not isinstance(results, dict):
+            return
+        profiles_by_id = {str(profile.get("provider_id") or "").strip(): profile for profile in profiles}
+        for provider_id in list(results):
+            profile = profiles_by_id.get(provider_id)
+            stored = results.get(provider_id)
+            if not profile or not isinstance(stored, dict) or stored.get("fingerprint") != self._provider_test_fingerprint(profile):
+                results.pop(provider_id, None)
+        if not results:
+            config.pop("api_provider_test_results", None)
+
+    @staticmethod
+    def _provider_test_fingerprint(profile: dict[str, Any]) -> str:
+        payload = {
+            "provider_id": str(profile.get("provider_id") or "").strip(),
+            "protocol": str(profile.get("protocol") or "").strip(),
+            "model": str(profile.get("model") or "").strip(),
+            "base_url": str(profile.get("base_url") or "").strip().rstrip("/"),
+            "native_base_url": str(profile.get("native_base_url") or "").strip().rstrip("/"),
+        }
+        return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
     @staticmethod
     def _provider_native_base_url(profile: dict[str, Any]) -> str:
@@ -642,7 +704,7 @@ class AppConfigService:
         config = self._load()
         profiles = config.get("executor_profiles")
         if not isinstance(profiles, list):
-            profiles = []
+            profiles = [item.model_dump() for item in default_profiles()]
         profile_id = profile.get("profile_id")
         existing_index = next(
             (i for i, item in enumerate(profiles) if isinstance(item, dict) and item.get("profile_id") == profile_id),
@@ -712,22 +774,28 @@ class AppConfigService:
             with request.urlopen(http_request, timeout=timeout_seconds) as response:
                 response.read(4096)
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            return {"ok": True, "message": "Model test succeeded.", "latency_ms": elapsed_ms}
+            result = {"ok": True, "message": "Model test succeeded.", "latency_ms": elapsed_ms}
+            self._save_provider_test_result(config, provider, result)
+            return result
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:1200]
-            return {
+            result = {
                 "ok": False,
                 "message": f"Model test failed with HTTP {exc.code}.",
                 "status_code": exc.code,
                 "detail": detail,
                 "latency_ms": int((time.monotonic() - started) * 1000),
             }
+            self._save_provider_test_result(config, provider, result)
+            return result
         except Exception as exc:
-            return {
+            result = {
                 "ok": False,
                 "message": f"Model test failed: {exc}",
                 "latency_ms": int((time.monotonic() - started) * 1000),
             }
+            self._save_provider_test_result(config, provider, result)
+            return result
 
     @staticmethod
     def _anthropic_messages_url(base_url: str) -> str:
@@ -761,6 +829,18 @@ class AppConfigService:
                 (item for item in profiles if item.get("profile_id") == profile_id and item.get("worker_type") == worker_type),
                 None,
             )
+        preferred_auth_mode = "project_api" if worker_type in {"pi", "opencode"} else "cli_native"
+        preferred = next(
+            (
+                item for item in profiles
+                if item.get("worker_type") == worker_type
+                and item.get("enabled", True)
+                and item.get("auth_mode") == preferred_auth_mode
+            ),
+            None,
+        )
+        if preferred:
+            return preferred
         return next(
             (item for item in profiles if item.get("worker_type") == worker_type and item.get("enabled", True)),
             None,

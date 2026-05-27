@@ -16,6 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastapi import HTTPException
 from app.models.executor_profiles import (
@@ -119,14 +120,15 @@ class TestProfileValidation(unittest.TestCase):
         result = validate_profile(spec)
         self.assertTrue(result.valid)
 
-    def test_pi_cli_native_is_not_supported(self):
-        with self.assertRaises(Exception):
-            ExecutorProfileSpec(
-                profile_id="pi-native",
-                display_name="Pi native",
-                worker_type="pi",
-                auth_mode=AUTH_MODE_CLI_NATIVE,
-            )
+    def test_pi_cli_native_is_valid(self):
+        spec = ExecutorProfileSpec(
+            profile_id="pi-native",
+            display_name="Pi native",
+            worker_type="pi",
+            auth_mode=AUTH_MODE_CLI_NATIVE,
+        )
+        result = validate_profile(spec)
+        self.assertTrue(result.valid)
 
     def test_disabled_profile_is_always_valid(self):
         spec = self._base_profile(enabled=False)
@@ -282,7 +284,7 @@ class TestPiRenderer(unittest.TestCase):
             self.assertEqual(result.environment_overlay["BLUEPRINT_DEEPSEEK_API_KEY"], "sk-test-deepseek-key-123")
             self.assertEqual(result.provider_config_plan["provider_id"], "deepseek")
 
-    def test_cli_native_not_supported(self):
+    def test_cli_native_uses_host_auth_without_project_key(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             renderer = PiRenderer()
@@ -296,8 +298,10 @@ class TestPiRenderer(unittest.TestCase):
                 project_root=tmp_path,
                 settings=_make_settings(),
             )
-            self.assertFalse(result.is_supported)
-            self.assertIn("project_api", result.unsupported_error)
+            self.assertTrue(result.is_supported)
+            self.assertEqual(result.auth_mode, AUTH_MODE_CLI_NATIVE)
+            self.assertNotIn("BLUEPRINT_DEEPSEEK_API_KEY", result.environment_overlay)
+            self.assertFalse(result.provider_config_plan["credential_injected"])
 
 
 class TestOpenCodeRenderer(unittest.TestCase):
@@ -874,6 +878,84 @@ class TestExecutorProfileResolution(unittest.TestCase):
 
             provider_ids = [item["provider_id"] for item in public["api_provider_profiles"]]
             self.assertEqual(provider_ids, ["deepseek"])
+
+    def test_provider_test_result_persists_until_profile_changes(self):
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, _size=None):
+                return b"{}"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = _make_settings(data_root=tmp_dir)
+            service = AppConfigService(settings)
+            profile = {
+                "provider_id": "deepseek",
+                "display_name": "DeepSeek",
+                "protocol": "anthropic_compatible",
+                "model": "deepseek-v4-flash",
+                "base_url": "https://api.deepseek.com/anthropic",
+                "native_base_url": "https://api.deepseek.com",
+            }
+            service.update_settings({"api_provider_profiles": [profile], "api_provider_keys": {"deepseek": "sk-test"}})
+
+            with patch("app.services.app_config_service.request.urlopen", return_value=_Response()):
+                result = service.test_api_provider(profile)
+
+            self.assertTrue(result["ok"])
+            public = service.get_public_settings()
+            saved = public["api_provider_profiles"][0]["test_result"]
+            self.assertTrue(saved["ok"])
+
+            public = service.update_settings({"api_provider_profiles": [{**profile, "model": "deepseek-v4-pro"}]})
+            self.assertIsNone(public["api_provider_profiles"][0]["test_result"])
+
+    def test_save_executor_profile_preserves_default_profiles_on_first_write(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = _make_settings(data_root=tmp_dir)
+            service = AppConfigService(settings)
+
+            service.save_executor_profile(
+                {
+                    "profile_id": "pi-cli-native",
+                    "display_name": "Pi Agent (local CLI login)",
+                    "worker_type": "pi",
+                    "auth_mode": AUTH_MODE_CLI_NATIVE,
+                    "enabled": False,
+                    "command": None,
+                    "api_protocol": None,
+                    "provider_id": None,
+                    "model": None,
+                    "base_url": None,
+                    "credential_ref": None,
+                    "permission_preset": "workspace_write",
+                    "native_auth_readonly": True,
+                }
+            )
+
+            profile_ids = [profile["profile_id"] for profile in service.list_executor_profiles()]
+            self.assertIn("pi-project-api", profile_ids)
+            self.assertIn("pi-cli-native", profile_ids)
+            self.assertFalse(next(profile for profile in service.list_executor_profiles() if profile["profile_id"] == "pi-cli-native")["enabled"])
+
+    def test_default_executor_profile_prefers_wrapper_for_pi_and_opencode(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = _make_settings(data_root=tmp_dir)
+            service = AppConfigService(settings)
+
+            pi_profile = service.resolve_executor_profile("pi")
+            opencode_profile = service.resolve_executor_profile("opencode")
+            codex_profile = service.resolve_executor_profile("codex")
+            claude_profile = service.resolve_executor_profile("claude_code")
+
+            self.assertEqual("project_api", pi_profile["auth_mode"])
+            self.assertEqual("project_api", opencode_profile["auth_mode"])
+            self.assertEqual("cli_native", codex_profile["auth_mode"])
+            self.assertEqual("cli_native", claude_profile["auth_mode"])
 
 
 if __name__ == "__main__":

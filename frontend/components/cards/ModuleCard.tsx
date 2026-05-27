@@ -17,6 +17,13 @@ import { SpecialistAvatar } from "./SpecialistAvatar";
 import { FileBag } from "./FileBag";
 import { CardPage, EMPTY_CARD_PAGE_BY_ID, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 
+function preferredExecutorProfile(profiles: ExecutorProfile[], workerType?: string) {
+  if (!workerType) return profiles[0];
+  const candidates = workerType ? profiles.filter((profile) => profile.worker_type === workerType) : profiles;
+  const preferredAuthMode = workerType === "pi" || workerType === "opencode" ? "project_api" : "cli_native";
+  return candidates.find((profile) => profile.auth_mode === preferredAuthMode) ?? candidates[0];
+}
+
 export function ModuleCard({
   projectId,
   card,
@@ -76,9 +83,7 @@ export function ModuleCard({
   const isDormant = card.status === "cancelled" || card.status === "rejected";
   const configuredWorkers = workerCapabilities.filter((item) => item.configured);
   const enabledProfiles = executorProfiles.filter((p) => p.enabled);
-  const fallbackProfile = selectedWorkerType
-    ? enabledProfiles.find((p) => p.worker_type === selectedWorkerType)
-    : enabledProfiles[0];
+  const fallbackProfile = preferredExecutorProfile(enabledProfiles, selectedWorkerType);
   const effectiveSelectedProfileId =
     selectedProfileId && enabledProfiles.some((p) => p.profile_id === selectedProfileId)
       ? selectedProfileId

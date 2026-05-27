@@ -13,7 +13,7 @@ AuthMode = Literal["cli_native", "project_api"]
 WorkerType = Literal["pi", "opencode", "claude_code", "codex"]
 
 SUPPORTED_AUTH_MODES: dict[str, set[str]] = {
-    "pi": {AUTH_MODE_PROJECT_API},
+    "pi": {AUTH_MODE_CLI_NATIVE, AUTH_MODE_PROJECT_API},
     "opencode": {AUTH_MODE_CLI_NATIVE, AUTH_MODE_PROJECT_API},
     "claude_code": {AUTH_MODE_CLI_NATIVE},
     "codex": {AUTH_MODE_CLI_NATIVE},
@@ -167,7 +167,8 @@ def validate_profile(spec: ExecutorProfileSpec, *, settings: object | None = Non
 
 def _resolve_command_setting(worker_type: str, settings: object) -> str | None:
     setting_name = f"{worker_type}_command"
-    return getattr(settings, setting_name, None)
+    json_setting_name = f"{worker_type}_command_json"
+    return getattr(settings, json_setting_name, None) or getattr(settings, setting_name, None)
 
 
 def default_profiles() -> list[ExecutorProfileSpec]:
@@ -182,9 +183,9 @@ def default_profiles() -> list[ExecutorProfileSpec]:
             provider_id="deepseek",
         ),
         ExecutorProfileSpec(
-            profile_id="opencode-cli-native",
-            display_name="OpenCode (local CLI login)",
-            worker_type="opencode",
+            profile_id="pi-cli-native",
+            display_name="Pi Agent (local CLI login)",
+            worker_type="pi",
             auth_mode=AUTH_MODE_CLI_NATIVE,
             native_auth_readonly=True,
         ),
@@ -196,6 +197,13 @@ def default_profiles() -> list[ExecutorProfileSpec]:
             api_protocol="anthropic_compatible",
             provider_id="anthropic",
             native_auth_readonly=False,
+        ),
+        ExecutorProfileSpec(
+            profile_id="opencode-cli-native",
+            display_name="OpenCode (local CLI login)",
+            worker_type="opencode",
+            auth_mode=AUTH_MODE_CLI_NATIVE,
+            native_auth_readonly=True,
         ),
         ExecutorProfileSpec(
             profile_id="claude-code-cli-native",

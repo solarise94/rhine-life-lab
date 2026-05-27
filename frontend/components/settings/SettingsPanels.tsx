@@ -9,6 +9,7 @@ import {
   useLibrary,
   useRefreshLibraryMutation,
   useResummarizeLibraryItemMutation,
+  useSaveExecutorProfileMutation,
   useTestApiProviderMutation,
   useUpdateAppSettingsMutation,
   useUpdateProjectRuntimePreferencesMutation,
@@ -17,6 +18,7 @@ import {
   ApiProviderProfile,
   ApiProviderProtocol,
   DiagnosticExportResponse,
+  ExecutorProfile,
   ProjectState,
   ProviderBindings,
   ProviderRole,
@@ -27,6 +29,18 @@ import {
 
 type ScriptPreference = "auto" | "prefer_python" | "prefer_r" | "prefer_mixed";
 type EditableProviderProfile = Omit<ApiProviderProfile, "api_key_configured"> & { api_key_configured?: boolean };
+
+function testResultsFromProfiles(profiles: ApiProviderProfile[]) {
+  return Object.fromEntries(
+    profiles
+      .filter((profile) => profile.test_result)
+      .map((profile) => [profile.provider_id, profile.test_result as TestApiProviderResponse]),
+  );
+}
+
+function executorAuthModeLabel(authMode: ExecutorProfile["auth_mode"]) {
+  return authMode === "project_api" ? "使用应用 API" : "使用执行器原生";
+}
 
 const PROVIDER_ROLE_OPTIONS: Array<{
   role: ProviderRole;
@@ -154,41 +168,68 @@ function LibrarySection({
   );
 }
 
-function ExecutorProfilesSection() {
+function ExecutorAuthModeSelector({ workerType }: { workerType: string }) {
   const profilesQuery = useExecutorProfiles();
+  const saveExecutorProfileMutation = useSaveExecutorProfileMutation();
   const profiles = profilesQuery.data?.profiles ?? [];
   const matrix = profilesQuery.data?.support_matrix;
+  const workerProfiles = profiles.filter((profile) => profile.worker_type === workerType);
+  const enabledProfiles = workerProfiles.filter((profile) => profile.enabled);
+  const preferredAuthMode =
+    workerType === "pi" || workerType === "opencode"
+      ? "project_api"
+      : "cli_native";
+  const selectedProfile =
+    enabledProfiles.find((profile) => profile.auth_mode === preferredAuthMode)
+    ?? enabledProfiles[0]
+    ?? workerProfiles.find((profile) => profile.auth_mode === preferredAuthMode)
+    ?? workerProfiles[0];
+  const selectedAuthMode = selectedProfile?.auth_mode ?? "cli_native";
+  const modeProfiles = workerProfiles.filter(
+    (profile, index, items) => items.findIndex((item) => item.auth_mode === profile.auth_mode) === index,
+  );
+  const commandConfigured = matrix?.command_configured?.[workerType] ?? false;
+
+  async function selectAuthMode(authMode: ExecutorProfile["auth_mode"]) {
+    const updates = workerProfiles.filter((profile) => profile.enabled !== (profile.auth_mode === authMode));
+    await Promise.all(
+      updates.map((profile) =>
+        saveExecutorProfileMutation.mutateAsync({
+          ...profile,
+          enabled: profile.auth_mode === authMode,
+        }),
+      ),
+    );
+  }
+
+  if (!workerProfiles.length) {
+    return <div className="settings-inline-help">当前执行器没有可用 profile，运行会使用后端默认配置。</div>;
+  }
 
   return (
-    <section className="settings-section">
-      <div className="settings-section-header">
-        <div>
-          <h3>Executor Profiles</h3>
-          <p>管理执行器配置。Codex 和 Claude Code 仅支持本机 CLI 登录态；项目 API 注入目前只开放给 OpenCode 和 Pi。</p>
-        </div>
+    <>
+      <label className="settings-field">
+        <span>认证方式</span>
+        <select
+          value={selectedAuthMode}
+          disabled={saveExecutorProfileMutation.isPending || modeProfiles.length <= 1}
+          onChange={(event) => void selectAuthMode(event.target.value as ExecutorProfile["auth_mode"])}
+        >
+          {modeProfiles.map((profile) => (
+            <option key={profile.profile_id} value={profile.auth_mode}>
+              {executorAuthModeLabel(profile.auth_mode)}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="settings-inline-help">
+        {selectedAuthMode === "project_api"
+          ? "使用应用 API：从上方 provider 绑定读取 key、模型和 Base URL，由 wrapper 注入执行器。"
+          : "使用执行器原生登录方式以兼容 OAuth 登录、cc-switch；wrapper 不注入应用 API。"}
+        {" "}
+        {commandConfigured ? "CLI 命令已配置。" : "CLI 命令未配置，运行会直接报错。"}
       </div>
-      <div className="settings-kv-list">
-        {profiles.map((p) => {
-          const cliOk = matrix?.command_configured?.[p.worker_type] ?? false;
-          const unsupported = ["codex", "claude_code"].includes(p.worker_type) && p.auth_mode === "project_api";
-          return (
-            <div key={p.profile_id}>
-              <strong>{p.display_name}</strong>
-              <span>
-                {p.worker_type} · {p.auth_mode}
-                {p.api_protocol ? ` · ${p.api_protocol}` : ""}
-                {unsupported ? " · (未支持)" : ""}
-                {cliOk ? " · CLI ✓" : " · CLI ✗"}
-                {p.enabled ? "" : " · 禁用"}
-              </span>
-            </div>
-          );
-        })}
-        {profiles.length === 0 ? (
-          <div><strong>No profiles</strong><span>使用默认配置</span></div>
-        ) : null}
-      </div>
-    </section>
+    </>
   );
 }
 
@@ -258,6 +299,7 @@ export function SettingsPanels({
     setEditingProviderId(null);
     setDraftProviderIds({});
     setTestingProviderId(null);
+    setProviderTestResults(testResultsFromProfiles(appSettingsQuery.data.api_provider_profiles));
     setWebSearchEnabled(appSettingsQuery.data.web_search.enabled);
     setTavilyBaseUrl(appSettingsQuery.data.web_search.base_url);
   }, [appSettingsQuery.data]);
@@ -270,8 +312,8 @@ export function SettingsPanels({
           .map(([providerId, value]) => [providerId, value.trim()])
           .filter(([, value]) => value),
       );
-      await updateAppSettingsMutation.mutateAsync({
-        api_provider_profiles: providerProfiles.map(({ api_key_configured, ...profile }) => profile),
+      const saved = await updateAppSettingsMutation.mutateAsync({
+        api_provider_profiles: providerProfiles.map(({ api_key_configured, test_result, ...profile }) => profile),
         api_provider_keys: apiProviderKeys,
         clear_api_provider_keys: Object.entries(clearProviderKeys)
           .filter(([, checked]) => checked)
@@ -283,6 +325,12 @@ export function SettingsPanels({
         clear_tavily_api_key: clearTavilyKey,
         tavily_base_url: tavilyBaseUrl,
       });
+      setProviderProfiles(saved.api_provider_profiles);
+      setProviderBindings(saved.provider_bindings);
+      setDefaultWorkerType(saved.default_worker_type);
+      setProviderTestResults(testResultsFromProfiles(saved.api_provider_profiles));
+      setEditingProviderId(null);
+      setDraftProviderIds({});
       setProviderKeys({});
       setClearProviderKeys({});
       setTavilyKey("");
@@ -423,7 +471,31 @@ export function SettingsPanels({
         delete next[providerId];
         return next;
       });
+    } else {
+      const savedProfile = appSettingsQuery.data?.api_provider_profiles.find((profile) => profile.provider_id === providerId);
+      if (savedProfile) {
+        setProviderProfiles((items) => items.map((item) => (item.provider_id === providerId ? savedProfile : item)));
+        setProviderTestResults((items) => {
+          const next = { ...items };
+          if (savedProfile.test_result) {
+            next[providerId] = savedProfile.test_result;
+          } else {
+            delete next[providerId];
+          }
+          return next;
+        });
+      }
     }
+    setProviderKeys((items) => {
+      const next = { ...items };
+      delete next[providerId];
+      return next;
+    });
+    setClearProviderKeys((items) => {
+      const next = { ...items };
+      delete next[providerId];
+      return next;
+    });
     setEditingProviderId(null);
   }
 
@@ -446,6 +518,7 @@ export function SettingsPanels({
     try {
       const provider = { ...profile };
       delete provider.api_key_configured;
+      delete provider.test_result;
       const result = await testApiProviderMutation.mutateAsync({
         provider,
         api_key: providerKeys[profile.provider_id]?.trim() || null,
@@ -786,6 +859,7 @@ export function SettingsPanels({
                   })()}
                 </select>
               </label>
+              <ExecutorAuthModeSelector workerType={defaultWorkerType} />
               {appSettingsQuery.data && !appSettingsQuery.data.available_executors.includes(defaultWorkerType) ? (
                 <div className="settings-inline-help" style={{ color: "#e07020" }}>
                   当前选择的 {defaultWorkerType} 未配置，运行时会直接报错。请在部署脚本的 backend.env 中设置 BLUEPRINT_
@@ -875,8 +949,6 @@ export function SettingsPanels({
           </div>
         ) : null}
       </section>
-
-      <ExecutorProfilesSection />
 
       <LibrarySection
         kind="skill"

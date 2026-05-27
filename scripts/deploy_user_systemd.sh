@@ -267,7 +267,7 @@ import secrets
 print(secrets.token_urlsafe(32))
 PY
 )}"
-DEFAULT_PI_COMMAND_JSON="[\"${PI_BIN:-pi}\",\"--no-session\",\"-p\",\"@{executor_prompt_path}\"]"
+DEFAULT_PI_COMMAND_JSON="[\"bash\",\"{repo_root}/scripts/blueprint_pi_launch.sh\",\"{executor_prompt_path}\"]"
 DEFAULT_OPENCODE_COMMAND_JSON="[\"${OPENCODE_BIN:-opencode}\",\"run\",\"--file\",\"{executor_prompt_path}\",\"--format\",\"json\",\"--dangerously-skip-permissions\",\"Read {executor_prompt_path} and complete the Blueprint executor contract exactly.\"]"
 DEFAULT_CLAUDE_CODE_COMMAND_JSON="[\"${CLAUDE_BIN:-claude}\",\"-p\",\"@{executor_prompt_path}\",\"--output-format\",\"stream-json\",\"--verbose\"]"
 

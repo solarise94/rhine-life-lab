@@ -3,14 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from app.workers.provider_renderers.base import ProviderRenderResult, ProviderRenderer
+from app.workers.provider_renderers.base import ProviderRenderResult, ProviderRenderer, resolve_host_auth_path
 
 
 class PiRenderer(ProviderRenderer):
     """Renders Pi CLI command and configuration.
 
-    Pi always runs in project_api mode using DeepSeek configuration
-    injected through the launch script.
+    Pi supports project_api injection and cli_native host-side login.
     """
 
     worker_type = "pi"
@@ -26,11 +25,10 @@ class PiRenderer(ProviderRenderer):
         settings: Any,
         packet: dict[str, Any] | None = None,
     ) -> ProviderRenderResult:
+        if auth_mode == "cli_native":
+            return self._render_cli_native(auth_mode=auth_mode)
         if auth_mode != "project_api":
-            return self.render_unsupported(
-                auth_mode=auth_mode,
-                error="Pi only supports project_api auth mode currently.",
-            )
+            return self.render_unsupported(auth_mode=auth_mode, error=f"Pi does not support auth_mode={auth_mode}.")
 
         env_overlay: dict[str, str] = {}
         api_key = getattr(settings, "pi_api_key", None) or getattr(settings, "deepseek_api_key", None)
@@ -63,6 +61,32 @@ class PiRenderer(ProviderRenderer):
             "credential_injected": bool(api_key),
         }
 
+        return ProviderRenderResult(
+            worker_type=self.worker_type,
+            auth_mode=auth_mode,
+            command_argv=command_argv,
+            environment_overlay=env_overlay,
+            redacted_command=self.redact_command(command_argv),
+            provider_config_plan=provider_config_plan,
+        )
+
+    def _render_cli_native(self, *, auth_mode: str) -> ProviderRenderResult:
+        host_auth_path = resolve_host_auth_path("pi")
+        env_overlay: dict[str, str] = {}
+        if host_auth_path:
+            env_overlay["PI_CODING_AGENT_DIR"] = str(host_auth_path)
+
+        command_argv: list[str] = []
+        provider_config_plan = {
+            "provider_id": None,
+            "api_protocol": None,
+            "model": None,
+            "base_url": None,
+            "credential_ref": None,
+            "credential_injected": False,
+            "host_auth_path": str(host_auth_path) if host_auth_path else None,
+            "note": "cli_native: Pi uses host-side ~/.pi/agent auth.json or provider env. Wrapper does not inject project API credentials.",
+        }
         return ProviderRenderResult(
             worker_type=self.worker_type,
             auth_mode=auth_mode,
