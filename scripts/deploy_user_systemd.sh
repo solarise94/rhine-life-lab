@@ -267,6 +267,7 @@ import secrets
 print(secrets.token_urlsafe(32))
 PY
 )}"
+DEFAULT_EXTRA_RO_BINDS="${HOME}/.nvm,${HOME}/.local"
 DEFAULT_PI_COMMAND_JSON="[\"bash\",\"{repo_root}/scripts/blueprint_pi_launch.sh\",\"{executor_prompt_path}\"]"
 DEFAULT_OPENCODE_COMMAND_JSON="[\"${OPENCODE_BIN:-opencode}\",\"run\",\"--file\",\"{executor_prompt_path}\",\"--format\",\"json\",\"--dangerously-skip-permissions\",\"Read {executor_prompt_path} and complete the Blueprint executor contract exactly.\"]"
 DEFAULT_CLAUDE_CODE_COMMAND_JSON="[\"${CLAUDE_BIN:-claude}\",\"-p\",\"@{executor_prompt_path}\",\"--output-format\",\"stream-json\",\"--verbose\"]"
@@ -310,11 +311,17 @@ _write_env_once "${APP_ENV_DIR}/backend.env" \
   "BLUEPRINT_EXECUTOR_SANDBOX_MODE=${BLUEPRINT_EXECUTOR_SANDBOX_MODE:-bwrap}" \
   "BLUEPRINT_EXECUTOR_MAX_CONCURRENT_RUNS=${BLUEPRINT_EXECUTOR_MAX_CONCURRENT_RUNS:-3}" \
   "BLUEPRINT_EXECUTOR_HOST_ROOT_READONLY=${BLUEPRINT_EXECUTOR_HOST_ROOT_READONLY:-true}" \
-  "BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS=${BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS:-}" \
+  "BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS=${BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS:-${DEFAULT_EXTRA_RO_BINDS}}" \
   "BLUEPRINT_INTERNAL_TOOL_TOKEN=${INTERNAL_TOOL_TOKEN}" \
   "BLUEPRINT_PI_COMMAND_JSON=${BLUEPRINT_PI_COMMAND_JSON:-${DEFAULT_PI_COMMAND_JSON}}" \
   "BLUEPRINT_OPENCODE_COMMAND_JSON=${BLUEPRINT_OPENCODE_COMMAND_JSON:-${DEFAULT_OPENCODE_COMMAND_JSON}}" \
   "BLUEPRINT_CLAUDE_CODE_COMMAND_JSON=${BLUEPRINT_CLAUDE_CODE_COMMAND_JSON:-${DEFAULT_CLAUDE_CODE_COMMAND_JSON}}"
+
+# Codex is manual-only: if the operator added it to .env, forward it into
+# backend.env so the managed deploy path does not silently drop it.
+if [[ -n "${BLUEPRINT_CODEX_COMMAND_JSON:-}" ]]; then
+  printf 'BLUEPRINT_CODEX_COMMAND_JSON=%s\n' "${BLUEPRINT_CODEX_COMMAND_JSON}" >> "${APP_ENV_DIR}/backend.env"
+fi
 
 cat > "${APP_ENV_DIR}/manager-agent.env" <<EOF
 MANAGER_AGENT_HOST=127.0.0.1
