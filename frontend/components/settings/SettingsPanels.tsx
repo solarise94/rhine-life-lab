@@ -296,7 +296,6 @@ export function SettingsPanels({
           <label className="settings-field">
             <span>脚本偏好</span>
             <select value={scriptPreference} onChange={(event) => setScriptPreference(event.target.value as ScriptPreference)}>
-              
               <option value="auto">让 Manager 询问</option>
               <option value="prefer_python">偏好 Python</option>
               <option value="prefer_r">偏好 R</option>
