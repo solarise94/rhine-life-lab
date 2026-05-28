@@ -345,9 +345,9 @@ Do not wake Manager for ordinary `executor_progress`.
 
 ### Executor Reports
 
-Existing `BP_EVENT issue_report` with `needs_manager=true` should enqueue `card_needs_manager` if it is blocking.
+Existing `BP_EVENT issue_report` with `needs_manager=true` should record run attention and run events while the executor is still running. It must not enqueue `card_needs_manager` directly from stdout pumping in the first implementation.
 
-First implementation should wake after the run has failed/stopped, not while the executor process is still running. A later protocol can add true pause/resume if needed.
+First implementation should wake only after post-process handling has persisted a terminal run state, such as `failed`, `success`, `cancelled`, or `reviewed`. A later protocol can add true pause/resume; if that happens, `card_needs_manager` may be emitted only after the run has been explicitly paused/stopped and the executor is no longer mutating outputs.
 
 ### Runtime Dependency Jobs
 

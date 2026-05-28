@@ -509,7 +509,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "status": "accepted",
                 "step": 1,
                 "summary": "Source card",
-                "outputs": [output_contract("table", role="source_table", asset_id="asset_new_source")],
+                "outputs": [output_contract("table", role="source_table", asset_id="asset_new_source", status="valid")],
                 "linked_assets": ["asset_new_source"],
             }
         )
@@ -1039,6 +1039,102 @@ class ManagerFlowTest(unittest.TestCase):
                     "step": 1,
                 },
             )
+
+    def test_update_card_rejects_invalid_edit_on_existing_accepted_card(self) -> None:
+        # An already-accepted card cannot have its outputs corrupted via update_card.
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        graph = store.load_graph()
+        cards.append(
+            Card.model_validate(
+                {
+                    "card_id": "card_accepted_guard",
+                    "card_type": "module",
+                    "title": "Guard test",
+                    "status": "accepted",
+                    "step": 1,
+                    "summary": "s",
+                    "outputs": [output_contract("result", role="result", asset_id="asset_result", status="valid")],
+                    "linked_assets": ["asset_result"],
+                    "linked_runs": ["run_guard"],
+                }
+            )
+        )
+        graph.assets.append(
+            Asset(
+                asset_id="asset_result",
+                asset_type="table",
+                title="Result",
+                status="valid",
+                created_by_run="run_guard",
+                path="results/result.tsv",
+                summary="s",
+                metadata={"role": "result"},
+            )
+        )
+        graph.runs.append(
+            RunRecord(run_id="run_guard", card_id="card_accepted_guard", status="reviewed", title="guard", summary="s", started_at="2026-05-28T00:00:00Z")
+        )
+        store.save_cards(cards)
+        store.save_graph(graph)
+
+        with self.assertRaisesRegex(ManagerPlanningError, "accepted card 图一致性检查失败"):
+            self.manager.blueprint_tools.update_card(
+                "test-project",
+                {
+                    "card_id": "card_accepted_guard",
+                    "outputs": [output_contract("result", role="result", asset_id="asset_missing")],
+                },
+            )
+
+        # Verify the card was NOT modified.
+        snapshot = self.project_service.get_project_snapshot("test-project")
+        card = next(c for c in snapshot["cards"] if c.card_id == "card_accepted_guard")
+        self.assertEqual(card.outputs[0].asset_id, "asset_result")
+
+    def test_update_card_allows_non_output_edit_on_accepted_card_when_graph_consistent(self) -> None:
+        # Non-destructive edits on an accepted card should still be allowed.
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        graph = store.load_graph()
+        cards.append(
+            Card.model_validate(
+                {
+                    "card_id": "card_accepted_edit",
+                    "card_type": "module",
+                    "title": "Edit test",
+                    "status": "accepted",
+                    "step": 1,
+                    "summary": "old summary",
+                    "outputs": [output_contract("result", role="result", asset_id="asset_result_2", status="valid")],
+                    "linked_assets": ["asset_result_2"],
+                    "linked_runs": ["run_edit"],
+                }
+            )
+        )
+        graph.assets.append(
+            Asset(
+                asset_id="asset_result_2",
+                asset_type="table",
+                title="Result",
+                status="valid",
+                created_by_run="run_edit",
+                path="results/result.tsv",
+                summary="s",
+                metadata={"role": "result"},
+            )
+        )
+        graph.runs.append(
+            RunRecord(run_id="run_edit", card_id="card_accepted_edit", status="reviewed", title="edit", summary="s", started_at="2026-05-28T00:00:00Z")
+        )
+        store.save_cards(cards)
+        store.save_graph(graph)
+
+        result = self.manager.blueprint_tools.update_card(
+            "test-project",
+            {"card_id": "card_accepted_edit", "summary": "new summary"},
+        )
+        self.assertEqual(result["card"]["summary"], "new summary")
 
     def test_delete_card_marks_card_cancelled(self) -> None:
         result = self.manager.blueprint_tools.delete_card(

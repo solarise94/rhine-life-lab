@@ -639,15 +639,25 @@ class WorkerService:
         if accept and not valid:
             raise ValueError("; ".join(errors))
         result = self._finalize_run_review(project_id, run_id, accept=accept, source="manager")
+        final_accepted = result["accepted"]
+        if final_accepted:
+            message = "Manager 已接受运行结果。"
+        elif result.get("failure_reason") == "mapping_ambiguous":
+            message = "Manager  review 失败：输出资产映射存在歧义，需要手动确认。"
+        elif result.get("failure_reason") == "consistency_failed":
+            message = "Manager  review 失败：接受前图一致性检查未通过，需要手动确认。"
+        else:
+            message = "Manager 已拒绝运行结果，保留 candidate 产物。"
         self._append_event(
             project_id,
             run_id,
             result["card_id"],
             event_type="manager_review",
-            message="Manager 已接受运行结果。" if accept else "Manager 已拒绝运行结果，保留 candidate 产物。",
+            message=message,
         )
-        self._commit_run_stage(project_id, run_id, "reviewed")
-        return {"run_id": run_id, "accepted": accept}
+        stage_label = "reviewed" if final_accepted or result.get("failure_reason") == "explicit_reject" else "needs_review"
+        self._commit_run_stage(project_id, run_id, stage_label)
+        return {"run_id": run_id, "accepted": final_accepted}
 
     def _cleanup_execution_files_for_runs(self, project_id: str, run_ids: list[str]) -> None:
         if not run_ids:
@@ -668,11 +678,12 @@ class WorkerService:
             graph = store.load_graph()
             run = next(item for item in graph.runs if item.run_id == run_id)
             card = next(item for item in cards if item.card_id == run.card_id)
-            previous_outputs_by_role = self._current_output_assets_by_role(card, graph.assets, current_run_id=run_id)
-            previous_output_asset_ids = {asset.asset_id for asset in previous_outputs_by_role.values()}
+            previous_output_asset_ids = {
+                asset.asset_id
+                for asset in self._current_output_assets(card, graph.assets, current_run_id=run_id)
+            }
 
-            # Always materialize as candidate first — promotion to valid happens
-            # only after the ambiguity pre-check passes.
+            # 1. Materialize run assets: reuse existing valid assets without demotion.
             created_assets = self._materialize_run_assets(
                 graph=graph,
                 run_id=run_id,
@@ -682,74 +693,189 @@ class WorkerService:
                 input_asset_ids=[item.asset_id for item in task_packet.input_assets],
             )
 
-            # Pre-flight: detect ambiguous output mapping before committing accept side effects.
-            unmapped_outputs: list[str] = []
-            if accept:
-                unmapped_outputs = self._detect_unmapped_outputs(
-                    card,
-                    created_assets,
-                    manifest_created_assets=manifest.created_assets,
-                    expected_outputs=task_packet.expected_outputs,
-                )
-                if unmapped_outputs:
-                    accept = False
+            # 2. Resolve output mappings deterministically.
+            planned_bindings, unmapped_outputs = self._resolve_output_bindings(
+                card,
+                created_assets,
+                manifest_created_assets=manifest.created_assets,
+                expected_outputs=task_packet.expected_outputs,
+            )
 
-            if accept:
-                # Promote candidate assets to valid now that we know the mapping is clean.
+            # 3. Determine final acceptance (mapping ambiguity blocks acceptance).
+            final_accept = accept and not unmapped_outputs
+            failure_reason: str | None = None
+            failure_details: list[str] = []
+
+            if final_accept:
+                # Pre-flight: compute all accepted side effects before committing anything.
+                planned_bindings_for_commit = list(planned_bindings)
+
+                # Simulate side effects on copies for validation
+                card_copy = card.model_copy(deep=True)
+                graph_copy = graph.model_copy(deep=True)
+
+                # Promote candidate assets to valid on the copy.
+                created_asset_ids = {a.asset_id for a in created_assets}
+                for asset in graph_copy.assets:
+                    if asset.asset_id in created_asset_ids:
+                        asset.status = "valid"
+
+                # Bind outputs on the copy.
+                asset_by_id_copy = {a.asset_id: a for a in graph_copy.assets}
+                for output_index, real_asset in planned_bindings_for_commit:
+                    out = card_copy.outputs[output_index]
+                    out.asset_id = real_asset.asset_id
+                    # Use the promoted asset status from graph_copy, not the original candidate status.
+                    promoted_asset = asset_by_id_copy.get(real_asset.asset_id)
+                    out.status = promoted_asset.status if promoted_asset else real_asset.status
+
+                # Attach assets.
                 for asset in created_assets:
-                    asset.status = "valid"
-                new_claim_ids = self._materialize_claims(
-                    graph, run_id, review_context.key_findings, [asset.asset_id for asset in created_assets]
-                )
-                card.status = "accepted"
-                card.progress_note = None
-                card.manager_review = "Reviewer 已验收执行器代码、manifest 和输出资产，结果已自动接受。" if source == "reviewer" else "结果已通过 manifest 校验并被 Manager 接受。"
-                card.key_findings = review_context.key_findings or ["结果已生成并完成审核。"]
-                self._attach_assets_to_card(card, created_assets)
-                self._sync_card_outputs(
-                    card,
-                    created_assets,
-                    manifest_created_assets=manifest.created_assets,
-                    expected_outputs=task_packet.expected_outputs,
-                )
-                self._supersede_previous_outputs(
-                    card,
-                    graph.assets,
-                    graph.claims,
-                    run_id,
-                    previous_asset_ids=previous_output_asset_ids,
-                )
-                graph.report_items = [item for item in graph.report_items if item.item_id != f"report_{run_id}"]
-                graph.report_items.append(
+                    if asset.asset_id not in card_copy.linked_assets:
+                        card_copy.linked_assets.append(asset.asset_id)
+
+                # Materialize claims on the copy.
+                claim_asset_ids = [asset.asset_id for asset in created_assets]
+                for index, finding in enumerate(review_context.key_findings or [], start=1):
+                    claim_id = f"claim_{run_id}_{index:02d}"
+                    graph_copy.claims.append(
+                        Claim(
+                            claim_id=claim_id,
+                            text=finding,
+                            status="valid",
+                            depends_on_assets=claim_asset_ids,
+                            created_by_run=run_id,
+                            report_selected=True,
+                        )
+                    )
+
+                # Supersede previous outputs on the copy.
+                for asset in graph_copy.assets:
+                    if (
+                        asset.asset_id in previous_output_asset_ids
+                        and asset.created_by_run
+                        and asset.created_by_run != run_id
+                        and asset.status == "valid"
+                    ):
+                        asset.status = "superseded"
+                stale_assets = {a.asset_id for a in graph_copy.assets if a.status == "superseded"}
+                for claim in graph_copy.claims:
+                    if stale_assets.intersection(claim.depends_on_assets) and claim.status == "valid":
+                        claim.status = "superseded"
+
+                # Report item on the copy.
+                graph_copy.report_items = [item for item in graph_copy.report_items if item.item_id != f"report_{run_id}"]
+                new_claim_ids = [f"claim_{run_id}_{index:02d}" for index in range(1, len(review_context.key_findings or []) + 1)]
+                graph_copy.report_items.append(
                     ReportItem(
                         item_id=f"report_{run_id}",
-                        section=card.title,
-                        title=f"{card.title} 结果摘要",
+                        section=card_copy.title,
+                        title=f"{card_copy.title} 结果摘要",
                         summary=review_context.summary,
                         linked_asset_ids=[asset.asset_id for asset in created_assets if asset.report_selected],
                         linked_claim_ids=new_claim_ids,
                     )
                 )
-            elif unmapped_outputs:
-                card.status = "needs_review"
-                card.progress_note = None
-                card.manager_review = (
-                    f"输出资产映射存在歧义，无法将以下 planned output 绑定到真实产物：{', '.join(unmapped_outputs)}。"
-                    "产出已保留为 candidate，请手动确认或重新运行。"
-                )
-            else:
-                card.status = "rejected"
-                card.progress_note = None
-                card.manager_review = "Reviewer 拒绝了这次运行结果，产出已保留为 candidate。" if source == "reviewer" else "Manager 拒绝了这次运行结果，产出已保留为 candidate。"
+
+                card_copy.status = "accepted"
+                card_copy.progress_note = None
+                card_copy.manager_review = "Reviewer 已验收执行器代码、manifest 和输出资产，结果已自动接受。" if source == "reviewer" else "结果已通过 manifest 校验并被 Manager 接受。"
+                card_copy.key_findings = review_context.key_findings or ["结果已生成并完成审核。"]
+
+                # Pre-flight validation: if the simulated state is inconsistent, do NOT commit.
+                preflight_errors = self._validate_acceptance_graph_consistent(card_copy, graph_copy, run_id)
+                if preflight_errors:
+                    final_accept = False
+                    failure_reason = "consistency_failed"
+                    failure_details = preflight_errors
+                    card.status = "needs_review"
+                    card.progress_note = None
+                    card.manager_review = (
+                        f"接受时图一致性检查失败：{preflight_errors[0]}。"
+                        "产出已保留为 candidate，请手动确认或重新运行。"
+                    )
+                    run.status = "success"
+                    run.finished_at = utc_now()
+                    run.needs_manager_attention = True
+                else:
+                    # All checks passed: commit the accepted side effects atomically.
+                    for asset in created_assets:
+                        asset.status = "valid"
+                    for output_index, real_asset in planned_bindings_for_commit:
+                        out = card.outputs[output_index]
+                        out.asset_id = real_asset.asset_id
+                        out.status = real_asset.status
+                    new_claim_ids = self._materialize_claims(
+                        graph, run_id, review_context.key_findings, [asset.asset_id for asset in created_assets]
+                    )
+                    card.status = "accepted"
+                    card.progress_note = None
+                    card.manager_review = "Reviewer 已验收执行器代码、manifest 和输出资产，结果已自动接受。" if source == "reviewer" else "结果已通过 manifest 校验并被 Manager 接受。"
+                    card.key_findings = review_context.key_findings or ["结果已生成并完成审核。"]
+                    self._attach_assets_to_card(card, created_assets)
+                    self._supersede_previous_outputs(
+                        card,
+                        graph.assets,
+                        graph.claims,
+                        run_id,
+                        previous_asset_ids=previous_output_asset_ids,
+                    )
+                    graph.report_items = [item for item in graph.report_items if item.item_id != f"report_{run_id}"]
+                    graph.report_items.append(
+                        ReportItem(
+                            item_id=f"report_{run_id}",
+                            section=card.title,
+                            title=f"{card.title} 结果摘要",
+                            summary=review_context.summary,
+                            linked_asset_ids=[asset.asset_id for asset in created_assets if asset.report_selected],
+                            linked_claim_ids=new_claim_ids,
+                        )
+                    )
+                    run.status = "reviewed"
+                    run.finished_at = utc_now()
+                    run.needs_manager_attention = False
+
+            if not final_accept:
+                if failure_reason == "consistency_failed":
+                    # Already handled in the pre-flight block above.
+                    pass
+                elif accept and unmapped_outputs:
+                    failure_reason = "mapping_ambiguous"
+                    failure_details = unmapped_outputs
+                    card.status = "needs_review"
+                    card.progress_note = None
+                    card.manager_review = (
+                        f"输出资产映射存在歧义，无法将以下 planned output 绑定到真实产物：{', '.join(unmapped_outputs)}。"
+                        "产出已保留为 candidate，请手动确认或重新运行。"
+                    )
+                    run.status = "success"
+                    run.finished_at = utc_now()
+                    run.needs_manager_attention = True
+                else:
+                    # Explicit reject: demote produced assets to candidate.
+                    failure_reason = "explicit_reject"
+                    for asset in created_assets:
+                        asset.status = "candidate"
+                    card.status = "rejected"
+                    card.progress_note = None
+                    card.manager_review = "Reviewer 拒绝了这次运行结果，产出已保留为 candidate。" if source == "reviewer" else "Manager 拒绝了这次运行结果，产出已保留为 candidate。"
+                    run.status = "reviewed"
+                    run.finished_at = utc_now()
+                    run.needs_manager_attention = False
+
             ModuleGroupStateService.sync_linked_module_status_from_card(card, graph.modules)
             ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
-            run.status = "reviewed"
             brief = self._load_manager_brief(project_id, run_id)
             run.summary = brief.get("final_report", {}).get("summary") or review_context.summary
-            run.finished_at = utc_now()
             store.save_graph(graph)
             store.save_cards(cards)
-            return {"run_id": run_id, "card_id": card.card_id, "accepted": accept}
+            return {
+                "run_id": run_id,
+                "card_id": card.card_id,
+                "accepted": final_accept,
+                "failure_reason": failure_reason,
+                "failure_details": failure_details,
+            }
 
     def _execute_run(
         self,
@@ -1012,7 +1138,7 @@ class WorkerService:
             )
             manager_brief = self._load_manager_brief(project_id, run_id)
             summary = manager_brief.get("final_report", {}).get("summary") or manifest.summary
-            self._finalize_run_review(project_id, run_id, accept=True, source="reviewer")
+            review_result = self._finalize_run_review(project_id, run_id, accept=True, source="reviewer")
             if validation_warning_message:
                 self._set_run_attention(project_id, run_id, card_id, validation_warning_message)
                 self._append_event(
@@ -1023,27 +1149,44 @@ class WorkerService:
                     message=validation_warning_message,
                     payload=validation_report.model_dump(),
                 )
-            self._append_event(
-                project_id,
-                run_id,
-                card_id,
-                event_type="reviewer_acceptance",
-                message=f"Reviewer 已验收并接受运行结果。{summary}",
-                payload=validation_report.model_dump(),
-            )
-            self._commit_run_stage(project_id, run_id, "reviewed")
-            self._enqueue_wake_event(
-                project_id,
-                kind="card_run_reviewed",
-                source_type="run",
-                source_id=run_id,
-                card_id=card_id,
-                run_id=run_id,
-                severity="info",
-                message=f"Reviewer 已接受 {card_id} 的运行结果。",
-                payload_summary={"summary": summary},
-                idempotency_key=f"run:{run_id}:reviewed",
-            )
+            if review_result["accepted"]:
+                self._append_event(
+                    project_id,
+                    run_id,
+                    card_id,
+                    event_type="reviewer_acceptance",
+                    message=f"Reviewer 已验收并接受运行结果。{summary}",
+                    payload=validation_report.model_dump(),
+                )
+                self._commit_run_stage(project_id, run_id, "reviewed")
+                self._enqueue_wake_event(
+                    project_id,
+                    kind="card_run_reviewed",
+                    source_type="run",
+                    source_id=run_id,
+                    card_id=card_id,
+                    run_id=run_id,
+                    severity="info",
+                    message=f"Reviewer 已接受 {card_id} 的运行结果。",
+                    payload_summary={"summary": summary},
+                    idempotency_key=f"run:{run_id}:reviewed",
+                )
+            else:
+                # Mapping ambiguity or consistency failure: run is "success" + card "needs_review"
+                reason = review_result.get("failure_reason")
+                if reason == "consistency_failed":
+                    msg = f"Reviewer 验收时图一致性检查失败：{', '.join(review_result.get('failure_details', []))}"
+                else:
+                    msg = f"Reviewer 验收发现输出映射歧义：{', '.join(review_result.get('failure_details', []))}"
+                self._append_event(
+                    project_id,
+                    run_id,
+                    card_id,
+                    event_type="reviewer_review_incomplete",
+                    message=msg,
+                    payload=validation_report.model_dump(),
+                )
+                self._commit_run_stage(project_id, run_id, "needs_review")
         except Exception as exc:
             message = f"执行器运行后处理失败：{exc}"
             logger.exception("Post-run handling failed for project=%s run=%s", project_id, run_id)
@@ -1362,18 +1505,9 @@ class WorkerService:
                     message=message,
                     payload=event.model_dump(),
                 )
-                self._enqueue_wake_event(
-                    project_id,
-                    kind="card_needs_manager",
-                    source_type="run",
-                    source_id=run_id,
-                    card_id=card_id,
-                    run_id=run_id,
-                    severity="warning",
-                    message=message,
-                    payload_summary=event.model_dump(),
-                    idempotency_key=f"run:{run_id}:needs_manager:{sha256(message.encode('utf-8')).hexdigest()[:12]}",
-                )
+                # Do NOT enqueue auto wake while the subprocess is still running.
+                # Terminal post-process states will enqueue the appropriate wake event.
+                # This prevents Manager from mutating graph state while outputs are still being produced.
         else:
             message = event.summary or event.message or "Executor final report received."
             self._append_event(
@@ -1425,11 +1559,7 @@ class WorkerService:
             )
             for item in card.inputs
         ]
-        output_refs = [
-            item
-            for item in card.outputs
-            if not (item.asset_id and asset_map.get(item.asset_id) and asset_map[item.asset_id].created_by_run)
-        ]
+        output_refs = list(card.outputs)
         if not output_refs:
             raise HTTPException(
                 status_code=409,
@@ -1783,6 +1913,194 @@ class WorkerService:
             return self.project_service.graph_store(project_id).get_run_status(run_id)
 
     @staticmethod
+    def _validate_acceptance_graph_consistent(
+        card: Card,
+        graph: GraphState,
+        run_id: str,
+    ) -> list[str]:
+        """Return a list of error messages if an accepted card violates the acceptance contract.
+
+        Contract:
+        - every accepted card.outputs[].asset_id exists in graph.assets
+        - each accepted output asset has status == "valid"
+        - card.outputs[].status agrees with the real asset status
+        """
+        errors: list[str] = []
+        asset_by_id = {a.asset_id: a for a in graph.assets}
+        for output in card.outputs:
+            if output.asset_id is None:
+                errors.append(
+                    f"Accepted card {card.card_id} output {output.role or output.label} has no asset_id."
+                )
+                continue
+            asset = asset_by_id.get(output.asset_id)
+            if asset is None:
+                errors.append(
+                    f"Accepted card {card.card_id} output {output.role or output.label} points to missing asset {output.asset_id}."
+                )
+                continue
+            if asset.status != "valid":
+                errors.append(
+                    f"Accepted card {card.card_id} output {output.role or output.label} points to {asset.status} asset {asset.asset_id}."
+                )
+                continue
+            if output.status != asset.status:
+                errors.append(
+                    f"Accepted card {card.card_id} output {output.role or output.label} status {output.status} disagrees with asset status {asset.status}."
+                )
+        return errors
+
+    @staticmethod
+    def _assert_acceptance_graph_consistent(
+        card: Card,
+        graph: GraphState,
+        run_id: str,
+    ) -> None:
+        errors = WorkerService._validate_acceptance_graph_consistent(card, graph, run_id)
+        if errors:
+            raise AssertionError(errors[0])
+
+    @staticmethod
+    def _resolve_output_mappings(
+        card: Card,
+        assets: list[Asset],
+        *,
+        manifest_created_assets: list[object] | None = None,
+        expected_outputs: list[object] | None = None,
+    ) -> dict[str, Asset]:
+        """Resolve planned/placeholder output IDs to real produced assets.
+
+        Returns a dict mapping planned_id -> real Asset.
+        Mapping priority:
+        1. Exact manifest asset_id if present and resolvable.
+        2. Manifest asset_id as planned_asset_id.
+        3. Unique produced asset by metadata.role, scoped to the current run.
+        4. Unique produced asset by normalized output path.
+
+        System outputs (run_summary, run_preview) do not override card-declared outputs.
+        """
+
+        def _get(obj: object, name: str, default: Any = None) -> Any:
+            if isinstance(obj, dict):
+                return obj.get(name, default)
+            return getattr(obj, name, default)
+
+        assets_by_id = {a.asset_id: a for a in assets}
+        assets_by_planned_id: dict[str, Asset] = {}
+        for a in assets:
+            planned = a.metadata.get("planned_asset_id")
+            if planned:
+                assets_by_planned_id[planned] = a
+
+        assets_by_role: dict[str, Asset] = {}
+        duplicate_roles: set[str] = set()
+        for a in assets:
+            role = str(a.metadata.get("role") or "")
+            if role:
+                if role in assets_by_role:
+                    duplicate_roles.add(role)
+                else:
+                    assets_by_role[role] = a
+
+        # Normalize paths for fallback matching
+        assets_by_norm_path: dict[str, Asset] = {}
+        duplicate_paths: set[str] = set()
+        for a in assets:
+            norm = str(a.path or "").replace("\\", "/").strip()
+            if norm:
+                if norm in assets_by_norm_path:
+                    duplicate_paths.add(norm)
+                else:
+                    assets_by_norm_path[norm] = a
+
+        expected_by_role: dict[str, str] = {}
+        for item in (expected_outputs or []):
+            role = _get(item, "role", "")
+            asset_id = _get(item, "asset_id", None)
+            if role:
+                expected_by_role[role] = asset_id or role
+
+        # Card-declared roles that are NOT system outputs
+        card_declared_roles = {str(o.role or "") for o in card.outputs if o.role}
+        system_roles = {"run_summary", "run_preview"}
+
+        real_by_planned: dict[str, Asset] = {}
+        matched_asset_ids: set[str] = set()
+
+        if manifest_created_assets is not None:
+            for manifest_asset in manifest_created_assets:
+                m_asset_id = _get(manifest_asset, "asset_id", None)
+                role = _get(manifest_asset, "role", "")
+                actual_asset: Asset | None = None
+
+                # Priority 1: exact manifest asset_id
+                if m_asset_id and m_asset_id in assets_by_id:
+                    actual_asset = assets_by_id[m_asset_id]
+                # Priority 2: manifest asset_id as planned_asset_id
+                elif m_asset_id and m_asset_id in assets_by_planned_id:
+                    actual_asset = assets_by_planned_id[m_asset_id]
+                # Priority 3: unique role match (skip system roles that conflict with card-declared outputs)
+                elif role and role not in duplicate_roles and role in assets_by_role:
+                    if role not in system_roles or role not in card_declared_roles:
+                        actual_asset = assets_by_role[role]
+                    elif role in card_declared_roles and len([a for a in assets if str(a.metadata.get("role") or "") == role]) == 1:
+                        # If there's exactly one asset for this role, it's safe
+                        actual_asset = assets_by_role[role]
+                # Priority 4: unique normalized path match
+                m_path = _get(manifest_asset, "path", "")
+                norm_path = str(m_path or "").replace("\\", "/").strip()
+                if actual_asset is None and norm_path and norm_path not in duplicate_paths and norm_path in assets_by_norm_path:
+                    actual_asset = assets_by_norm_path[norm_path]
+
+                if actual_asset:
+                    planned_id = m_asset_id or expected_by_role.get(role, role)
+                    if planned_id:
+                        real_by_planned[planned_id] = actual_asset
+                        matched_asset_ids.add(actual_asset.asset_id)
+                else:
+                    logger.error("Unmatched manifest output: role=%s asset_id=%s", role, m_asset_id)
+
+        for a in assets:
+            if a.asset_id not in matched_asset_ids:
+                logger.warning("Produced asset not referenced in manifest: asset_id=%s role=%s", a.asset_id, a.metadata.get("role"))
+
+        return real_by_planned
+
+    @staticmethod
+    def _format_unmapped_output(output_index: int, output: CardOutputSpec) -> str:
+        return f"output[{output_index}] role={output.role} asset_id={output.asset_id}"
+
+    @staticmethod
+    def _resolve_output_bindings(
+        card: Card,
+        assets: list[Asset],
+        *,
+        manifest_created_assets: list[object] | None = None,
+        expected_outputs: list[object] | None = None,
+    ) -> tuple[list[tuple[int, Asset]], list[str]]:
+        """Resolve card output slots to produced assets using the canonical review rules."""
+        real_by_planned = WorkerService._resolve_output_mappings(
+            card,
+            assets,
+            manifest_created_assets=manifest_created_assets,
+            expected_outputs=expected_outputs,
+        )
+        produced_asset_ids = {asset.asset_id for asset in assets}
+        asset_by_id = {asset.asset_id: asset for asset in assets}
+        bindings: list[tuple[int, Asset]] = []
+        unmapped: list[str] = []
+        for output_index, output in enumerate(card.outputs):
+            if output.asset_id is not None and output.asset_id in real_by_planned:
+                bindings.append((output_index, real_by_planned[output.asset_id]))
+            elif output.asset_id is not None and output.asset_id in produced_asset_ids:
+                bindings.append((output_index, asset_by_id[output.asset_id]))
+            elif output.asset_id is None and output.role in real_by_planned:
+                bindings.append((output_index, real_by_planned[output.role]))
+            else:
+                unmapped.append(WorkerService._format_unmapped_output(output_index, output))
+        return bindings, unmapped
+
+    @staticmethod
     def _materialize_run_assets(
         *,
         graph: object,
@@ -1799,7 +2117,11 @@ class WorkerService:
             existing = next((asset for asset in root_graph.assets if asset.asset_id == asset_id), None)
             artifact_class = item.get("artifact_class") or item.get("type") or "binary"
             if existing:
-                existing.status = status
+                # Never demote an existing valid asset back to candidate.
+                if existing.status == "valid" and status == "candidate":
+                    pass
+                else:
+                    existing.status = status
                 existing.asset_type = artifact_class
                 existing.path = item["path"]
                 existing.summary = item.get("description") or existing.summary
@@ -1873,57 +2195,14 @@ class WorkerService:
         manifest_created_assets: list[object] | None = None,
         expected_outputs: list[object] | None = None,
     ) -> list[str]:
-        """Pre-flight check: returns planned output IDs that cannot be resolved to real assets.
-
-        Uses the same matching logic as _sync_card_outputs but does NOT mutate the card.
-        """
-        def _get(obj: object, name: str, default: Any = None) -> Any:
-            if isinstance(obj, dict):
-                return obj.get(name, default)
-            return getattr(obj, name, default)
-
-        assets_by_id = {a.asset_id: a for a in assets}
-        assets_by_planned_id: dict[str, Asset] = {}
-        for a in assets:
-            planned = a.metadata.get("planned_asset_id")
-            if planned:
-                assets_by_planned_id[planned] = a
-        duplicate_roles: set[str] = set()
-        seen_roles: set[str] = set()
-        for a in assets:
-            role = str(a.metadata.get("role") or "")
-            if role:
-                if role in seen_roles:
-                    duplicate_roles.add(role)
-                seen_roles.add(role)
-
-        resolved_planned_ids: set[str] = set()
-        if manifest_created_assets is not None:
-            expected_by_role: dict[str, str] = {}
-            for item in (expected_outputs or []):
-                role = _get(item, "role", "")
-                asset_id = _get(item, "asset_id", None)
-                if role:
-                    expected_by_role[role] = asset_id or role
-            for manifest_asset in manifest_created_assets:
-                m_asset_id = _get(manifest_asset, "asset_id", None)
-                role = _get(manifest_asset, "role", "")
-                matched = False
-                if m_asset_id and m_asset_id in assets_by_id:
-                    matched = True
-                elif m_asset_id and m_asset_id in assets_by_planned_id:
-                    matched = True
-                elif role and role not in duplicate_roles and role in {str(a.metadata.get("role") or "") for a in assets}:
-                    matched = True
-                if matched:
-                    planned_id = m_asset_id or expected_by_role.get(role, role)
-                    resolved_planned_ids.add(planned_id)
-
-        return [
-            output.asset_id
-            for output in card.outputs
-            if output.asset_id is not None and output.asset_id not in resolved_planned_ids
-        ]
+        """Pre-flight check: returns planned output IDs that cannot be resolved to real assets."""
+        _bindings, unmapped = WorkerService._resolve_output_bindings(
+            card,
+            assets,
+            manifest_created_assets=manifest_created_assets,
+            expected_outputs=expected_outputs,
+        )
+        return unmapped
 
     @staticmethod
     def _sync_card_outputs(
@@ -1933,76 +2212,25 @@ class WorkerService:
         manifest_created_assets: list[object] | None = None,
         expected_outputs: list[object] | None = None,
     ) -> list[str]:
-        def _get(obj: object, name: str, default: Any = None) -> Any:
-            if isinstance(obj, dict):
-                return obj.get(name, default)
-            return getattr(obj, name, default)
-
-        expected_by_role: dict[str, str] = {}
-        for item in (expected_outputs or []):
-            role = _get(item, "role", "")
-            asset_id = _get(item, "asset_id", None)
-            if role:
-                expected_by_role[role] = asset_id or role
-
-        assets_by_id = {a.asset_id: a for a in assets}
-        assets_by_planned_id: dict[str, Asset] = {}
-        for a in assets:
-            planned = a.metadata.get("planned_asset_id")
-            if planned:
-                assets_by_planned_id[planned] = a
-        assets_by_role: dict[str, Asset] = {}
-        duplicate_roles: set[str] = set()
-        for a in assets:
-            role = str(a.metadata.get("role") or "")
-            if role:
-                if role in assets_by_role:
-                    duplicate_roles.add(role)
-                else:
-                    assets_by_role[role] = a
-        for dup_role in sorted(duplicate_roles):
-            logger.warning("Duplicate output role in produced assets: role=%s", dup_role)
-
-        real_by_planned: dict[str, Asset] = {}
-        matched_asset_ids: set[str] = set()
-        if manifest_created_assets is not None:
-            for manifest_asset in manifest_created_assets:
-                m_asset_id = _get(manifest_asset, "asset_id", None)
-                role = _get(manifest_asset, "role", "")
-                actual_asset = None
-                if m_asset_id and m_asset_id in assets_by_id:
-                    actual_asset = assets_by_id[m_asset_id]
-                elif m_asset_id and m_asset_id in assets_by_planned_id:
-                    actual_asset = assets_by_planned_id[m_asset_id]
-                elif role and role not in duplicate_roles and role in assets_by_role:
-                    actual_asset = assets_by_role[role]
-                if actual_asset:
-                    planned_id = m_asset_id or expected_by_role.get(role, role)
-                    real_by_planned[planned_id] = actual_asset
-                    matched_asset_ids.add(actual_asset.asset_id)
-                else:
-                    logger.error("Unmatched manifest output: role=%s asset_id=%s", role, m_asset_id)
-
-        for a in assets:
-            if a.asset_id not in matched_asset_ids:
-                logger.warning("Produced asset not referenced in manifest: asset_id=%s role=%s", a.asset_id, a.metadata.get("role"))
-
-        unmapped: list[str] = []
-        for output in card.outputs:
-            if output.asset_id in real_by_planned:
-                real_asset = real_by_planned[output.asset_id]
-                output.asset_id = real_asset.asset_id
-                output.status = real_asset.status
-            elif output.asset_id is not None:
-                unmapped.append(output.asset_id)
+        """Bind card output placeholders to real produced assets."""
+        bindings, unmapped = WorkerService._resolve_output_bindings(
+            card,
+            assets,
+            manifest_created_assets=manifest_created_assets,
+            expected_outputs=expected_outputs,
+        )
+        for output_index, real_asset in bindings:
+            output = card.outputs[output_index]
+            output.asset_id = real_asset.asset_id
+            output.status = real_asset.status
         return unmapped
 
     @staticmethod
-    def _current_output_assets_by_role(card: Card, assets: list[Asset], *, current_run_id: str) -> dict[str, Asset]:
+    def _current_output_assets(card: Card, assets: list[Asset], *, current_run_id: str) -> list[Asset]:
         linked_asset_ids = set(card.linked_assets)
         input_asset_ids = {item.asset_id for item in card.inputs if item.asset_id}
         declared_roles = {item.role for item in card.outputs}
-        outputs_by_role: dict[str, Asset] = {}
+        outputs: list[Asset] = []
         for asset in assets:
             if asset.asset_id not in linked_asset_ids:
                 continue
@@ -2012,8 +2240,8 @@ class WorkerService:
                 continue
             role = str(asset.metadata.get("role") or asset.asset_id or "")
             if role and role in declared_roles and asset.status == "valid":
-                outputs_by_role[role] = asset
-        return outputs_by_role
+                outputs.append(asset)
+        return outputs
 
     @staticmethod
     def _supersede_previous_outputs(

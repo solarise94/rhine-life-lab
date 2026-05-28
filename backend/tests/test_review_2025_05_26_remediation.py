@@ -234,7 +234,8 @@ class RemediationTestCase(unittest.TestCase):
         self.assertEqual(card.outputs[0].asset_id, "real_1")
         self.assertEqual(unmapped, [])
 
-    def test_sync_card_outputs_duplicate_role_refuses_ambiguous_without_planned_id(self) -> None:
+    def test_sync_card_outputs_duplicate_role_resolves_by_unique_path(self) -> None:
+        # With duplicate roles but unique paths, the mapping resolves by path (Priority 4).
         card = Card(
             card_id="card_1",
             card_type="module",
@@ -257,13 +258,72 @@ class RemediationTestCase(unittest.TestCase):
         manifest_assets = [
             {"role": "dup", "asset_id": "planned_dup", "path": "1.tsv"},
         ]
-        # Without planned_asset_id in metadata and duplicate roles, the mapping is
-        # ambiguous — must NOT silently bind to the first asset.
         unmapped = WorkerService._sync_card_outputs(card, assets, manifest_created_assets=manifest_assets)
-        # The output keeps its original planned asset_id (unmapped).
+        # Path fallback resolves to real_1 because manifest path is "1.tsv".
+        self.assertEqual(card.outputs[0].asset_id, "real_1")
+        self.assertEqual(unmapped, [])
+
+    def test_sync_card_outputs_duplicate_role_and_path_stays_ambiguous(self) -> None:
+        # When both role and path are duplicated (or path is missing), mapping stays ambiguous.
+        card = Card(
+            card_id="card_1",
+            card_type="module",
+            title="Test",
+            status="accepted",
+            step=1,
+            summary="",
+            why="",
+            inputs=[],
+            outputs=[
+                CardOutputSpec(role="dup", label="Dup", artifact_class="table", accepted_formats=["tsv"], asset_id="planned_dup"),
+            ],
+        )
+        assets = [
+            Asset(asset_id="real_1", asset_type="table", title="D1", status="valid", path="same.tsv", summary="d1",
+                  metadata={"role": "dup"}),
+            Asset(asset_id="real_2", asset_type="table", title="D2", status="valid", path="same.tsv", summary="d2",
+                  metadata={"role": "dup"}),
+        ]
+        manifest_assets = [
+            {"role": "dup", "asset_id": "planned_dup"},
+        ]
+        unmapped = WorkerService._sync_card_outputs(card, assets, manifest_created_assets=manifest_assets)
+        # No unique path and no planned_asset_id -> stays ambiguous.
         self.assertEqual(card.outputs[0].asset_id, "planned_dup")
-        # And the caller is told which outputs could not be resolved.
-        self.assertEqual(unmapped, ["planned_dup"])
+        self.assertEqual(unmapped, ["output[0] role=dup asset_id=planned_dup"])
+
+    def test_sync_card_outputs_uses_same_role_fallback_as_review_path(self) -> None:
+        card = Card(
+            card_id="card_1",
+            card_type="module",
+            title="Test",
+            status="accepted",
+            step=1,
+            summary="",
+            why="",
+            inputs=[],
+            outputs=[
+                CardOutputSpec(role="summary_table", label="Summary", artifact_class="table", accepted_formats=["tsv"]),
+            ],
+        )
+        assets = [
+            Asset(
+                asset_id="real_summary",
+                asset_type="table",
+                title="Summary",
+                status="valid",
+                path="summary.tsv",
+                summary="summary",
+                metadata={"role": "summary_table"},
+            )
+        ]
+        manifest_assets = [
+            {"role": "summary_table", "path": "summary.tsv"},
+        ]
+        unmapped = WorkerService._sync_card_outputs(card, assets, manifest_created_assets=manifest_assets)
+        self.assertEqual(card.outputs[0].asset_id, "real_summary")
+        self.assertEqual(card.outputs[0].status, "valid")
+        self.assertEqual(unmapped, [])
 
     def test_event_source_explicit_executor_types(self) -> None:
         store = self.project_service.graph_store("test-project")
@@ -453,6 +513,540 @@ class RemediationTestCase(unittest.TestCase):
 
         report_items = [r for r in graph.report_items if r.item_id == f"report_{run_id}"]
         self.assertEqual(len(report_items), 0, "No report items should be written for ambiguous runs")
+
+    def test_finalize_run_review_consistency_failure_has_no_accept_side_effects(self) -> None:
+        # When preflight validation fails after mapping succeeds, NO accepted side effects
+        # should leak into the persisted graph (claims, report items, linked_assets,
+        # superseded assets, or rebound outputs).
+        from app.models.runs import RunContext
+        from app.services.utils import utc_now
+
+        root = self.project_service.project_path("test-project")
+        run_id = "run_consistency_fail"
+        run_dir = root / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (root / "results").mkdir(parents=True, exist_ok=True)
+
+        store = self.project_service.graph_store("test-project")
+        card = Card(
+            card_id="card_consistent",
+            card_type="module",
+            title="Consistency Test",
+            status="running",
+            step=1,
+            summary="",
+            why="",
+            inputs=[],
+            outputs=[CardOutputSpec(role="out", label="Out", artifact_class="table", accepted_formats=["tsv"])],
+        )
+        store.save_cards([card])
+        graph = store.load_graph()
+        graph.runs.append(
+            RunRecord(
+                run_id=run_id,
+                card_id="card_consistent",
+                status="running",
+                title="Consistency test run",
+                summary="test",
+                started_at=utc_now(),
+            )
+        )
+        store.save_graph(graph)
+
+        task_packet = TaskPacket(
+            task_id=run_id,
+            project_id="test-project",
+            card_id="card_consistent",
+            card_title="Consistency Test",
+            card_status="running",
+            goal="test",
+            input_assets=[],
+            card_inputs=[],
+            card_outputs=[],
+            expected_outputs=[],
+            allowed_paths=[],
+            readonly_paths=[],
+            forbidden_paths=[],
+            execution_policy={},
+            constraints=[],
+            worker_instructions="",
+            run_context=RunContext(run_id=run_id, worker_type="pi", project_root=str(root), run_dir=f"runs/{run_id}", result_dir="results"),
+            executor_context={},
+            manager_reporting_contract={},
+        )
+        manifest = Manifest(
+            run_id=run_id,
+            status="success",
+            summary="test",
+            created_assets=[CreatedAsset(path="results/out.tsv", role="out", artifact_class="table", format="tsv")],
+            code_artifacts=[],
+            key_findings=["finding 1"],
+            validation_evidence={},
+        )
+        atomic_write_json(run_dir / "task_packet.json", task_packet.model_dump())
+        atomic_write_json(run_dir / "manifest.json", manifest.model_dump())
+
+        original_linked_assets = list(card.linked_assets)
+
+        with patch.object(WorkerService, "_validate_acceptance_graph_consistent", return_value=["forced consistency error"]):
+            result = self.worker._finalize_run_review("test-project", run_id, accept=True, source="reviewer")
+
+        self.assertEqual(result["accepted"], False)
+
+        cards = store.load_cards()
+        updated_card = next(c for c in cards if c.card_id == "card_consistent")
+        self.assertEqual(updated_card.status, "needs_review")
+
+        graph = store.load_graph()
+        created_assets = [a for a in graph.assets if a.created_by_run == run_id]
+        self.assertTrue(len(created_assets) > 0)
+        for asset in created_assets:
+            self.assertEqual(asset.status, "candidate")
+
+        created_claims = [c for c in graph.claims if c.created_by_run == run_id]
+        self.assertEqual(len(created_claims), 0)
+
+        report_items = [r for r in graph.report_items if r.item_id == f"report_{run_id}"]
+        self.assertEqual(len(report_items), 0)
+
+        self.assertEqual(updated_card.linked_assets, original_linked_assets)
+        # Output should NOT have been rebound to the real asset id.
+        self.assertIsNone(updated_card.outputs[0].asset_id)
+
+    def test_validate_acceptance_graph_consistent_rejects_unbound_output(self) -> None:
+        card = Card(
+            card_id="c1",
+            card_type="module",
+            title="T",
+            status="accepted",
+            summary="s",
+            outputs=[CardOutputSpec(role="out", label="Out", artifact_class="table")],
+        )
+        graph = GraphState()
+        errors = WorkerService._validate_acceptance_graph_consistent(card, graph, "run_1")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("has no asset_id", errors[0])
+        with self.assertRaises(AssertionError):
+            WorkerService._assert_acceptance_graph_consistent(card, graph, "run_1")
+
+    def test_validate_acceptance_graph_consistent_rejects_candidate_output_asset(self) -> None:
+        card = Card(
+            card_id="c1",
+            card_type="module",
+            title="T",
+            status="accepted",
+            summary="s",
+            outputs=[CardOutputSpec(role="out", label="Out", artifact_class="table", asset_id="a1", status="candidate")],
+        )
+        graph = GraphState(assets=[Asset(asset_id="a1", asset_type="table", title="A", status="candidate", path="p", summary="s")])
+        errors = WorkerService._validate_acceptance_graph_consistent(card, graph, "run_1")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("points to candidate asset", errors[0])
+        with self.assertRaises(AssertionError):
+            WorkerService._assert_acceptance_graph_consistent(card, graph, "run_1")
+
+    def test_validate_acceptance_graph_consistent_passes_for_valid_bound_outputs(self) -> None:
+        card = Card(
+            card_id="c1",
+            card_type="module",
+            title="T",
+            status="accepted",
+            summary="s",
+            outputs=[CardOutputSpec(role="out", label="Out", artifact_class="table", asset_id="a1", status="valid")],
+        )
+        graph = GraphState(assets=[Asset(asset_id="a1", asset_type="table", title="A", status="valid", path="p", summary="s")])
+        errors = WorkerService._validate_acceptance_graph_consistent(card, graph, "run_1")
+        self.assertEqual(errors, [])
+        # Should not raise
+        WorkerService._assert_acceptance_graph_consistent(card, graph, "run_1")
+
+    def test_materialize_run_assets_does_not_demote_valid_to_candidate(self) -> None:
+        # When re-reviewing an already-accepted run, valid assets must stay valid.
+        graph = GraphState(
+            assets=[Asset(asset_id="asset_run_1_out_1", asset_type="table", title="T", status="valid", path="p", summary="s", metadata={"role": "out"})]
+        )
+        card = Card(card_id="c1", card_type="module", title="T", status="accepted", summary="s")
+        assets = WorkerService._materialize_run_assets(
+            graph=graph,
+            run_id="run_1",
+            card=card,
+            created_assets=[{"role": "out", "path": "p", "artifact_class": "table"}],
+            status="candidate",
+            input_asset_ids=[],
+        )
+        self.assertEqual(assets[0].status, "valid")
+
+    def test_materialize_run_assets_sets_candidate_for_new_assets(self) -> None:
+        graph = GraphState()
+        card = Card(card_id="c1", card_type="module", title="T", status="accepted", summary="s")
+        assets = WorkerService._materialize_run_assets(
+            graph=graph,
+            run_id="run_1",
+            card=card,
+            created_assets=[{"role": "out", "path": "p", "artifact_class": "table"}],
+            status="candidate",
+            input_asset_ids=[],
+        )
+        self.assertEqual(assets[0].status, "candidate")
+        self.assertEqual(len(graph.assets), 1)
+
+    def test_finalize_run_review_duplicate_role_bindings_written_by_index(self) -> None:
+        # When a card has two outputs with the same role but different planned_asset_ids,
+        # the index-based binding must write each real asset to the correct output slot.
+        # The old role-based lookup would write both to the first matching slot.
+        from app.models.runs import RunContext
+        from app.services.utils import utc_now
+
+        root = self.project_service.project_path("test-project")
+        run_id = "run_dup_index"
+        run_dir = root / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (root / "results").mkdir(parents=True, exist_ok=True)
+
+        store = self.project_service.graph_store("test-project")
+        card = Card(
+            card_id="card_dup",
+            card_type="module",
+            title="Dup Index Test",
+            status="running",
+            step=1,
+            summary="",
+            why="",
+            inputs=[],
+            outputs=[
+                CardOutputSpec(role="dup", label="D1", artifact_class="table", accepted_formats=["tsv"], asset_id="planned_a"),
+                CardOutputSpec(role="dup", label="D2", artifact_class="table", accepted_formats=["tsv"], asset_id="planned_b"),
+            ],
+        )
+        store.save_cards([card])
+        graph = store.load_graph()
+        graph.runs.append(
+            RunRecord(
+                run_id=run_id,
+                card_id="card_dup",
+                status="running",
+                title="Dup run",
+                summary="test",
+                started_at=utc_now(),
+            )
+        )
+        store.save_graph(graph)
+
+        task_packet = TaskPacket(
+            task_id=run_id,
+            project_id="test-project",
+            card_id="card_dup",
+            card_title="Dup Index Test",
+            card_status="running",
+            goal="test",
+            input_assets=[],
+            card_inputs=[],
+            card_outputs=[],
+            expected_outputs=[],
+            allowed_paths=[],
+            readonly_paths=[],
+            forbidden_paths=[],
+            execution_policy={},
+            constraints=[],
+            worker_instructions="",
+            run_context=RunContext(run_id=run_id, worker_type="pi", project_root=str(root), run_dir=f"runs/{run_id}", result_dir="results"),
+            executor_context={},
+            manager_reporting_contract={},
+        )
+        manifest = Manifest(
+            run_id=run_id,
+            status="success",
+            summary="test",
+            created_assets=[
+                CreatedAsset(path="results/a.tsv", role="dup", artifact_class="table", format="tsv", asset_id="planned_a"),
+                CreatedAsset(path="results/b.tsv", role="dup", artifact_class="table", format="tsv", asset_id="planned_b"),
+            ],
+            code_artifacts=[],
+            key_findings=["finding 1"],
+            validation_evidence={},
+        )
+        atomic_write_json(run_dir / "task_packet.json", task_packet.model_dump())
+        atomic_write_json(run_dir / "manifest.json", manifest.model_dump())
+
+        result = self.worker._finalize_run_review("test-project", run_id, accept=True, source="reviewer")
+        self.assertTrue(result["accepted"], f"Expected accepted, got failure_reason={result.get('failure_reason')}, details={result.get('failure_details')}")
+
+        cards = store.load_cards()
+        updated_card = next(c for c in cards if c.card_id == "card_dup")
+        self.assertEqual(updated_card.status, "accepted")
+        # Both outputs must be bound to DIFFERENT real assets.
+        self.assertIsNotNone(updated_card.outputs[0].asset_id)
+        self.assertIsNotNone(updated_card.outputs[1].asset_id)
+        self.assertNotEqual(updated_card.outputs[0].asset_id, updated_card.outputs[1].asset_id)
+
+    def test_finalize_run_review_supersedes_all_duplicate_role_previous_outputs(self) -> None:
+        from app.models.runs import RunContext
+        from app.services.utils import utc_now
+
+        root = self.project_service.project_path("test-project")
+        run_id = "run_dup_rerun"
+        run_dir = root / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (root / "results").mkdir(parents=True, exist_ok=True)
+
+        store = self.project_service.graph_store("test-project")
+        card = Card(
+            card_id="card_dup_rerun",
+            card_type="module",
+            title="Dup Rerun Test",
+            status="running",
+            step=1,
+            summary="",
+            why="",
+            inputs=[],
+            outputs=[
+                CardOutputSpec(role="dup", label="D1", artifact_class="table", accepted_formats=["tsv"], asset_id="planned_a"),
+                CardOutputSpec(role="dup", label="D2", artifact_class="table", accepted_formats=["tsv"], asset_id="planned_b"),
+            ],
+            linked_assets=["old_a", "old_b"],
+        )
+        store.save_cards([card])
+        graph = store.load_graph()
+        graph.assets.extend(
+            [
+                Asset(asset_id="old_a", asset_type="table", title="Old A", status="valid", created_by_run="run_old", path="old_a.tsv", summary="old", metadata={"role": "dup"}),
+                Asset(asset_id="old_b", asset_type="table", title="Old B", status="valid", created_by_run="run_old", path="old_b.tsv", summary="old", metadata={"role": "dup"}),
+            ]
+        )
+        graph.runs.append(
+            RunRecord(
+                run_id=run_id,
+                card_id="card_dup_rerun",
+                status="running",
+                title="Dup rerun",
+                summary="test",
+                started_at=utc_now(),
+            )
+        )
+        store.save_graph(graph)
+
+        task_packet = TaskPacket(
+            task_id=run_id,
+            project_id="test-project",
+            card_id="card_dup_rerun",
+            card_title="Dup Rerun Test",
+            card_status="running",
+            goal="test",
+            input_assets=[],
+            card_inputs=[],
+            card_outputs=[],
+            expected_outputs=[],
+            allowed_paths=[],
+            readonly_paths=[],
+            forbidden_paths=[],
+            execution_policy={},
+            constraints=[],
+            worker_instructions="",
+            run_context=RunContext(run_id=run_id, worker_type="pi", project_root=str(root), run_dir=f"runs/{run_id}", result_dir="results"),
+            executor_context={},
+            manager_reporting_contract={},
+        )
+        manifest = Manifest(
+            run_id=run_id,
+            status="success",
+            summary="test",
+            created_assets=[
+                CreatedAsset(path="results/a.tsv", role="dup", artifact_class="table", format="tsv", asset_id="planned_a"),
+                CreatedAsset(path="results/b.tsv", role="dup", artifact_class="table", format="tsv", asset_id="planned_b"),
+            ],
+            code_artifacts=[],
+            key_findings=[],
+            validation_evidence={},
+        )
+        atomic_write_json(run_dir / "task_packet.json", task_packet.model_dump())
+        atomic_write_json(run_dir / "manifest.json", manifest.model_dump())
+
+        result = self.worker._finalize_run_review("test-project", run_id, accept=True, source="reviewer")
+        self.assertTrue(result["accepted"], result)
+
+        graph = store.load_graph()
+        statuses = {asset.asset_id: asset.status for asset in graph.assets}
+        self.assertEqual(statuses["old_a"], "superseded")
+        self.assertEqual(statuses["old_b"], "superseded")
+
+    def test_finalize_run_review_consistency_failure_reason_not_mapping_ambiguous(self) -> None:
+        # Preflight consistency failure must report failure_reason="consistency_failed"
+        # and the manager_review must mention "一致性检查失败", NOT "映射存在歧义".
+        from app.models.runs import RunContext
+        from app.services.utils import utc_now
+
+        root = self.project_service.project_path("test-project")
+        run_id = "run_consistency_reason"
+        run_dir = root / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (root / "results").mkdir(parents=True, exist_ok=True)
+
+        store = self.project_service.graph_store("test-project")
+        card = Card(
+            card_id="card_reason",
+            card_type="module",
+            title="Reason Test",
+            status="running",
+            step=1,
+            summary="",
+            why="",
+            inputs=[],
+            outputs=[CardOutputSpec(role="out", label="Out", artifact_class="table", accepted_formats=["tsv"])],
+        )
+        store.save_cards([card])
+        graph = store.load_graph()
+        graph.runs.append(
+            RunRecord(
+                run_id=run_id,
+                card_id="card_reason",
+                status="running",
+                title="Reason run",
+                summary="test",
+                started_at=utc_now(),
+            )
+        )
+        store.save_graph(graph)
+
+        task_packet = TaskPacket(
+            task_id=run_id,
+            project_id="test-project",
+            card_id="card_reason",
+            card_title="Reason Test",
+            card_status="running",
+            goal="test",
+            input_assets=[],
+            card_inputs=[],
+            card_outputs=[],
+            expected_outputs=[],
+            allowed_paths=[],
+            readonly_paths=[],
+            forbidden_paths=[],
+            execution_policy={},
+            constraints=[],
+            worker_instructions="",
+            run_context=RunContext(run_id=run_id, worker_type="pi", project_root=str(root), run_dir=f"runs/{run_id}", result_dir="results"),
+            executor_context={},
+            manager_reporting_contract={},
+        )
+        manifest = Manifest(
+            run_id=run_id,
+            status="success",
+            summary="test",
+            created_assets=[CreatedAsset(path="results/out.tsv", role="out", artifact_class="table", format="tsv")],
+            code_artifacts=[],
+            key_findings=["finding 1"],
+            validation_evidence={},
+        )
+        atomic_write_json(run_dir / "task_packet.json", task_packet.model_dump())
+        atomic_write_json(run_dir / "manifest.json", manifest.model_dump())
+
+        with patch.object(WorkerService, "_validate_acceptance_graph_consistent", return_value=["forced error"]):
+            result = self.worker._finalize_run_review("test-project", run_id, accept=True, source="reviewer")
+
+        self.assertEqual(result["accepted"], False)
+        self.assertEqual(result.get("failure_reason"), "consistency_failed")
+        self.assertEqual(result.get("failure_details"), ["forced error"])
+
+        cards = store.load_cards()
+        updated_card = next(c for c in cards if c.card_id == "card_reason")
+        self.assertIn("一致性检查失败", updated_card.manager_review)
+        self.assertNotIn("映射存在歧义", updated_card.manager_review)
+
+    def test_review_run_event_messages_branch_by_failure_reason(self) -> None:
+        # review_run() must emit different event messages for each failure reason.
+        from app.models.runs import RunContext
+        from app.services.utils import utc_now
+
+        root = self.project_service.project_path("test-project")
+        run_id = "run_event_msg"
+        run_dir = root / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (root / "results").mkdir(parents=True, exist_ok=True)
+
+        store = self.project_service.graph_store("test-project")
+        card = Card(
+            card_id="card_event",
+            card_type="module",
+            title="Event Test",
+            status="running",
+            step=1,
+            summary="",
+            why="",
+            inputs=[],
+            outputs=[CardOutputSpec(role="out", label="Out", artifact_class="table", accepted_formats=["tsv"])],
+        )
+        store.save_cards([card])
+        graph = store.load_graph()
+        graph.runs.append(
+            RunRecord(
+                run_id=run_id,
+                card_id="card_event",
+                status="running",
+                title="Event run",
+                summary="test",
+                started_at=utc_now(),
+            )
+        )
+        store.save_graph(graph)
+
+        task_packet = TaskPacket(
+            task_id=run_id,
+            project_id="test-project",
+            card_id="card_event",
+            card_title="Event Test",
+            card_status="running",
+            goal="test",
+            input_assets=[],
+            card_inputs=[],
+            card_outputs=[],
+            expected_outputs=[],
+            allowed_paths=[],
+            readonly_paths=[],
+            forbidden_paths=[],
+            execution_policy={},
+            constraints=[],
+            worker_instructions="",
+            run_context=RunContext(run_id=run_id, worker_type="pi", project_root=str(root), run_dir=f"runs/{run_id}", result_dir="results"),
+            executor_context={},
+            manager_reporting_contract={},
+        )
+        manifest = Manifest(
+            run_id=run_id,
+            status="success",
+            summary="test",
+            created_assets=[CreatedAsset(path="results/out.tsv", role="out", artifact_class="table", format="tsv")],
+            code_artifacts=[],
+            key_findings=["finding 1"],
+            validation_evidence={},
+        )
+        atomic_write_json(run_dir / "task_packet.json", task_packet.model_dump())
+        atomic_write_json(run_dir / "manifest.json", manifest.model_dump())
+
+        # Case 1: explicit reject -> event says "已拒绝"
+        with patch.object(self.manifest_service, "validate_manifest", return_value=(True, [])):
+            result = self.worker.review_run("test-project", run_id, accept=False)
+        self.assertFalse(result["accepted"])
+        events = store.load_run_events(run_id)
+        reject_events = [e for e in events if e.event_type == "manager_review" and "已拒绝" in e.message]
+        self.assertTrue(len(reject_events) > 0, f"Expected reject event, got: {[e.message for e in events if e.event_type == 'manager_review']}")
+
+        # Reset
+        card.status = "running"
+        store.save_cards([card])
+        graph = store.load_graph()
+        run = next(r for r in graph.runs if r.run_id == run_id)
+        run.status = "running"
+        store.save_graph(graph)
+        store.save_run_events(run_id, [])
+
+        # Case 2: consistency failure -> event says "一致性检查未通过"
+        with patch.object(self.manifest_service, "validate_manifest", return_value=(True, [])):
+            with patch.object(WorkerService, "_validate_acceptance_graph_consistent", return_value=["forced error"]):
+                result = self.worker.review_run("test-project", run_id, accept=True)
+        self.assertFalse(result["accepted"])
+        events = store.load_run_events(run_id)
+        consistency_events = [e for e in events if e.event_type == "manager_review" and "一致性检查未通过" in e.message]
+        self.assertTrue(len(consistency_events) > 0, f"Expected consistency event, got: {[e.message for e in events if e.event_type == 'manager_review']}")
 
 
 if __name__ == "__main__":

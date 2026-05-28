@@ -455,6 +455,16 @@ class ManagerBlueprintTools:
             cards[index] = updated
             graph = store.load_graph()
             self._sync_module_links(graph, updated, previous_card=previous)
+            # Guard: accepted cards must always have consistent output bindings.
+            if updated.status == "accepted":
+                try:
+                    WorkerService._assert_acceptance_graph_consistent(updated, graph, previous.linked_runs[-1] if previous.linked_runs else "")
+                except AssertionError as exc:
+                    action = "直接设置 accepted" if previous.status != "accepted" else "保存会破坏 accepted 状态"
+                    raise ManagerPlanningError(
+                        f"accepted card 图一致性检查失败：{exc}。"
+                        f"请先运行/审核/重新绑定输出，而不是{action}。"
+                    ) from exc
             ModuleGroupStateService.sync_linked_module_status_from_card(updated, graph.modules)
             ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
             store.save_graph(graph)

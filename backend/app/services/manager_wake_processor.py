@@ -71,13 +71,16 @@ class ManagerWakeProcessor:
             self.manager_wake_service.mark_skipped(project_id, wake_event.wake_id, "Auto mode is disabled.")
             return
         try:
-            clear_active_run = wake_event.kind in {
+            TERMINAL_RUN_WAKE_KINDS = {
                 "card_run_reviewed",
                 "card_run_failed",
                 "card_run_cancelled",
                 "manifest_validation_failed",
                 "executor_validation_failed",
+                "runtime_dependency_missing",
+                "run_filesystem_audit_failed",
             }
+            clear_active_run = wake_event.kind in TERMINAL_RUN_WAKE_KINDS
             clear_active_job = wake_event.kind in {
                 "runtime_dependency_install_succeeded",
                 "runtime_dependency_install_failed",

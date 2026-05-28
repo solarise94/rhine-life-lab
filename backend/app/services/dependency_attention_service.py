@@ -14,6 +14,7 @@ class DependencyAttentionService:
     VALID_INPUT_STATUSES = {"valid", "candidate"}
     ERROR_INPUT_STATUSES = {"rejected", "archived", "missing"}
     INACTIVE_PRODUCER_CARD_STATUSES = {"cancelled", "rejected", "superseded"}
+    INACTIVE_CARD_STATUSES = {"cancelled", "rejected", "superseded"}
 
     def analyze_project(self, snapshot: dict[str, Any], *, max_lineage_nodes: int = 200) -> dict[str, Any]:
         cards: list[Card] = list(snapshot.get("cards") or [])
@@ -226,6 +227,10 @@ class DependencyAttentionService:
         *,
         max_lineage_nodes: int,
     ) -> None:
+        # Skip inactive cards by default so abandoned branches do not inflate attention counts.
+        if card.status in self.INACTIVE_CARD_STATUSES:
+            return
+
         asset_by_id: dict[str, Asset] = indexes["asset_by_id"]
         planned_output_by_asset_id = indexes["planned_output_by_asset_id"]
         producer_card_by_asset = indexes["producer_card_by_asset"]
