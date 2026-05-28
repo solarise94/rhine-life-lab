@@ -109,6 +109,26 @@ class ChatSessionService:
                 store.save_chat_sessions(sessions)
             return self._decorate_session(project_id, session)
 
+    def upsert_message(self, project_id: str, session_id: str, message: ChatSessionMessage) -> ChatSession:
+        lock = self.project_service.lock_for(project_id)
+        with lock:
+            store = self.project_service.graph_store(project_id)
+            sessions = store.load_chat_sessions()
+            session = next((item for item in sessions if item.session_id == session_id), None)
+            if not session:
+                raise ValueError(f"Chat session not found: {session_id}")
+            for index, existing in enumerate(session.messages):
+                if existing.id == message.id:
+                    session.messages[index] = message
+                    break
+            else:
+                session.messages.append(message)
+            session.summary = self._derive_summary(session.messages, session.summary)
+            session.updated_at = utc_now()
+            session.revision += 1
+            store.save_chat_sessions(sessions)
+            return self._decorate_session(project_id, session)
+
     def delete_session(self, project_id: str, session_id: str) -> None:
         lock = self.project_service.lock_for(project_id)
         with lock:

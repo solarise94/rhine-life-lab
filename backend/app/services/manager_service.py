@@ -56,6 +56,9 @@ class ManagerService:
         )
 
     def chat(self, project_id: str, request: ChatRequest) -> ChatResponse:
+        # Compatibility wrapper for legacy synchronous callers such as /chat and chat-jobs.
+        # New Manager execution paths must use stream_chat() so thinking/tool timeline
+        # events remain visible to the UI and auto mode does not hide background work.
         if self.settings.manager_backend == "pi" and self.planner.__class__ is DeepSeekManagerPlanner:
             return self._chat_via_pi(project_id, request)
         return self._chat_via_local(project_id, request)

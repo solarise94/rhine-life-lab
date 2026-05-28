@@ -20,6 +20,7 @@ from app.models.cards import Card
 from app.models.chat import ChatRequest, ChatSessionMessage
 from app.models.executor import ExecutorContext
 from app.models.graph import Asset, Claim, GraphState, Module, ModuleRef, RunRecord
+from app.models.manager_auto import ManagerWakeEvent
 from app.models.patches import GraphPatch, ValidationResult
 from app.models.runs import CreatedAsset, ExecutorValidationReport, ExpectedOutput, Manifest, TaskPacket
 from app.services.chat_session_service import ChatSessionService
@@ -28,7 +29,10 @@ from app.services.executor_reviewer_worker import ExecutorReviewerWorker
 from app.services.executor_validation_service import ExecutorValidationService
 from app.services.flow_service import FlowService
 from app.services.manager_planner import DeepSeekManagerPlanner, ManagerPlanningError
+from app.services.manager_auto_service import ManagerAutoService
 from app.services.manager_service import ManagerService
+from app.services.manager_wake_processor import ManagerWakeProcessor
+from app.services.manager_wake_service import ManagerWakeService
 from app.services.manifest_service import ManifestService
 from app.services.patch_apply import PatchApplyService
 from app.services.patch_validator import PatchValidator
@@ -163,6 +167,49 @@ class RaisingValidationService:
 class RaisingReviewerWorker:
     def review(self, **_kwargs) -> dict:
         raise RuntimeError("reviewer api unavailable")
+
+
+class StreamingOnlyManagerService:
+    def __init__(self) -> None:
+        self.chat_called = False
+
+    def chat(self, *_args: object, **_kwargs: object) -> object:
+        self.chat_called = True
+        raise AssertionError("AUTO wake must use stream_chat().")
+
+    def stream_chat(self, *_args: object, **_kwargs: object) -> object:
+        events = [
+            {"type": "thinking_start", "content_index": 0, "assistant_turn_index": 0, "started_at": 1000},
+            {"type": "thinking_delta", "delta": "检查项目状态", "content_index": 0, "assistant_turn_index": 0},
+            {"type": "thinking_end", "content": "检查项目状态", "content_index": 0, "assistant_turn_index": 0, "started_at": 1000, "ended_at": 1200},
+            {"type": "tool_start", "tool_name": "inspect_project_summary", "tool_call_id": "tool_auto_1", "label": "读取项目摘要"},
+            {"type": "tool_end", "tool_name": "inspect_project_summary", "tool_call_id": "tool_auto_1", "done_label": "项目摘要已读取"},
+            {"type": "tool_report", "tool_name": "inspect_project_summary", "tool_call_id": "tool_auto_1", "summary": "发现 1 个待处理事件"},
+            {"type": "text_delta", "delta": "我已经处理后台事件。", "content_index": 1, "assistant_turn_index": 0},
+            {
+                "type": "response",
+                "response": {
+                    "message": "我已经处理后台事件。",
+                    "thinking": "检查项目状态",
+                    "metadata": {"token_usage": {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}},
+                },
+            },
+            {"type": "done"},
+        ]
+        for event in events:
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+class BrokenStreamManagerService(StreamingOnlyManagerService):
+    def stream_chat(self, *_args: object, **_kwargs: object) -> object:
+        events = [
+            {"type": "thinking_start", "content_index": 0, "assistant_turn_index": 0, "started_at": 1000},
+            {"type": "thinking_delta", "delta": "已经开始处理", "content_index": 0, "assistant_turn_index": 0},
+            {"type": "tool_start", "tool_name": "inspect_project_summary", "tool_call_id": "tool_broken", "label": "读取项目摘要"},
+        ]
+        for event in events:
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
+        raise RuntimeError("stream interrupted")
 
 
 class InlineCommandWorkerAdapter(WorkerAdapter):
@@ -874,6 +921,107 @@ class ManagerFlowTest(unittest.TestCase):
         listed = self.chat_session_service.list_sessions("test-project")
         self.assertEqual(session.session_id, listed[0].session_id)
         self.assertEqual(2, listed[0].message_count)
+
+    def test_chat_session_upsert_replaces_existing_message(self) -> None:
+        session = self.chat_session_service.create_session("test-project")
+        self.chat_session_service.upsert_message(
+            "test-project",
+            session.session_id,
+            ChatSessionMessage(id="msg_manager", role="manager", content="处理中", state="thinking"),
+        )
+        updated = self.chat_session_service.upsert_message(
+            "test-project",
+            session.session_id,
+            ChatSessionMessage(id="msg_manager", role="manager", content="处理完成", state="done"),
+        )
+
+        self.assertEqual(1, len(updated.messages))
+        self.assertEqual("处理完成", updated.messages[0].content)
+
+    def test_auto_wake_persists_stream_timeline_for_visible_manager_process(self) -> None:
+        auto_service = ManagerAutoService(self.project_service)
+        wake_service = ManagerWakeService(self.project_service)
+        chat_session_service = ChatSessionService(self.project_service, auto_service)
+        session = chat_session_service.create_session("test-project")
+        auto_service.enable("test-project", session.session_id)
+        wake_service.enqueue(
+            ManagerWakeEvent(
+                wake_id="wake_visible",
+                project_id="test-project",
+                kind="card_run_reviewed",
+                source_type="card",
+                source_id="card_deg_module",
+                card_id="card_deg_module",
+                message="测试自动唤醒",
+                idempotency_key="wake-visible",
+                created_at="2026-05-28T00:00:00Z",
+            )
+        )
+        manager_service = StreamingOnlyManagerService()
+        processor = ManagerWakeProcessor(
+            self.project_service,
+            auto_service,
+            wake_service,
+            chat_session_service,
+            manager_service,  # type: ignore[arg-type]
+        )
+
+        processor._process_project("test-project")
+
+        fetched = chat_session_service.get_session("test-project", session.session_id)
+        response = next(message for message in fetched.messages if message.id == "wake_response_wake_visible")
+        self.assertEqual("done", response.state)
+        self.assertEqual("我已经处理后台事件。", response.content)
+        self.assertEqual("检查项目状态", response.thinking)
+        self.assertIsNotNone(response.token_usage)
+        timeline = response.timeline or []
+        self.assertTrue(any(item.kind == "thinking" and item.content == "检查项目状态" for item in timeline))
+        self.assertTrue(any(item.kind == "tool" and item.tool_name == "inspect_project_summary" and item.status == "done" for item in timeline))
+        self.assertTrue(any(item.kind == "text" and item.content == "我已经处理后台事件。" for item in timeline))
+        self.assertFalse(manager_service.chat_called)
+
+    def test_auto_wake_stream_error_settles_partial_message(self) -> None:
+        auto_service = ManagerAutoService(self.project_service)
+        wake_service = ManagerWakeService(self.project_service)
+        chat_session_service = ChatSessionService(self.project_service, auto_service)
+        session = chat_session_service.create_session("test-project")
+        auto_service.enable("test-project", session.session_id)
+        wake_service.enqueue(
+            ManagerWakeEvent(
+                wake_id="wake_broken",
+                project_id="test-project",
+                kind="card_run_reviewed",
+                source_type="card",
+                source_id="card_deg_module",
+                card_id="card_deg_module",
+                message="测试自动唤醒中断",
+                idempotency_key="wake-broken",
+                created_at="2026-05-28T00:00:00Z",
+            )
+        )
+        manager_service = BrokenStreamManagerService()
+        processor = ManagerWakeProcessor(
+            self.project_service,
+            auto_service,
+            wake_service,
+            chat_session_service,
+            manager_service,  # type: ignore[arg-type]
+        )
+
+        processor._process_project("test-project")
+
+        fetched = chat_session_service.get_session("test-project", session.session_id)
+        response = next(message for message in fetched.messages if message.id == "wake_response_wake_broken")
+        self.assertEqual("error", response.state)
+        self.assertTrue(response.timeline)
+        self.assertTrue(all(item.status != "running" for item in response.timeline or []))
+        self.assertTrue(any(message.id == "auto_stop_error" for message in fetched.messages))
+        wake = wake_service.list_recent("test-project")[0]
+        self.assertEqual("failed", wake.status)
+        self.assertIn("stream interrupted", wake.error or "")
+        auto_state = auto_service.get_state("test-project")
+        self.assertFalse(auto_state.enabled)
+        self.assertFalse(manager_service.chat_called)
 
     def test_delete_chat_session_removes_persisted_thread(self) -> None:
         first = self.chat_session_service.create_session("test-project", "第一条")
