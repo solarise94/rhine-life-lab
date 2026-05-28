@@ -116,6 +116,27 @@ class DependencyAttentionServiceTest(unittest.TestCase):
         self.assertEqual("output_asset_not_valid", issues[0]["kind"])
         self.assertEqual("warning", issues[0]["severity"])
 
+    def test_system_output_candidate_does_not_warn(self) -> None:
+        accepted = card(
+            "accepted",
+            status="accepted",
+            outputs=[
+                output("report", "valid_report"),
+                output("run_summary", "candidate_summary"),
+                output("rna_pca_run_preview", "candidate_preview"),
+            ],
+        )
+        snapshot = self._snapshot(
+            [accepted],
+            [
+                asset("valid_report", status="valid", role="report"),
+                asset("candidate_summary", status="candidate", role="run_summary"),
+                asset("candidate_preview", status="candidate", role="rna_pca_run_preview"),
+            ],
+            [],
+        )
+        self.assertEqual([], self.service.analyze_project(snapshot)["issues"])
+
     def test_local_lineage_dfs_warns_for_invalid_upstream(self) -> None:
         downstream = card("downstream", inputs=[{"label": "derived", "asset_id": "derived_asset"}])
         snapshot = self._snapshot(

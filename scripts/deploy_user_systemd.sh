@@ -13,6 +13,7 @@ PYTHON_BIN=""
 PI_BIN=""
 OPENCODE_BIN=""
 CLAUDE_BIN=""
+DEPLOY_WARNINGS=()
 
 version_gte() {
   local actual="$1"
@@ -62,6 +63,56 @@ find_node_bin() {
 find_optional_bin() {
   local name="$1"
   command -v "${name}" 2>/dev/null || true
+}
+
+warn_deploy() {
+  DEPLOY_WARNINGS+=("$1")
+}
+
+check_unknown_blueprint_env_keys() {
+  local env_file="${ROOT_DIR}/.env"
+  [[ -f "${env_file}" ]] || return 0
+  local known_keys=(
+    BLUEPRINT_BACKEND_API_BASE_URL
+    BLUEPRINT_CLAUDE_CODE_COMMAND_JSON
+    BLUEPRINT_CODEX_COMMAND_JSON
+    BLUEPRINT_DEEPSEEK_API_BASE_URL
+    BLUEPRINT_DEEPSEEK_API_KEY
+    BLUEPRINT_DEFAULT_PYTHON_RUNTIME
+    BLUEPRINT_DEFAULT_R_RUNTIME
+    BLUEPRINT_DEFAULT_WORKER_TYPE
+    BLUEPRINT_EXECUTOR_CONDA_BASE
+    BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS
+    BLUEPRINT_EXECUTOR_HOST_ROOT_READONLY
+    BLUEPRINT_EXECUTOR_MAX_CONCURRENT_RUNS
+    BLUEPRINT_EXECUTOR_MODEL
+    BLUEPRINT_EXECUTOR_SANDBOX_MODE
+    BLUEPRINT_INTERNAL_TOOL_TOKEN
+    BLUEPRINT_LIBRARY_SUMMARIZER_MODEL
+    BLUEPRINT_MANAGER_BACKEND
+    BLUEPRINT_MANAGER_MAX_TOKENS
+    BLUEPRINT_MANAGER_MODEL
+    BLUEPRINT_MANAGER_TEMPERATURE
+    BLUEPRINT_MANAGER_TIMEOUT_SECONDS
+    BLUEPRINT_OPENCODE_COMMAND_JSON
+    BLUEPRINT_PI_COMMAND_JSON
+    BLUEPRINT_PI_DEEPSEEK_BASE_URL
+    BLUEPRINT_PI_MANAGER_URL
+    BLUEPRINT_REVIEWER_MAX_TOKENS
+    BLUEPRINT_REVIEWER_MAX_TURNS
+    BLUEPRINT_REVIEWER_MODEL
+  )
+  local known_blob
+  known_blob="$(printf '\n%s\n' "${known_keys[@]}")"
+  local line key
+  while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -n "${line}" && "${line}" != \#* && "${line}" == BLUEPRINT_*"="* ]] || continue
+    key="${line%%=*}"
+    if [[ "${known_blob}" != *$'\n'"${key}"$'\n'* ]]; then
+      warn_deploy "Unknown BLUEPRINT_* key in .env will not be written to managed env files: ${key}"
+    fi
+  done < "${env_file}"
 }
 
 detect_conda_base() {
@@ -240,6 +291,7 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
   source "${ROOT_DIR}/.env"
   set +a
 fi
+check_unknown_blueprint_env_keys
 
 CONDA_BASE=""
 DEFAULT_PYTHON_RUNTIME=""
@@ -248,7 +300,14 @@ if CONDA_BASE="$(detect_conda_base 2>/dev/null)"; then
   DEFAULT_PYTHON_RUNTIME="$(detect_default_python_runtime "${CONDA_BASE}" 2>/dev/null || true)"
   DEFAULT_R_RUNTIME="$(detect_default_r_runtime "${CONDA_BASE}" 2>/dev/null || true)"
 else
+  warn_deploy "No conda base detected. Python/R runtime defaults may be empty unless explicitly configured."
   DEFAULT_R_RUNTIME="$(detect_default_r_runtime "" 2>/dev/null || true)"
+fi
+if [[ -z "${BLUEPRINT_DEFAULT_PYTHON_RUNTIME:-}" && -z "${DEFAULT_PYTHON_RUNTIME}" ]]; then
+  warn_deploy "No default Python runtime detected. Cards without an explicit python_runtime may require manual runtime selection."
+fi
+if [[ -z "${BLUEPRINT_DEFAULT_R_RUNTIME:-}" && -z "${DEFAULT_R_RUNTIME}" ]]; then
+  warn_deploy "No default R runtime detected. R-capable cards may require BLUEPRINT_DEFAULT_R_RUNTIME or system Rscript."
 fi
 
 "${PYTHON_BIN}" -m venv "${ROOT_DIR}/.venv/backend"
@@ -400,4 +459,10 @@ if [[ -n "${DEFAULT_PYTHON_RUNTIME}" ]]; then
 fi
 if [[ -n "${DEFAULT_R_RUNTIME}" ]]; then
   echo "Default R runtime: ${DEFAULT_R_RUNTIME}"
+fi
+if [[ "${#DEPLOY_WARNINGS[@]}" -gt 0 ]]; then
+  echo "Deploy warnings:"
+  for warning in "${DEPLOY_WARNINGS[@]}"; do
+    echo "  - ${warning}"
+  done
 fi

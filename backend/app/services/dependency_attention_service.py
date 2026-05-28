@@ -15,6 +15,7 @@ class DependencyAttentionService:
     ERROR_INPUT_STATUSES = {"rejected", "archived", "missing"}
     INACTIVE_PRODUCER_CARD_STATUSES = {"cancelled", "rejected", "superseded"}
     INACTIVE_CARD_STATUSES = {"cancelled", "rejected", "superseded"}
+    SYSTEM_OUTPUT_ROLE_SUFFIXES = ("run_summary", "run_preview")
 
     def analyze_project(self, snapshot: dict[str, Any], *, max_lineage_nodes: int = 200) -> dict[str, Any]:
         cards: list[Card] = list(snapshot.get("cards") or [])
@@ -188,6 +189,8 @@ class DependencyAttentionService:
         current_output_by_card_role: dict[tuple[str, str], Any] = {}
         for card in cards:
             for output in card.outputs:
+                if self._is_system_output_role(output.role):
+                    continue
                 if not output.asset_id:
                     continue
                 planned_output_by_asset_id[output.asset_id] = {
@@ -292,7 +295,7 @@ class DependencyAttentionService:
                         )
                     )
                 if producer_card and role:
-                    producer_roles = {output.role for output in producer_card.outputs if output.role}
+                    producer_roles = {output.role for output in producer_card.outputs if output.role and not self._is_system_output_role(output.role)}
                     if role not in producer_roles:
                         issues.append(
                             self._issue(
@@ -353,6 +356,8 @@ class DependencyAttentionService:
             return
         asset_by_id: dict[str, Asset] = indexes["asset_by_id"]
         for output in card.outputs:
+            if self._is_system_output_role(output.role):
+                continue
             if not output.asset_id:
                 issues.append(
                     self._issue(
@@ -529,6 +534,13 @@ class DependencyAttentionService:
             for issue in sorted(issues, key=lambda item: str(item.get("issue_id") or ""))
         ]
         return sha256(json.dumps(stable_parts, sort_keys=True).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _is_system_output_role(role: str | None) -> bool:
+        normalized = str(role or "").strip()
+        return normalized in DependencyAttentionService.SYSTEM_OUTPUT_ROLE_SUFFIXES or normalized.endswith(
+            DependencyAttentionService.SYSTEM_OUTPUT_ROLE_SUFFIXES
+        )
 
     @staticmethod
     def _producer_by_asset(cards: list[Card], assets: list[Asset], runs: list[RunRecord]) -> dict[str, str]:

@@ -34,7 +34,7 @@ python3.13 -m venv .venv/backend
 .venv/backend/bin/python scripts/generate_backend_schemas.py
 
 # Run (dev)
-.venv/backend/bin/uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
+.venv/backend/bin/uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 18001
 
 # Tests
 PYTHONPATH=backend .venv/backend/bin/python -m unittest discover -s backend/tests
@@ -49,7 +49,7 @@ SKIP_SLOW_TESTS=1 PYTHONPATH=backend .venv/backend/bin/python -m unittest discov
 ```bash
 cd frontend
 npm install
-NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000/api npm run dev
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18001/api npm run dev
 npm run build          # validation (no test framework)
 ```
 

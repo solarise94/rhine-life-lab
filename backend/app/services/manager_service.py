@@ -42,6 +42,7 @@ class ManagerService:
         manager_auto_service: ManagerAutoService | None = None,
     ) -> None:
         self.project_service = project_service
+        self._uses_default_planner = planner is None
         self.planner = planner or DeepSeekManagerPlanner()
         self.tool_layer = tool_layer or ManagerToolLayer()
         self.intent_router = ManagerIntentRouter()
@@ -57,46 +58,56 @@ class ManagerService:
 
     def chat(self, project_id: str, request: ChatRequest) -> ChatResponse:
         # Compatibility wrapper for legacy synchronous callers such as /chat and chat-jobs.
-        # New Manager execution paths must use stream_chat() so thinking/tool timeline
-        # events remain visible to the UI and auto mode does not hide background work.
-        if self.settings.manager_backend == "pi" and self.planner.__class__ is DeepSeekManagerPlanner:
-            return self._chat_via_pi(project_id, request)
+        # Production Manager execution must go through stream_chat(); this wrapper only
+        # aggregates the final response from that stream. The local path below is kept
+        # for tests and explicitly injected planner stubs, not for new runtime flows.
+        if self._uses_default_planner:
+            return self._chat_from_stream(project_id, request)
         return self._chat_via_local(project_id, request)
 
-    def _chat_via_pi(self, project_id: str, chat_request: ChatRequest) -> ChatResponse:
-        token = self.settings.internal_tool_token.get_secret_value() if self.settings.internal_tool_token else ""
-        if not token:
-            raise ManagerPlanningError("BLUEPRINT_INTERNAL_TOOL_TOKEN is not configured.")
-        payload = {
-            "project_id": project_id,
-            "message": chat_request.message,
-            "session_id": chat_request.session_id,
-            "context": chat_request.context.model_dump(),
-            "thinking_effort": chat_request.thinking_effort,
-            "messages": [item.model_dump() for item in chat_request.messages],
-            "auto_mode": self._auto_payload(project_id, chat_request.session_id),
-            "backend_api_base_url": self.settings.backend_api_base_url.rstrip("/"),
-            "internal_tool_token": token,
-            "manager_config": self.app_config_service.manager_agent_config(include_secrets=True),
-        }
-        endpoint = f"{self.settings.pi_manager_url.rstrip('/')}/chat"
-        http_request = url_request.Request(
-            endpoint,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            method="POST",
-            headers={"content-type": "application/json"},
-        )
-        try:
-            with url_request.urlopen(http_request, timeout=self.settings.manager_timeout_seconds) as response:
-                response_payload = json.loads(response.read().decode("utf-8"))
-        except error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise ManagerPlanningError(f"Pi manager failed with HTTP {exc.code}: {detail}") from exc
-        except error.URLError as exc:
-            raise ManagerPlanningError(f"Pi manager request failed: {exc.reason}") from exc
-        except (TimeoutError, OSError, json.JSONDecodeError) as exc:
-            raise ManagerPlanningError(f"Pi manager request failed: {exc}") from exc
+    def _chat_from_stream(self, project_id: str, chat_request: ChatRequest) -> ChatResponse:
+        response_payload: dict | None = None
+        buffer = ""
+        for chunk in self.stream_chat(project_id, chat_request):
+            buffer += chunk.decode("utf-8", errors="replace")
+            while "\n\n" in buffer or "\r\n\r\n" in buffer:
+                lf = buffer.find("\n\n")
+                crlf = buffer.find("\r\n\r\n")
+                if lf == -1 or (crlf != -1 and crlf < lf):
+                    raw_event = buffer[:crlf]
+                    buffer = buffer[crlf + 4 :]
+                else:
+                    raw_event = buffer[:lf]
+                    buffer = buffer[lf + 2 :]
+                payload = self._parse_stream_payload(raw_event)
+                if payload is None:
+                    continue
+                if payload.get("type") == "error":
+                    raise ManagerPlanningError(str(payload.get("detail") or "Pi manager stream failed."))
+                if payload.get("type") == "response" and isinstance(payload.get("response"), dict):
+                    response_payload = payload["response"]
+        if buffer.strip():
+            payload = self._parse_stream_payload(buffer)
+            if payload and payload.get("type") == "response" and isinstance(payload.get("response"), dict):
+                response_payload = payload["response"]
+        if response_payload is None:
+            raise ManagerPlanningError("Pi manager stream ended without a final response.")
         return ChatResponse.model_validate(response_payload)
+
+    @staticmethod
+    def _parse_stream_payload(raw_event: str) -> dict | None:
+        payload = "\n".join(
+            line[5:].lstrip()
+            for line in raw_event.splitlines()
+            if line.startswith("data:")
+        ).strip()
+        if not payload:
+            return None
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise ManagerPlanningError(f"Pi manager stream returned invalid JSON: {exc}") from exc
+        return parsed if isinstance(parsed, dict) else None
 
     def stream_chat(self, project_id: str, chat_request: ChatRequest) -> Iterator[bytes]:
         if self.settings.manager_backend != "pi":

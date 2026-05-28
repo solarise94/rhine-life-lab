@@ -19,6 +19,7 @@ from app.services.manager_planner import ManagerPlanningError
 from app.services.manager_service import ManagerService
 from app.services.patch_apply import PatchApplyService
 from app.services.project_service import ProjectService
+from app.services.provider_errors import ProviderAPIError
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
 from app.services.utils import sha256_file, utc_now
 
@@ -27,10 +28,13 @@ router = APIRouter(prefix="/projects/{project_id}", tags=["chat"])
 MAX_CHAT_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
-@router.post("/chat")
+@router.post("/chat", deprecated=True)
 def chat(project_id: str, request: ChatRequest, manager_service: ManagerService = Depends(get_manager_service)) -> dict:
+    """Legacy synchronous compatibility endpoint. New callers must use /chat-stream."""
     try:
         return manager_service.chat(project_id, request).model_dump()
+    except ProviderAPIError as exc:
+        raise HTTPException(status_code=502, detail=exc.to_dict()) from exc
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -39,6 +43,8 @@ def chat(project_id: str, request: ChatRequest, manager_service: ManagerService 
 def chat_stream(project_id: str, request: ChatRequest, manager_service: ManagerService = Depends(get_manager_service)) -> StreamingResponse:
     try:
         stream = manager_service.stream_chat(project_id, request)
+    except ProviderAPIError as exc:
+        raise HTTPException(status_code=502, detail=exc.to_dict()) from exc
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return StreamingResponse(
@@ -55,22 +61,25 @@ def chat_stream(project_id: str, request: ChatRequest, manager_service: ManagerS
 def chat_compact(project_id: str, request: ChatRequest, manager_service: ManagerService = Depends(get_manager_service)) -> dict:
     try:
         return manager_service.compact_chat_session(project_id, request)
+    except ProviderAPIError as exc:
+        raise HTTPException(status_code=502, detail=exc.to_dict()) from exc
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@router.post("/chat-jobs")
+@router.post("/chat-jobs", deprecated=True)
 def create_chat_job(
     project_id: str,
     request: ChatRequest,
     manager_service: ManagerService = Depends(get_manager_service),
     chat_job_service: ChatJobService = Depends(get_chat_job_service),
 ) -> dict:
+    """Legacy background chat endpoint. New callers must use /chat-stream."""
     job = chat_job_service.submit(project_id, request, manager_service.chat)
     return {"job_id": job.job_id, "status": job.status}
 
 
-@router.get("/chat-jobs/{job_id}")
+@router.get("/chat-jobs/{job_id}", deprecated=True)
 def get_chat_job(project_id: str, job_id: str, chat_job_service: ChatJobService = Depends(get_chat_job_service)) -> dict:
     job = chat_job_service.get(job_id)
     if not job or job.project_id != project_id:
@@ -185,6 +194,8 @@ def modify_proposal(
 ) -> dict:
     try:
         proposal = manager_service.modify_proposal(project_id, proposal_id, request)
+    except ProviderAPIError as exc:
+        raise HTTPException(status_code=502, detail=exc.to_dict()) from exc
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     patch_payload = project_service.graph_store(project_id).load_patch(proposal.patch_id)

@@ -10,6 +10,7 @@ from app.models.runs import ExecutorValidationReport, Manifest, TaskPacket, Vali
 from app.services.artifact_format_service import detect_artifact_class
 from app.services.executor_reviewer_worker import ExecutorReviewerWorker
 from app.services.project_service import ProjectService
+from app.services.provider_errors import ProviderAPIError, provider_error_message
 from app.services.utils import atomic_write_json, resolve_within, sha256_file
 
 
@@ -36,14 +37,31 @@ class ExecutorValidationService:
                 manifest=manifest,
                 deterministic_issues=issues,
             )
+        except ProviderAPIError as exc:
+            logger.exception("Executor reviewer provider API failed for project=%s run=%s", project_id, run_id)
+            message = provider_error_message(exc)
+            reviewer_payload = {
+                "verdict": "fail",
+                "summary": f"Executor reviewer API failed after retries: {message}",
+                "issues": [
+                    {
+                        "severity": "error",
+                        "code": "reviewer_api_error",
+                        "message": message,
+                        "repair_hint": "Wait for the provider or network to recover, then rerun validation or rerun the card.",
+                    }
+                ],
+                "mode": "reviewer_api_error",
+                "provider_error": exc.to_dict(),
+            }
         except Exception as exc:
             logger.exception("Executor reviewer infrastructure failed for project=%s run=%s", project_id, run_id)
             reviewer_payload = {
-                "verdict": "warn",
+                "verdict": "fail",
                 "summary": f"Executor reviewer failed before producing a verdict: {exc}",
                 "issues": [
                     {
-                        "severity": "warning",
+                        "severity": "error",
                         "code": "reviewer_infrastructure_error",
                         "message": str(exc),
                         "repair_hint": "Check Manager AI DeepSeek configuration and reviewer tool-use compatibility, then rerun validation.",

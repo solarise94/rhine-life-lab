@@ -54,6 +54,8 @@ from app.workers import build_worker_registry
 
 logger = logging.getLogger(__name__)
 
+SYSTEM_OUTPUT_ROLES = {"run_summary", "run_preview"}
+
 
 _SENSITIVE_COMMAND_KEYS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 _EVENT_FLUSH_BATCH_SIZE = 25
@@ -694,11 +696,14 @@ class WorkerService:
             )
 
             # 2. Resolve output mappings deterministically.
+            declared_created_assets = self._card_declared_created_assets(review_context.created_assets)
+            declared_manifest_assets = self._card_declared_created_assets(manifest.created_assets)
+            declared_expected_outputs = self._card_declared_expected_outputs(task_packet.expected_outputs)
             planned_bindings, unmapped_outputs = self._resolve_output_bindings(
                 card,
-                created_assets,
-                manifest_created_assets=manifest.created_assets,
-                expected_outputs=task_packet.expected_outputs,
+                [asset for asset in created_assets if str(asset.metadata.get("role") or "") not in SYSTEM_OUTPUT_ROLES],
+                manifest_created_assets=declared_manifest_assets,
+                expected_outputs=declared_expected_outputs,
             )
 
             # 3. Determine final acceptance (mapping ambiguity blocks acceptance).
@@ -1927,7 +1932,7 @@ class WorkerService:
         """
         errors: list[str] = []
         asset_by_id = {a.asset_id: a for a in graph.assets}
-        for output in card.outputs:
+        for output in WorkerService._card_declared_outputs(card):
             if output.asset_id is None:
                 errors.append(
                     f"Accepted card {card.card_id} output {output.role or output.label} has no asset_id."
@@ -2022,7 +2027,7 @@ class WorkerService:
 
         # Card-declared roles that are NOT system outputs
         card_declared_roles = {str(o.role or "") for o in card.outputs if o.role}
-        system_roles = {"run_summary", "run_preview"}
+        system_roles = SYSTEM_OUTPUT_ROLES
 
         real_by_planned: dict[str, Asset] = {}
         matched_asset_ids: set[str] = set()
@@ -2067,6 +2072,28 @@ class WorkerService:
         return real_by_planned
 
     @staticmethod
+    def _card_declared_created_assets(items: list[object]) -> list[object]:
+        return [item for item in items if WorkerService._object_role(item) not in SYSTEM_OUTPUT_ROLES]
+
+    @staticmethod
+    def _card_declared_expected_outputs(items: list[object]) -> list[object]:
+        return [item for item in items if WorkerService._object_role(item) not in SYSTEM_OUTPUT_ROLES]
+
+    @staticmethod
+    def _card_declared_outputs(card: Card) -> list[CardOutputSpec]:
+        return [output for output in card.outputs if str(output.role or "") not in SYSTEM_OUTPUT_ROLES]
+
+    @staticmethod
+    def _card_declared_output_items(card: Card) -> list[tuple[int, CardOutputSpec]]:
+        return [(index, output) for index, output in enumerate(card.outputs) if str(output.role or "") not in SYSTEM_OUTPUT_ROLES]
+
+    @staticmethod
+    def _object_role(obj: object) -> str:
+        if isinstance(obj, dict):
+            return str(obj.get("role") or "")
+        return str(getattr(obj, "role", "") or "")
+
+    @staticmethod
     def _format_unmapped_output(output_index: int, output: CardOutputSpec) -> str:
         return f"output[{output_index}] role={output.role} asset_id={output.asset_id}"
 
@@ -2089,7 +2116,7 @@ class WorkerService:
         asset_by_id = {asset.asset_id: asset for asset in assets}
         bindings: list[tuple[int, Asset]] = []
         unmapped: list[str] = []
-        for output_index, output in enumerate(card.outputs):
+        for output_index, output in WorkerService._card_declared_output_items(card):
             if output.asset_id is not None and output.asset_id in real_by_planned:
                 bindings.append((output_index, real_by_planned[output.asset_id]))
             elif output.asset_id is not None and output.asset_id in produced_asset_ids:

@@ -332,6 +332,12 @@ class ManagerBlueprintTools:
             include_recursive_downstream=request.include_recursive_downstream,
             max_issues=request.max_issues,
         )
+        if any(issue.get("kind") == "input_asset_outdated" and issue.get("current_asset_id") for issue in result.get("dependency_attention", [])):
+            result["repair_guidance"] = (
+                "input_asset_outdated means the downstream card still saves an old inputs[].asset_id. "
+                "Before rerun_card, use update_card to replace that input asset_id with current_asset_id; "
+                "otherwise the new run will keep using the old asset."
+            )
         return {"project_id": project_id, **result}
 
     def get_asset_detail(self, project_id: str, asset_id: str) -> dict:

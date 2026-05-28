@@ -952,6 +952,93 @@ class RemediationTestCase(unittest.TestCase):
         self.assertIn("一致性检查失败", updated_card.manager_review)
         self.assertNotIn("映射存在歧义", updated_card.manager_review)
 
+    def test_system_outputs_do_not_block_card_output_acceptance(self) -> None:
+        from app.models.runs import ExpectedOutput, RunContext
+        from app.services.utils import utc_now
+
+        root = self.project_service.project_path("test-project")
+        run_id = "run_system_outputs"
+        run_dir = root / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        store = self.project_service.graph_store("test-project")
+        card = Card(
+            card_id="card_system_outputs",
+            card_type="module",
+            title="System Outputs",
+            status="running",
+            step=1,
+            summary="",
+            why="",
+            inputs=[],
+            outputs=[
+                CardOutputSpec(role="out", label="Out", artifact_class="table", accepted_formats=["tsv"], asset_id="planned_out"),
+                CardOutputSpec(role="run_summary", label="Run summary", artifact_class="document", accepted_formats=["md"], asset_id="planned_summary"),
+                CardOutputSpec(role="run_preview", label="Run preview", artifact_class="figure", accepted_formats=["svg"], asset_id="planned_preview"),
+            ],
+        )
+        store.save_cards([card])
+        graph = store.load_graph()
+        graph.runs.append(
+            RunRecord(
+                run_id=run_id,
+                card_id=card.card_id,
+                status="running",
+                title="System output run",
+                summary="test",
+                started_at=utc_now(),
+            )
+        )
+        store.save_graph(graph)
+        task_packet = TaskPacket(
+            task_id=run_id,
+            project_id="test-project",
+            card_id=card.card_id,
+            card_title=card.title,
+            card_status="running",
+            goal="test",
+            input_assets=[],
+            card_inputs=[],
+            card_outputs=[],
+            expected_outputs=[
+                ExpectedOutput(role="out", label="Out", artifact_class="table", accepted_formats=["tsv"], path_hint="results/out.tsv", asset_id="planned_out"),
+                ExpectedOutput(role="run_summary", label="Run summary", artifact_class="document", accepted_formats=["md"], path_hint="results/run_summary.md", asset_id="planned_summary"),
+                ExpectedOutput(role="run_preview", label="Run preview", artifact_class="figure", accepted_formats=["svg"], path_hint="results/run_preview.svg", asset_id="planned_preview"),
+            ],
+            allowed_paths=[],
+            readonly_paths=[],
+            forbidden_paths=[],
+            execution_policy={},
+            constraints=[],
+            worker_instructions="",
+            run_context=RunContext(run_id=run_id, worker_type="pi", project_root=str(root), run_dir=f"runs/{run_id}", result_dir="results"),
+            executor_context={},
+            manager_reporting_contract={},
+        )
+        manifest = Manifest(
+            run_id=run_id,
+            status="success",
+            summary="test",
+            created_assets=[
+                CreatedAsset(path="results/out.tsv", role="out", asset_id="planned_out", artifact_class="table", format="tsv"),
+                CreatedAsset(path="results/run_summary.md", role="run_summary", asset_id="planned_summary", artifact_class="document", format="md"),
+                CreatedAsset(path="results/run_preview.svg", role="run_preview", asset_id="planned_preview", artifact_class="figure", format="svg"),
+            ],
+            code_artifacts=[],
+            key_findings=["finding 1"],
+            validation_evidence={},
+        )
+        atomic_write_json(run_dir / "task_packet.json", task_packet.model_dump())
+        atomic_write_json(run_dir / "manifest.json", manifest.model_dump())
+
+        result = self.worker._finalize_run_review("test-project", run_id, accept=True, source="reviewer")
+
+        self.assertTrue(result["accepted"], result)
+        updated_card = next(c for c in store.load_cards() if c.card_id == card.card_id)
+        self.assertEqual("accepted", updated_card.status)
+        self.assertNotEqual("planned_out", updated_card.outputs[0].asset_id)
+        self.assertEqual("planned_summary", updated_card.outputs[1].asset_id)
+        self.assertEqual("planned_preview", updated_card.outputs[2].asset_id)
+
     def test_review_run_event_messages_branch_by_failure_reason(self) -> None:
         # review_run() must emit different event messages for each failure reason.
         from app.models.runs import RunContext

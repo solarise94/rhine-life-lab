@@ -18,7 +18,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { api, ChatHistoryMessage, ChatRequestContext, ChatStreamEvent, ChatTokenUsage } from "@/lib/api";
+import { api, apiUrl, ChatHistoryMessage, ChatRequestContext, ChatStreamEvent, ChatTokenUsage } from "@/lib/api";
 import { useChatSession, useModifyProposalMutation } from "@/lib/hooks";
 import { queryKeys } from "@/lib/query-keys";
 import { Asset, ChatSessionDetail, ChatSessionMessageRecord, ManagerAutoState, ProjectSnapshot, Proposal } from "@/lib/types";
@@ -422,7 +422,12 @@ function sessionMessagesSignature(messages: ChatMessage[]): string {
       timeline: message.timeline?.map((item) => ({
         id: item.id,
         kind: item.kind,
+        content: item.content ?? null,
+        label: item.label ?? null,
+        toolName: item.toolName ?? null,
         status: item.status,
+        startedAt: item.startedAt ?? null,
+        endedAt: item.endedAt ?? null,
       })) ?? [],
     })),
   );
@@ -485,7 +490,10 @@ export function ManagerChatPanel({
   const thinkingRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const refreshTimerRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
+  const autoSessionReconnectTimerRef = useRef<number | null>(null);
   const activeStreamControllerRef = useRef<AbortController | null>(null);
+  const autoSessionEventSourceRef = useRef<EventSource | null>(null);
+  const remoteHydratingRef = useRef(false);
   const stopRequestedRef = useRef(false);
   const currentSessionIdRef = useRef<string | null>(sessionId ?? null);
   const hydratedSessionIdRef = useRef<string | null>(null);
@@ -497,6 +505,7 @@ export function ManagerChatPanel({
   const chatSessionQuery = useChatSession(projectId, sessionId ?? undefined, Boolean(sessionId), {
     refetchInterval: managerAuto?.enabled && !activeStreamControllerRef.current ? 4_000 : false,
   });
+  const refetchChatSession = chatSessionQuery.refetch;
 
   const attachments = useWorkspaceUiStore((s) => s.attachmentsByProject[projectId] ?? EMPTY_ATTACHMENTS);
   const scriptPreference = useWorkspaceUiStore((s) => s.scriptPreferenceByProject?.[projectId] ?? "auto");
@@ -642,6 +651,9 @@ export function ManagerChatPanel({
     if (!sessionId || !chatSessionQuery.data?.session || activeStreamControllerRef.current) {
       return;
     }
+    if (isAutoOwnerSession && managerAuto?.enabled && autoSessionEventSourceRef.current) {
+      return;
+    }
     const nextMessages = normalizeSessionMessages(chatSessionQuery.data.session.messages);
     const mergedMessages = mergeChatMessagesById(messages, nextMessages);
     const nextSignature = sessionMessagesSignature(mergedMessages);
@@ -658,6 +670,10 @@ export function ManagerChatPanel({
 
   useEffect(() => {
     if (!sessionId || hydratedSessionIdRef.current !== sessionId || typeof window === "undefined") {
+      return;
+    }
+    if (remoteHydratingRef.current) {
+      remoteHydratingRef.current = false;
       return;
     }
     const signature = sessionMessagesSignature(messages);
@@ -679,6 +695,82 @@ export function ManagerChatPanel({
     };
   }, [messages, projectId, saveSessionMutation, sessionId]);
 
+  useEffect(() => {
+    autoSessionEventSourceRef.current?.close();
+    autoSessionEventSourceRef.current = null;
+    if (autoSessionReconnectTimerRef.current !== null) {
+      window.clearTimeout(autoSessionReconnectTimerRef.current);
+      autoSessionReconnectTimerRef.current = null;
+    }
+    if (!sessionId || !isAutoOwnerSession || !managerAuto?.enabled || typeof window === "undefined") {
+      return;
+    }
+    let stopped = false;
+    let reconnectAttempt = 0;
+
+    const connect = () => {
+      if (stopped) return;
+      const source = new EventSource(apiUrl(`/projects/${projectId}/chat-sessions/${sessionId}/events`));
+      autoSessionEventSourceRef.current = source;
+      source.onopen = () => {
+        reconnectAttempt = 0;
+      };
+      source.onmessage = (event) => {
+        if (!event.data) return;
+        const payload = JSON.parse(event.data) as {
+          type?: string;
+          message?: ChatSessionMessageRecord;
+          message_id?: string;
+          event?: ChatStreamEvent;
+          revision?: number;
+        };
+        if (payload.type === "stream_event" && payload.message_id && payload.event) {
+          remoteHydratingRef.current = true;
+          applyStreamEvent(payload.message_id, payload.event);
+          return;
+        }
+        if (payload.type !== "message_upsert" || !payload.message) {
+          return;
+        }
+        const incoming = normalizeSessionMessages([payload.message]);
+        if (!incoming.length) return;
+        remoteHydratingRef.current = true;
+        if (typeof payload.revision === "number") {
+          sessionRevisionRef.current = payload.revision;
+        }
+        setMessages((current) => {
+          const merged = mergeChatMessagesById(current, incoming);
+          lastSavedSignatureRef.current = sessionMessagesSignature(merged);
+          return merged;
+        });
+      };
+      source.onerror = () => {
+        source.close();
+        if (autoSessionEventSourceRef.current === source) {
+          autoSessionEventSourceRef.current = null;
+        }
+        if (stopped) return;
+        refetchChatSession();
+        const delay = Math.min(10_000, 1_000 * 2 ** reconnectAttempt);
+        reconnectAttempt += 1;
+        autoSessionReconnectTimerRef.current = window.setTimeout(() => {
+          autoSessionReconnectTimerRef.current = null;
+          connect();
+        }, delay);
+      };
+    };
+    connect();
+    return () => {
+      stopped = true;
+      if (autoSessionReconnectTimerRef.current !== null) {
+        window.clearTimeout(autoSessionReconnectTimerRef.current);
+        autoSessionReconnectTimerRef.current = null;
+      }
+      autoSessionEventSourceRef.current?.close();
+      autoSessionEventSourceRef.current = null;
+    };
+  }, [isAutoOwnerSession, managerAuto?.enabled, projectId, refetchChatSession, sessionId]);
+
   useEffect(() => () => {
     if (saveTimerRef.current !== null && typeof window !== "undefined") {
       window.clearTimeout(saveTimerRef.current);
@@ -686,7 +778,11 @@ export function ManagerChatPanel({
     if (refreshTimerRef.current !== null && typeof window !== "undefined") {
       window.clearTimeout(refreshTimerRef.current);
     }
+    if (autoSessionReconnectTimerRef.current !== null && typeof window !== "undefined") {
+      window.clearTimeout(autoSessionReconnectTimerRef.current);
+    }
     activeStreamControllerRef.current?.abort();
+    autoSessionEventSourceRef.current?.close();
   }, []);
 
   useEffect(() => {

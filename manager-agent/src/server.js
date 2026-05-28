@@ -25,6 +25,8 @@ const MANAGER_CONTEXT_WINDOW_TOKENS = Number(process.env.MANAGER_CONTEXT_WINDOW_
 const MANAGER_COMPACTION_ENABLED = !/^(0|false|no|off)$/i.test(process.env.MANAGER_COMPACTION_ENABLED || "true");
 const MANAGER_COMPACTION_KEEP_RECENT_TOKENS = Number(process.env.MANAGER_COMPACTION_KEEP_RECENT_TOKENS || "120000");
 const MANAGER_COMPACTION_RESERVE_TOKENS = Number(process.env.MANAGER_COMPACTION_RESERVE_TOKENS || "16000");
+const PROVIDER_MAX_RETRIES = Number(process.env.MANAGER_AGENT_PROVIDER_MAX_RETRIES || "5");
+const PROVIDER_MAX_RETRY_DELAY_MS = Number(process.env.MANAGER_AGENT_PROVIDER_MAX_RETRY_DELAY_MS || "16000");
 
 function resolveManagerConfig(payload = {}) {
   const config = payload.manager_config && typeof payload.manager_config === "object" ? payload.manager_config : {};
@@ -172,7 +174,7 @@ Judgment:
 - Treat skills and MCP servers as optional ids for card execution, not as always-on built-in powers. Use list/search only when a card clearly benefits from reusable abilities, and prefer attaching by obvious id/name without reading details.
 - For simple conceptual questions, answer without tools.
 - For blueprint/card changes, use find_cards/get_card_detail for existing cards and find_assets for inputs. Use card write tools directly once you have enough context. Do not describe a change as complete unless a write tool succeeded.
-- Dependency ATTENTION is derived, not a persisted card status. Do not treat linked_assets as current dependency truth; use card.inputs, card.outputs, and asset.depends_on. If update_card or delete_card returns dependency_attention_check_recommended, call inspect_dependency_attention before deciding whether to continue. If a mechanical fix has a clear current_asset_id and preserves the workflow, update downstream inputs and rerun in upstream-first order. If the intent is ambiguous, report the ATTENTION to the user.
+- Dependency ATTENTION is derived, not a persisted card status. Do not treat linked_assets as current dependency truth; use card.inputs, card.outputs, and asset.depends_on. If update_card or delete_card returns dependency_attention_check_recommended, call inspect_dependency_attention before deciding whether to continue. For input_asset_outdated issues, the old asset_id is still saved in the downstream card's inputs; if current_asset_id is clear and preserves the workflow, call update_card to replace that input asset_id first, then rerun_card in upstream-first order. If you rerun without updating inputs, the executor will reuse the old asset. If the intent is ambiguous, report the ATTENTION to the user.
 - If a write tool returns ok:false, use the message/retry_hint to correct arguments and retry when the correction is clear. If it is not clear, inspect context or ask a focused question.
 ${webJudgmentLines.join("\n")}
 - Write project memory only when the user explicitly asks you to remember a durable preference, says a behavior should be the default, or corrects something you should avoid in future. Keep memory summaries short.
@@ -343,10 +345,15 @@ const TOOL_STATUS_LABELS = {
 };
 
 function jsonResponse(res, status, payload) {
+  jsonResponseWithHeaders(res, status, payload, {});
+}
+
+function jsonResponseWithHeaders(res, status, payload, headers = {}) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(body),
+    ...headers,
   });
   res.end(body);
 }
@@ -453,6 +460,8 @@ function compactToolTextPayload(toolName, payload) {
     };
   }
   if (toolName === "inspect_dependency_attention") {
+    const hasOutdatedInput = Array.isArray(payload.dependency_attention)
+      && payload.dependency_attention.some((issue) => issue && issue.kind === "input_asset_outdated" && issue.current_asset_id);
     return {
       project_id: payload.project_id,
       issue_count: payload.issue_count,
@@ -472,6 +481,9 @@ function compactToolTextPayload(toolName, payload) {
         : [],
       affected_downstream: Array.isArray(payload.affected_downstream) ? payload.affected_downstream.slice(0, 12) : [],
       repair_execution_order: payload.repair_execution_order,
+      manager_repair_guidance: hasOutdatedInput
+        ? "For input_asset_outdated, update the affected downstream card inputs[].asset_id from asset_id to current_asset_id before rerun_card. rerun_card reuses the card's saved inputs and will otherwise keep using the old asset."
+        : undefined,
       truncated: payload.truncated,
     };
   }
@@ -1001,7 +1013,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "inspect_dependency_attention",
       label: "Inspect dependency attention",
-      description: "Read derived dependency ATTENTION diagnostics. Call this after update_card/delete_card returns dependency_attention_check_recommended, or when checking stale/missing/outdated upstream asset chains.",
+      description: "Read derived dependency ATTENTION diagnostics. Call this after update_card/delete_card returns dependency_attention_check_recommended, or when checking stale/missing/outdated upstream asset chains. If it reports input_asset_outdated with current_asset_id, repair by update_card replacing the downstream inputs[].asset_id before rerun_card.",
       parameters: Type.Object({
         card_ids: Type.Optional(Type.Array(Type.String())),
         source_card_id: Type.Optional(Type.String()),
@@ -1309,7 +1321,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "update_card",
       label: "Update card",
-      description: "Update an existing blueprint card directly. Use this for modifying blueprint content, status, step, inputs, outputs, or linked assets. outputs[] must stay as explicit output contracts rather than label-only refs. Backend validation returns ok:false with retry hints when arguments need correction.",
+      description: "Update an existing blueprint card directly. Use this for modifying blueprint content, status, step, inputs, outputs, or linked assets. When repairing dependency ATTENTION/input_asset_outdated, update inputs[].asset_id to the reported current_asset_id before rerunning the card. outputs[] must stay as explicit output contracts rather than label-only refs. Backend validation returns ok:false with retry hints when arguments need correction.",
       parameters: Type.Object({
         card_id: Type.String(),
         card_type: Type.Optional(Type.String({ description: "Usually module or module_group." })),
@@ -1565,7 +1577,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "rerun_card",
       label: "Rerun card",
-      description: "Start a fresh rerun for a card after a previous run finished or failed.",
+      description: "Start a fresh rerun for a card after a previous run finished or failed. rerun_card reuses the card's saved inputs[].asset_id values; when repairing stale/outdated dependency chains, inspect dependency attention and update_card inputs to current asset ids before rerunning.",
       parameters: Type.Object({
         card_id: Type.String(),
         worker_type: Type.Optional(Type.String()),
@@ -2370,7 +2382,9 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     getApiKey: () => runtimeConfig.apiKey,
     toolExecution: "sequential",
     transport: "auto",
-    maxRetryDelayMs: 60000,
+    timeoutMs: TIMEOUT_MS,
+    maxRetries: PROVIDER_MAX_RETRIES,
+    maxRetryDelayMs: PROVIDER_MAX_RETRY_DELAY_MS,
     transformContext: async (messages) =>
       MANAGER_COMPACTION_ENABLED ? messages : messages.slice(-CONTEXT_FALLBACK_MESSAGE_LIMIT),
   });
@@ -2702,7 +2716,10 @@ async function handle(req, res) {
     try {
       const payload = await readJson(req);
       const response = await runManagerChat(payload);
-      jsonResponse(res, 200, response);
+      jsonResponseWithHeaders(res, 200, response, {
+        "Deprecation": "true",
+        "Link": "</chat-stream>; rel=\"successor-version\"",
+      });
     } catch (error) {
       jsonResponse(res, 502, { detail: error instanceof Error ? error.message : String(error) });
     }

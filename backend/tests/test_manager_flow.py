@@ -29,6 +29,7 @@ from app.services.executor_reviewer_worker import ExecutorReviewerWorker
 from app.services.executor_validation_service import ExecutorValidationService
 from app.services.flow_service import FlowService
 from app.services.manager_planner import DeepSeekManagerPlanner, ManagerPlanningError
+from app.services.provider_errors import ProviderAPIError
 from app.services.manager_auto_service import ManagerAutoService
 from app.services.manager_service import ManagerService
 from app.services.manager_wake_processor import ManagerWakeProcessor
@@ -169,6 +170,22 @@ class RaisingReviewerWorker:
         raise RuntimeError("reviewer api unavailable")
 
 
+class RaisingProviderReviewerWorker:
+    def review(self, **_kwargs) -> dict:
+        raise ProviderAPIError(
+            provider="deepseek",
+            role="reviewer",
+            category="provider_unavailable",
+            status_code=503,
+            error_code="service_unavailable_error",
+            message="Service is too busy.",
+            detail='{"error":{"code":"service_unavailable_error","message":"Service is too busy."}}',
+            retryable=True,
+            attempt=5,
+            max_attempts=5,
+        )
+
+
 class StreamingOnlyManagerService:
     def __init__(self) -> None:
         self.chat_called = False
@@ -210,6 +227,30 @@ class BrokenStreamManagerService(StreamingOnlyManagerService):
         for event in events:
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
         raise RuntimeError("stream interrupted")
+
+
+class StreamBackedChatManager(ManagerService):
+    def __init__(self, project_service: ProjectService) -> None:
+        super().__init__(project_service)
+        self.stream_called = False
+
+    def stream_chat(self, *_args: object, **_kwargs: object) -> object:
+        self.stream_called = True
+        events = [
+            {
+                "type": "response",
+                "response": {
+                    "message": "stream final response",
+                    "thinking": "stream thinking",
+                    "actions": [],
+                    "warnings": [],
+                    "metadata": {"source": "stream"},
+                },
+            },
+            {"type": "done"},
+        ]
+        for event in events:
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
 
 
 class InlineCommandWorkerAdapter(WorkerAdapter):
@@ -1023,6 +1064,56 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertFalse(auto_state.enabled)
         self.assertFalse(manager_service.chat_called)
 
+    def test_auto_wake_provider_api_failure_stops_without_manager_turn(self) -> None:
+        auto_service = ManagerAutoService(self.project_service)
+        wake_service = ManagerWakeService(self.project_service)
+        chat_session_service = ChatSessionService(self.project_service, auto_service)
+        session = chat_session_service.create_session("test-project")
+        auto_service.enable("test-project", session.session_id)
+        wake_service.enqueue(
+            ManagerWakeEvent(
+                wake_id="wake_provider_api_error",
+                project_id="test-project",
+                kind="executor_validation_failed",
+                source_type="run",
+                source_id="run_api_error",
+                card_id="card_deg_module",
+                run_id="run_api_error",
+                severity="warning",
+                message="Executor validation failed: reviewer API failed",
+                payload_summary={
+                    "status": "fail",
+                    "reviewer": {
+                        "mode": "reviewer_api_error",
+                        "provider_error": {"category": "provider_unavailable", "status_code": 503},
+                    },
+                    "issues": [{"code": "reviewer_api_error", "severity": "error"}],
+                },
+                idempotency_key="wake-provider-api-error",
+                created_at="2026-05-28T00:00:00Z",
+            )
+        )
+        manager_service = StreamingOnlyManagerService()
+        processor = ManagerWakeProcessor(
+            self.project_service,
+            auto_service,
+            wake_service,
+            chat_session_service,
+            manager_service,  # type: ignore[arg-type]
+        )
+
+        processor._process_project("test-project")
+
+        fetched = chat_session_service.get_session("test-project", session.session_id)
+        self.assertTrue(any(message.id == "auto_stop_provider_api_error_wake_provider_api_error" for message in fetched.messages))
+        self.assertFalse(any(message.id == "wake_response_wake_provider_api_error" for message in fetched.messages))
+        wake = wake_service.list_recent("test-project")[0]
+        self.assertEqual("done", wake.status)
+        auto_state = auto_service.get_state("test-project")
+        self.assertFalse(auto_state.enabled)
+        self.assertEqual("provider_api_error", auto_state.stop_reason)
+        self.assertFalse(manager_service.chat_called)
+
     def test_delete_chat_session_removes_persisted_thread(self) -> None:
         first = self.chat_session_service.create_session("test-project", "第一条")
         second = self.chat_session_service.create_session("test-project", "第二条")
@@ -1046,6 +1137,26 @@ class ManagerFlowTest(unittest.TestCase):
         manager = ManagerService(self.project_service, planner=FailingPlanner())
         with self.assertRaises(ManagerPlanningError):
             manager.chat("test-project", ChatRequest(message="hi"))
+
+    def test_default_chat_compatibility_wrapper_uses_stream_path(self) -> None:
+        manager = StreamBackedChatManager(self.project_service)
+
+        response = manager.chat("test-project", ChatRequest(message="hello"))
+
+        self.assertTrue(manager.stream_called)
+        self.assertEqual("stream final response", response.message)
+        self.assertEqual("stream thinking", response.thinking)
+        self.assertEqual({"source": "stream"}, response.metadata)
+
+    def test_default_chat_compatibility_wrapper_fails_without_stream_response(self) -> None:
+        class EmptyStreamManager(StreamBackedChatManager):
+            def stream_chat(self, *_args: object, **_kwargs: object) -> object:
+                yield b"data: {\"type\":\"done\"}\n\n"
+
+        manager = EmptyStreamManager(self.project_service)
+
+        with self.assertRaises(ManagerPlanningError):
+            manager.chat("test-project", ChatRequest(message="hello"))
 
     def test_analysis_suggestion_question_stays_plain_chat(self) -> None:
         response = self.manager.chat("test-project", ChatRequest(message="帮我看看我现在的分析流程，有没有还可以补充的"))
@@ -3631,7 +3742,7 @@ class ManagerPlannerCompatibilityTest(unittest.TestCase):
 
 
 class ExecutorReviewerWorkerTest(unittest.TestCase):
-    def test_reviewer_infrastructure_error_is_warning_not_fail(self) -> None:
+    def test_reviewer_infrastructure_error_fails_validation(self) -> None:
         with tempfile.TemporaryDirectory(prefix="validator-reviewer-infra-") as tmpdir:
             root = Path(tmpdir)
             run_id = "run_reviewer_infra"
@@ -3671,9 +3782,56 @@ class ExecutorReviewerWorkerTest(unittest.TestCase):
 
             report = service.validate_run("test-project", run_id)
 
-        self.assertEqual("warn", report.status)
+        self.assertEqual("fail", report.status)
         self.assertEqual("reviewer_infrastructure_error", report.reviewer["mode"])
         self.assertTrue(any(issue.code == "reviewer_infrastructure_error" for issue in report.issues))
+
+    def test_reviewer_provider_api_error_fails_with_structured_metadata(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="validator-reviewer-api-") as tmpdir:
+            root = Path(tmpdir)
+            run_id = "run_reviewer_api"
+            run_dir = root / "runs" / run_id
+            run_dir.mkdir(parents=True)
+            (root / "results").mkdir()
+            (root / "results" / "output.tsv").write_text("gene\tvalue\nA\t1\n", encoding="utf-8")
+            script = root / "scripts" / "generated" / run_id / "analyze.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("print('analysis')\n", encoding="utf-8")
+            atomic_write_json(
+                run_dir / "task_packet.json",
+                TaskPacket(
+                    task_id=run_id,
+                    project_id="test-project",
+                    card_id="card_review",
+                    goal="Review executor output.",
+                    worker_instructions="Run analysis.",
+                ).model_dump(),
+            )
+            atomic_write_json(
+                run_dir / "manifest.json",
+                Manifest(
+                    run_id=run_id,
+                    status="success",
+                    summary="done",
+                    created_assets=[CreatedAsset(role="output", path="results/output.tsv")],
+                    code_artifacts=[{"path": f"scripts/generated/{run_id}/analyze.py", "language": "python"}],
+                ).model_dump(),
+            )
+
+            project_service = object.__new__(ProjectService)
+            project_service.settings = get_settings()
+            project_service.project_path = lambda _project_id: root
+            service = ExecutorValidationService(project_service)
+            service.reviewer_worker = RaisingProviderReviewerWorker()
+
+            report = service.validate_run("test-project", run_id)
+
+        self.assertEqual("fail", report.status)
+        self.assertEqual("reviewer_api_error", report.reviewer["mode"])
+        self.assertEqual("provider_unavailable", report.reviewer["provider_error"]["category"])
+        self.assertEqual(503, report.reviewer["provider_error"]["status_code"])
+        self.assertEqual(5, report.reviewer["provider_error"]["max_attempts"])
+        self.assertTrue(any(issue.code == "reviewer_api_error" for issue in report.issues))
 
     def test_validation_merge_manager_brief_writes_reviewer_summary(self) -> None:
         with tempfile.TemporaryDirectory(prefix="validator-brief-reviewer-") as tmpdir:

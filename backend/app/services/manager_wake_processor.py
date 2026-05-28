@@ -22,6 +22,8 @@ from app.services.utils import utc_now
 logger = logging.getLogger(__name__)
 
 WAKE_POLL_INTERVAL_SECONDS = 5.0
+STREAM_EVENT_PUBLISH_INTERVAL_SECONDS = 0.125
+STREAM_EVENT_PERSIST_INTERVAL_SECONDS = 0.75
 
 
 class ManagerWakeProcessor:
@@ -74,6 +76,24 @@ class ManagerWakeProcessor:
         owner_session_id = auto_state.owner_session_id
         if not auto_state.enabled or not owner_session_id:
             self.manager_wake_service.mark_skipped(project_id, wake_event.wake_id, "Auto mode is disabled.")
+            return
+        if self._is_provider_api_failure_wake(wake_event):
+            message = (
+                f"因外部 API 错误，自动运行已停止，等待服务商或网络恢复后再继续。"
+                f"事件：{wake_event.message}"
+            )
+            self.manager_auto_service.stop(
+                project_id,
+                owner_session_id,
+                reason="provider_api_error",
+                message=message,
+            )
+            self.chat_session_service.append_messages(
+                project_id,
+                owner_session_id,
+                [self._system_message(f"auto_stop_provider_api_error_{wake_event.wake_id}", message)],
+            )
+            self.manager_wake_service.mark_done(project_id, wake_event.wake_id)
             return
         try:
             TERMINAL_RUN_WAKE_KINDS = {
@@ -158,6 +178,19 @@ class ManagerWakeProcessor:
         except Exception:
             logger.exception("Failed to settle auto wake stream message for project=%s wake=%s", project_id, wake_id)
 
+    @staticmethod
+    def _is_provider_api_failure_wake(event: ManagerWakeEvent) -> bool:
+        if event.kind != "executor_validation_failed":
+            return False
+        payload = event.payload_summary if isinstance(event.payload_summary, dict) else {}
+        reviewer = payload.get("reviewer")
+        if isinstance(reviewer, dict) and reviewer.get("mode") == "reviewer_api_error":
+            return True
+        issues = payload.get("issues")
+        if isinstance(issues, list):
+            return any(isinstance(issue, dict) and issue.get("code") == "reviewer_api_error" for issue in issues)
+        return False
+
     def _wake_notice_message(self, event: ManagerWakeEvent) -> ChatSessionMessage:
         content = f"后台事件：{event.message}"
         return ChatSessionMessage(
@@ -186,12 +219,21 @@ class ManagerWakeProcessor:
         self.chat_session_service.upsert_message(project_id, session_id, message)
         saw_response = False
         last_persisted_at = time.monotonic()
+        last_published_at = last_persisted_at
         for payload in self._iter_stream_payloads(project_id, request):
             message = self._apply_stream_payload(message, payload)
             event_type = payload.get("type")
             if event_type == "response":
                 saw_response = True
             now = time.monotonic()
+            if self._should_publish_stream_event(event_type, now, last_published_at):
+                self.chat_session_service.publish_stream_event(
+                    project_id,
+                    session_id,
+                    message_id=message.id,
+                    event=payload,
+                )
+                last_published_at = now
             if self._should_persist_stream_event(event_type, now, last_persisted_at):
                 self.chat_session_service.upsert_message(project_id, session_id, message)
                 last_persisted_at = now
@@ -203,6 +245,23 @@ class ManagerWakeProcessor:
             raise RuntimeError("Manager stream ended without a response.")
         self.chat_session_service.upsert_message(project_id, session_id, message)
         return ChatResponse(message=message.content, thinking=message.thinking, metadata={"token_usage": message.token_usage.model_dump() if message.token_usage else None})
+
+    @staticmethod
+    def _should_publish_stream_event(event_type: object, now: float, last_published_at: float) -> bool:
+        if event_type in {
+            "thinking_start",
+            "thinking_end",
+            "tool_start",
+            "tool_end",
+            "tool_report",
+            "proposal",
+            "response",
+            "done",
+            "error",
+            "usage",
+        }:
+            return True
+        return now - last_published_at >= STREAM_EVENT_PUBLISH_INTERVAL_SECONDS
 
     @staticmethod
     def _should_persist_stream_event(event_type: object, now: float, last_persisted_at: float) -> bool:
@@ -219,7 +278,7 @@ class ManagerWakeProcessor:
             "usage",
         }:
             return True
-        return now - last_persisted_at >= 0.75
+        return now - last_persisted_at >= STREAM_EVENT_PERSIST_INTERVAL_SECONDS
 
     def _iter_stream_payloads(self, project_id: str, request: ChatRequest) -> Iterator[dict[str, Any]]:
         buffer = ""

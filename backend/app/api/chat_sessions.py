@@ -1,4 +1,7 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_chat_session_service
@@ -47,6 +50,31 @@ def get_chat_session(
         return {"session": chat_session_service.get_session(project_id, session_id)}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{session_id}/events")
+def stream_chat_session_events(
+    project_id: str,
+    session_id: str,
+    chat_session_service: ChatSessionService = Depends(get_chat_session_service),
+) -> StreamingResponse:
+    try:
+        chat_session_service.get_session(project_id, session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    def iterator():
+        for event in chat_session_service.subscribe_events(project_id, session_id):
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
+
+    return StreamingResponse(
+        iterator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.put("/{session_id}")

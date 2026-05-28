@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from http import client
 from pathlib import Path
 from posixpath import normpath
 import py_compile
@@ -14,6 +13,13 @@ from pydantic import BaseModel, Field, ValidationError
 from app.core.config import Settings
 from app.models.runs import Manifest, TaskPacket, ValidationIssue
 from app.services.manager_planner import DeepSeekManagerPlanner, ManagerPlanningError
+from app.services.provider_errors import (
+    provider_error_from_exception,
+    provider_error_from_http_error,
+    provider_error_from_url_error,
+    provider_invalid_response_error,
+    retry_provider_call,
+)
 from app.services.utils import atomic_write_json, resolve_within, utc_now
 
 
@@ -275,25 +281,34 @@ class ExecutorReviewerWorker:
                 "anthropic-version": "2023-06-01",
             },
         )
-        try:
-            with request.urlopen(http_request, timeout=min(self.settings.manager_timeout_seconds, 90)) as response:
-                raw = response.read().decode("utf-8")
-        except error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise ManagerPlanningError(
-                DeepSeekManagerPlanner._build_http_error_message(
-                    status_code=exc.code,
-                    detail=detail,
+        def _send() -> str:
+            try:
+                with request.urlopen(http_request, timeout=min(self.settings.manager_timeout_seconds, 90)) as response:
+                    return response.read().decode("utf-8")
+            except error.HTTPError as exc:
+                raise provider_error_from_http_error(
+                    exc,
+                    provider="deepseek",
+                    role="reviewer",
                     configured_model=configured_model,
                     resolved_model=resolved_model,
-                )
-            ) from exc
-        except (error.URLError, TimeoutError, OSError, client.HTTPException) as exc:
-            raise ManagerPlanningError(f"Reviewer DeepSeek request failed: {exc}") from exc
+                ) from exc
+            except error.URLError as exc:
+                raise provider_error_from_url_error(exc, provider="deepseek", role="reviewer") from exc
+            except (TimeoutError, OSError) as exc:
+                raise provider_error_from_exception(exc, provider="deepseek", role="reviewer") from exc
+
+        raw = retry_provider_call(_send, max_attempts=5)
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise ManagerPlanningError("Reviewer DeepSeek returned invalid JSON at the HTTP layer.") from exc
+            raise provider_invalid_response_error(
+                exc,
+                provider="deepseek",
+                role="reviewer",
+                message="Reviewer DeepSeek returned invalid JSON at the HTTP layer.",
+                detail=raw[:1200],
+            ) from exc
 
     def _reviewer_api_key(self) -> str:
         value = self.settings.reviewer_api_key or self.settings.deepseek_api_key

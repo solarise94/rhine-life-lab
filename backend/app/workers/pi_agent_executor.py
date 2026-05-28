@@ -7,6 +7,7 @@ import csv
 import json
 import os
 import re
+import time
 from urllib import error, request
 
 from app.models.runs import CreatedAsset, Manifest, TaskPacket
@@ -14,6 +15,7 @@ from app.services.utils import atomic_write_json
 
 
 MAX_INPUT_BYTES = 24_000
+PROVIDER_RETRY_DELAYS_SECONDS = [1, 2, 4, 8]
 
 
 def _emit(payload: dict[str, Any]) -> None:
@@ -249,14 +251,32 @@ def _post_deepseek(prompt: str) -> dict[str, Any]:
             "anthropic-version": "2023-06-01",
         },
     )
-    try:
-        with request.urlopen(http_request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"DeepSeek executor request failed with HTTP {exc.code}: {detail}") from exc
-    except error.URLError as exc:
-        raise RuntimeError(f"DeepSeek executor request failed: {exc}") from exc
+    last_error: Exception | None = None
+    for attempt in range(1, 6):
+        try:
+            with request.urlopen(http_request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            last_error = RuntimeError(f"DeepSeek executor request failed with HTTP {exc.code}: {detail}")
+            if exc.code not in {408, 429, 500, 502, 503, 504}:
+                raise last_error from exc
+        except error.URLError as exc:
+            last_error = RuntimeError(f"DeepSeek executor request failed: {exc}")
+        except TimeoutError as exc:
+            last_error = RuntimeError(f"DeepSeek executor request timed out: {exc}")
+        if attempt < 5:
+            delay = PROVIDER_RETRY_DELAYS_SECONDS[min(attempt - 1, len(PROVIDER_RETRY_DELAYS_SECONDS) - 1)]
+            _emit(
+                {
+                    "type": "progress_update",
+                    "stage": "provider_retry",
+                    "severity": "warning",
+                    "message": f"DeepSeek executor API request failed; retrying attempt {attempt + 1}/5 after {delay}s.",
+                }
+            )
+            time.sleep(delay)
+    raise last_error or RuntimeError("DeepSeek executor request failed after retries.")
 
 
 def _build_prompt(packet: TaskPacket, project_root: Path) -> str:

@@ -39,6 +39,10 @@ export type { ChatTokenUsage } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api";
 
+export function apiUrl(path: string) {
+  return `${API_BASE}${path}`;
+}
+
 export interface ChatHistoryMessage {
   role: "user" | "manager";
   content: string;
@@ -338,15 +342,6 @@ export const api = {
   getAdvancedProposals(projectId: string) {
     return request<{ items: unknown[] }>(`/projects/${projectId}/advanced/proposals`);
   },
-  sendChat(projectId: string, message: string, messages: ChatHistoryMessage[] = [], context: ChatRequestContext = {}) {
-    return request<{ message: string; thinking?: string; proposal?: unknown; actions: Array<{ label: string; action: string }> }>(
-      `/projects/${projectId}/chat`,
-      {
-        method: "POST",
-        body: JSON.stringify({ message, context, thinking_effort: "medium", messages }),
-      },
-    );
-  },
   async streamChat(
     projectId: string,
     message: string,
@@ -413,19 +408,6 @@ export const api = {
     buffer += decoder.decode();
     flushBuffer();
   },
-  createChatJob(
-    projectId: string,
-    message: string,
-    thinkingEffort: "low" | "medium" | "high" = "medium",
-    messages: ChatHistoryMessage[] = [],
-    context: ChatRequestContext = {},
-    sessionId?: string | null,
-  ) {
-    return request<{ job_id: string; status: string }>(`/projects/${projectId}/chat-jobs`, {
-      method: "POST",
-      body: JSON.stringify({ message, session_id: sessionId ?? null, context, thinking_effort: thinkingEffort, messages }),
-    });
-  },
   getManagerAuto(projectId: string, sessionId?: string | null) {
     const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
     return request<{ state: ManagerAutoState; is_owner: boolean; btw_mode: boolean }>(`/projects/${projectId}/manager-auto${query}`);
@@ -450,14 +432,6 @@ export const api = {
       body: JSON.stringify({ session_id: sessionId, text, message_id: messageId ?? null, trigger_wake: true }),
       },
     );
-  },
-  getChatJob(projectId: string, jobId: string) {
-    return request<{
-      job_id: string;
-      status: "queued" | "running" | "succeeded" | "failed";
-      response: { message: string; thinking?: string; proposal?: unknown; actions: Array<{ label: string; action: string }> } | null;
-      error: string | null;
-    }>(`/projects/${projectId}/chat-jobs/${jobId}`);
   },
   getRuntimeDependencyJob(projectId: string, jobId: string) {
     return request<{

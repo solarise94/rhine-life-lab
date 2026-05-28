@@ -203,7 +203,7 @@ BLUEPRINT_CODEX_COMMAND_JSON=["codex","exec","{executor_prompt_path}"]
 python3.13 -m venv .venv/backend
 .venv/backend/bin/pip install -e backend
 .venv/backend/bin/python scripts/generate_backend_schemas.py
-.venv/backend/bin/uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
+.venv/backend/bin/uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 18001
 ```
 
 前端：
@@ -211,7 +211,7 @@ python3.13 -m venv .venv/backend
 ```bash
 cd frontend
 npm install
-NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000/api npm run dev
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18001/api npm run dev
 ```
 
 Manager agent：

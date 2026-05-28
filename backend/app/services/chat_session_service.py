@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+import logging
+from queue import Empty, Full, Queue
 import re
+import threading
 from uuid import uuid4
 
 from app.models.chat import ChatSession, ChatSessionMessage, ChatSessionSummary
@@ -9,10 +13,15 @@ from app.services.project_service import ProjectService
 from app.services.utils import utc_now
 
 
+logger = logging.getLogger(__name__)
+
+
 class ChatSessionService:
     def __init__(self, project_service: ProjectService, manager_auto_service: ManagerAutoService | None = None) -> None:
         self.project_service = project_service
         self.manager_auto_service = manager_auto_service
+        self._subscriber_lock = threading.Lock()
+        self._subscribers: dict[tuple[str, str], list[Queue[dict]]] = {}
 
     def list_sessions(self, project_id: str) -> list[ChatSessionSummary]:
         sessions = self.project_service.graph_store(project_id).load_chat_sessions()
@@ -77,6 +86,7 @@ class ChatSessionService:
             session.updated_at = utc_now()
             session.revision += 1
             store.save_chat_sessions(sessions)
+            self._publish_session_event(project_id, session_id, {"type": "session_saved", "session": session.model_dump()})
             return self._decorate_session(project_id, session)
 
     def append_messages(
@@ -107,6 +117,16 @@ class ChatSessionService:
                 session.updated_at = utc_now()
                 session.revision += 1
                 store.save_chat_sessions(sessions)
+                for message in messages:
+                    self._publish_session_event(
+                        project_id,
+                        session_id,
+                        {
+                            "type": "message_upsert",
+                            "message": message.model_dump(),
+                            "revision": session.revision,
+                        },
+                    )
             return self._decorate_session(project_id, session)
 
     def upsert_message(self, project_id: str, session_id: str, message: ChatSessionMessage) -> ChatSession:
@@ -127,7 +147,55 @@ class ChatSessionService:
             session.updated_at = utc_now()
             session.revision += 1
             store.save_chat_sessions(sessions)
+            self._publish_session_event(
+                project_id,
+                session_id,
+                {
+                    "type": "message_upsert",
+                    "message": message.model_dump(),
+                    "revision": session.revision,
+                },
+            )
             return self._decorate_session(project_id, session)
+
+    def subscribe_events(self, project_id: str, session_id: str) -> Iterator[dict]:
+        queue: Queue[dict] = Queue(maxsize=256)
+        key = (project_id, session_id)
+        with self._subscriber_lock:
+            self._subscribers.setdefault(key, []).append(queue)
+        try:
+            while True:
+                try:
+                    yield queue.get(timeout=15)
+                except Empty:
+                    yield {"type": "heartbeat"}
+        finally:
+            with self._subscriber_lock:
+                subscribers = self._subscribers.get(key, [])
+                if queue in subscribers:
+                    subscribers.remove(queue)
+                if not subscribers:
+                    self._subscribers.pop(key, None)
+
+    def publish_stream_event(
+        self,
+        project_id: str,
+        session_id: str,
+        *,
+        message_id: str,
+        event: dict,
+        revision: int | None = None,
+    ) -> None:
+        self._publish_session_event(
+            project_id,
+            session_id,
+            {
+                "type": "stream_event",
+                "message_id": message_id,
+                "event": event,
+                "revision": revision,
+            },
+        )
 
     def delete_session(self, project_id: str, session_id: str) -> None:
         lock = self.project_service.lock_for(project_id)
@@ -166,3 +234,18 @@ class ChatSessionService:
         decorated.auto_mode_state = auto_state.state if decorated.auto_owner and auto_state.enabled else None
         decorated.btw_mode = bool(auto_state.enabled and auto_state.owner_session_id and auto_state.owner_session_id != session.session_id)
         return decorated
+
+    def _publish_session_event(self, project_id: str, session_id: str, payload: dict) -> None:
+        key = (project_id, session_id)
+        with self._subscriber_lock:
+            subscribers = list(self._subscribers.get(key, []))
+        for queue in subscribers:
+            try:
+                queue.put_nowait(payload)
+            except Full:
+                logger.warning(
+                    "Dropping chat session event because subscriber queue is full: project_id=%s session_id=%s event_type=%s",
+                    project_id,
+                    session_id,
+                    payload.get("type"),
+                )

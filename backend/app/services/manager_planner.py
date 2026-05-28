@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from http import client
 from typing import Any, Literal
 from urllib import error, request
 
@@ -10,6 +9,14 @@ from pydantic import BaseModel, Field, ValidationError
 from app.core.config import Settings, get_settings
 from app.models.chat import ChatRequest
 from app.models.patches import PatchOp, PatchType
+from app.services.provider_errors import (
+    provider_error_from_exception,
+    provider_error_from_http_error,
+    provider_error_from_http_status_detail,
+    provider_error_from_url_error,
+    provider_invalid_response_error,
+    retry_provider_call,
+)
 
 
 SUPPORTED_OPS = [
@@ -252,28 +259,35 @@ class DeepSeekManagerPlanner:
                 "anthropic-version": "2023-06-01",
             },
         )
-        try:
-            with request.urlopen(http_request, timeout=self.settings.manager_timeout_seconds) as response:
-                raw = response.read().decode("utf-8")
-        except error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise ManagerPlanningError(
-                self._build_http_error_message(
-                    status_code=exc.code,
-                    detail=detail,
+        def _send() -> str:
+            try:
+                with request.urlopen(http_request, timeout=self.settings.manager_timeout_seconds) as response:
+                    return response.read().decode("utf-8")
+            except error.HTTPError as exc:
+                raise provider_error_from_http_error(
+                    exc,
+                    provider="deepseek",
+                    role="manager",
                     configured_model=self.settings.manager_model,
                     resolved_model=resolved_model,
-                )
-            ) from exc
-        except error.URLError as exc:
-            raise ManagerPlanningError(f"DeepSeek request failed: {exc.reason}") from exc
-        except (TimeoutError, OSError, client.HTTPException) as exc:
-            raise ManagerPlanningError(f"DeepSeek request failed: {exc}") from exc
+                ) from exc
+            except error.URLError as exc:
+                raise provider_error_from_url_error(exc, provider="deepseek", role="manager") from exc
+            except (TimeoutError, OSError) as exc:
+                raise provider_error_from_exception(exc, provider="deepseek", role="manager") from exc
+
+        raw = retry_provider_call(_send, max_attempts=5)
 
         try:
             response_payload = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise ManagerPlanningError("DeepSeek returned invalid JSON at the HTTP layer.") from exc
+            raise provider_invalid_response_error(
+                exc,
+                provider="deepseek",
+                role="manager",
+                message="DeepSeek returned invalid JSON at the HTTP layer.",
+                detail=raw[:1200],
+            ) from exc
         return response_payload
 
     def _manager_api_key(self) -> str:
@@ -290,22 +304,15 @@ class DeepSeekManagerPlanner:
 
     @staticmethod
     def _build_http_error_message(status_code: int, detail: str, configured_model: str, resolved_model: str) -> str:
-        guidance = ""
-        try:
-            payload = json.loads(detail)
-        except json.JSONDecodeError:
-            payload = None
-        if isinstance(payload, dict):
-            error_payload = payload.get("error")
-            message = error_payload.get("message", "") if isinstance(error_payload, dict) else ""
-            if "does not support this tool_choice" in message:
-                guidance = (
-                    " Manager tool-use requests require a DeepSeek v4 model such as "
-                    "`deepseek-v4-pro` or `deepseek-v4-flash`."
-                )
-        if configured_model != resolved_model:
-            guidance += f" Configured model `{configured_model}` was normalized to `{resolved_model}`."
-        return f"DeepSeek request failed with HTTP {status_code}: {detail}{guidance}"
+        provider_error = provider_error_from_http_status_detail(
+            status_code,
+            detail,
+            provider="deepseek",
+            role="manager",
+            configured_model=configured_model,
+            resolved_model=resolved_model,
+        )
+        return f"DeepSeek request failed with HTTP {status_code}: {detail}{provider_error.message.removeprefix(detail)}"
 
     @staticmethod
     def _extract_tool_input(response_payload: dict) -> dict:
