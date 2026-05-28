@@ -76,6 +76,25 @@ export function CardDetailPanel({
             ) : null}
           </div>
         </div>
+        {workItem?.dependency_attention_count ? (
+          <div className="meta-block attention-block">
+            <h4>Dependency Attention</h4>
+            <div className="kv">
+              {(workItem.dependency_attention ?? []).map((issue) => (
+                <div key={issue.issue_id} className={`attention-detail ${issue.severity}`}>
+                  <div className="attention-detail-title">
+                    <span>{issue.kind}</span>
+                    <span>{issue.severity}</span>
+                  </div>
+                  <div className="meta-text">{issue.message || issue.asset_id || issue.issue_id}</div>
+                  {issue.current_asset_id ? (
+                    <div className="meta-text muted">Current asset: {issue.current_asset_id}</div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
         <div className="meta-block">
           <h4>Inputs</h4>
           <div className="kv">

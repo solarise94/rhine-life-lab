@@ -10,8 +10,9 @@ import {
   Trash2,
   Sparkles,
   Archive,
+  TriangleAlert,
 } from "lucide-react";
-import { Card, PythonRuntime, RRuntime, WorkerCapability, ExecutorProfile } from "@/lib/types";
+import { Card, PythonRuntime, RRuntime, WorkerCapability, ExecutorProfile, WorkItem } from "@/lib/types";
 import { CardStatusBadge } from "./CardStatusBadge";
 import { SpecialistAvatar } from "./SpecialistAvatar";
 import { FileBag } from "./FileBag";
@@ -48,6 +49,7 @@ export function ModuleCard({
   selectedRRuntime,
   onSelectPythonRuntime,
   onSelectRRuntime,
+  workItem,
 }: {
   projectId: string;
   card: Card;
@@ -72,6 +74,7 @@ export function ModuleCard({
   selectedRRuntime?: string;
   onSelectPythonRuntime?: (card: Card, runtime?: string) => void;
   onSelectRRuntime?: (card: Card, runtime?: string) => void;
+  workItem?: WorkItem;
 }) {
   const cardPages = useWorkspaceUiStore((s) => s.cardPageByProject[projectId] ?? EMPTY_CARD_PAGE_BY_ID);
   const setCardPage = useWorkspaceUiStore((s) => s.setCardPage);
@@ -105,6 +108,8 @@ export function ModuleCard({
 
   const slideOffset = useMemo(() => -(pageIndex * 25), [pageIndex]);
   const collapsedSummary = card.progress_note || card.summary || card.why || "等待执行";
+  const attentionCount = workItem?.dependency_attention_count ?? 0;
+  const attentionSeverity = workItem?.attention_severity ?? "warning";
 
   function handleDot(page: CardPage, e: React.MouseEvent) {
     e.stopPropagation();
@@ -136,6 +141,11 @@ export function ModuleCard({
             <div className="badge-status-row">
               <CardStatusBadge status={card.status} />
               {card.aggregate_status ? <span className="pill badge-pill">{card.aggregate_status}</span> : null}
+              {attentionCount > 0 ? (
+                <span className={`attention-badge ${attentionSeverity}`} title={`${attentionCount} dependency attention issue(s)`}>
+                  <TriangleAlert size={11} /> ATTENTION
+                </span>
+              ) : null}
             </div>
           </div>
         </div>
@@ -147,6 +157,7 @@ export function ModuleCard({
           <span>{card.inputs.length} in</span>
           <span>{card.outputs.length} out</span>
           <span>{fileCount} files</span>
+          {attentionCount > 0 ? <span className={`attention-meta ${attentionSeverity}`}>{attentionCount} attention</span> : null}
         </div>
       </div>
 

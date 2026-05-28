@@ -712,15 +712,6 @@ class WorkerService:
                     manifest_created_assets=manifest.created_assets,
                     expected_outputs=task_packet.expected_outputs,
                 )
-                downstream_rebinds = self._rebind_downstream_inputs(
-                    cards=cards,
-                    modules=graph.modules,
-                    assets=graph.assets,
-                    claims=graph.claims,
-                    producer_card=card,
-                    previous_outputs_by_role=previous_outputs_by_role,
-                    new_assets=created_assets,
-                )
                 self._supersede_previous_outputs(
                     card,
                     graph.assets,
@@ -728,13 +719,6 @@ class WorkerService:
                     run_id,
                     previous_asset_ids=previous_output_asset_ids,
                 )
-                if downstream_rebinds:
-                    graph.metadata["last_downstream_rebind"] = {
-                        "run_id": run_id,
-                        "card_id": card.card_id,
-                        "rebinds": downstream_rebinds,
-                        "created_at": utc_now(),
-                    }
                 graph.report_items = [item for item in graph.report_items if item.item_id != f"report_{run_id}"]
                 graph.report_items.append(
                     ReportItem(
@@ -2030,75 +2014,6 @@ class WorkerService:
             if role and role in declared_roles and asset.status == "valid":
                 outputs_by_role[role] = asset
         return outputs_by_role
-
-    @staticmethod
-    def _rebind_downstream_inputs(
-        *,
-        cards: list[Card],
-        modules: list[Module],
-        assets: list[Asset],
-        claims: list[Claim],
-        producer_card: Card,
-        previous_outputs_by_role: dict[str, Asset],
-        new_assets: list[Asset],
-    ) -> list[dict[str, str]]:
-        role_to_new_asset = {
-            str(asset.metadata.get("role") or asset.metadata.get("planned_asset_id") or ""): asset
-            for asset in new_assets
-            if asset.status == "valid" and (asset.metadata.get("role") or asset.metadata.get("planned_asset_id"))
-        }
-        replacements = {
-            old_asset.asset_id: role_to_new_asset[role].asset_id
-            for role, old_asset in previous_outputs_by_role.items()
-            if role in role_to_new_asset and old_asset.asset_id != role_to_new_asset[role].asset_id
-        }
-        if not replacements:
-            return []
-
-        rebinds: list[dict[str, str]] = []
-        for card in cards:
-            if card.card_id == producer_card.card_id:
-                continue
-            touched = False
-            for item in card.inputs:
-                if item.asset_id in replacements:
-                    item.asset_id = replacements[item.asset_id]
-                    item.status = "materialized"
-                    touched = True
-                    rebinds.append({"target": "card_input", "card_id": card.card_id, "asset_id": item.asset_id})
-            linked_assets = [replacements.get(asset_id, asset_id) for asset_id in card.linked_assets]
-            if linked_assets != card.linked_assets:
-                card.linked_assets = list(dict.fromkeys(linked_assets))
-                touched = True
-                rebinds.append({"target": "card_linked_assets", "card_id": card.card_id, "asset_id": ",".join(card.linked_assets)})
-            if touched and card.status in {"accepted", "rejected"}:
-                card.status = "stale"
-                card.progress_note = "上游输入资产已更新，需要重新审核或重跑。"
-
-        for module in modules:
-            next_depends = [replacements.get(asset_id, asset_id) for asset_id in module.depends_on_assets]
-            if next_depends != module.depends_on_assets:
-                module.depends_on_assets = list(dict.fromkeys(next_depends))
-                if module.status in {"accepted", "rejected"}:
-                    module.status = "stale"
-                rebinds.append({"target": "module_depends_on_assets", "module_id": module.module_id, "asset_id": ",".join(module.depends_on_assets)})
-
-        for asset in assets:
-            next_depends = [replacements.get(asset_id, asset_id) for asset_id in asset.depends_on]
-            if next_depends != asset.depends_on:
-                asset.depends_on = list(dict.fromkeys(next_depends))
-                if asset.status == "valid":
-                    asset.status = "stale"
-                rebinds.append({"target": "asset_depends_on", "asset_id": asset.asset_id, "depends_on": ",".join(asset.depends_on)})
-
-        for claim in claims:
-            next_depends = [replacements.get(asset_id, asset_id) for asset_id in claim.depends_on_assets]
-            if next_depends != claim.depends_on_assets:
-                claim.depends_on_assets = list(dict.fromkeys(next_depends))
-                if claim.status == "valid":
-                    claim.status = "stale"
-                rebinds.append({"target": "claim_depends_on_assets", "claim_id": claim.claim_id, "asset_id": ",".join(claim.depends_on_assets)})
-        return rebinds
 
     @staticmethod
     def _supersede_previous_outputs(

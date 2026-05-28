@@ -141,6 +141,7 @@ Core model:
 
 Available capabilities:
 - inspect_project_summary reads a compact project summary with card ids/titles/status/steps, active runs, blockers, and asset counts.
+- inspect_dependency_attention reads derived dependency ATTENTION diagnostics. Use it after update_card/delete_card returns dependency_attention_check_recommended, or when summary/detail reports dependency_attention.
 - find_cards searches cards by query, status, step, or asset_id.
 - find_assets searches materialized and planned assets by role, artifact_class, format, producer card, status, or query.
 - get_card_detail reads one card body, executor_context, inputs, outputs, and recent runs.
@@ -171,6 +172,7 @@ Judgment:
 - Treat skills and MCP servers as optional ids for card execution, not as always-on built-in powers. Use list/search only when a card clearly benefits from reusable abilities, and prefer attaching by obvious id/name without reading details.
 - For simple conceptual questions, answer without tools.
 - For blueprint/card changes, use find_cards/get_card_detail for existing cards and find_assets for inputs. Use card write tools directly once you have enough context. Do not describe a change as complete unless a write tool succeeded.
+- Dependency ATTENTION is derived, not a persisted card status. Do not treat linked_assets as current dependency truth; use card.inputs, card.outputs, and asset.depends_on. If update_card or delete_card returns dependency_attention_check_recommended, call inspect_dependency_attention before deciding whether to continue. If a mechanical fix has a clear current_asset_id and preserves the workflow, update downstream inputs and rerun in upstream-first order. If the intent is ambiguous, report the ATTENTION to the user.
 - If a write tool returns ok:false, use the message/retry_hint to correct arguments and retry when the correction is clear. If it is not clear, inspect context or ask a focused question.
 ${webJudgmentLines.join("\n")}
 - Write project memory only when the user explicitly asks you to remember a durable preference, says a behavior should be the default, or corrects something you should avoid in future. Keep memory summaries short.
@@ -205,6 +207,10 @@ const TOOL_STATUS_LABELS = {
   inspect_project_summary: {
     active: "正在概览项目",
     done: "已概览项目",
+  },
+  inspect_dependency_attention: {
+    active: "正在检查依赖风险",
+    done: "已检查依赖风险",
   },
   find_cards: {
     active: "正在查找卡片",
@@ -446,6 +452,29 @@ function compactToolTextPayload(toolName, payload) {
       hint: "Full payload is stored in tool details. Prefer find_assets for choosing specific asset ids.",
     };
   }
+  if (toolName === "inspect_dependency_attention") {
+    return {
+      project_id: payload.project_id,
+      issue_count: payload.issue_count,
+      returned_issue_count: payload.returned_issue_count,
+      severity_counts: payload.severity_counts,
+      dependency_attention: Array.isArray(payload.dependency_attention)
+        ? payload.dependency_attention.slice(0, 12).map((issue) => ({
+            issue_id: issue.issue_id,
+            kind: issue.kind,
+            severity: issue.severity,
+            card_id: issue.card_id,
+            asset_id: issue.asset_id,
+            current_asset_id: issue.current_asset_id,
+            producer_card_id: issue.producer_card_id,
+            message: issue.message,
+          }))
+        : [],
+      affected_downstream: Array.isArray(payload.affected_downstream) ? payload.affected_downstream.slice(0, 12) : [],
+      repair_execution_order: payload.repair_execution_order,
+      truncated: payload.truncated,
+    };
+  }
   if (["create_card", "update_card", "delete_card", "configure_card_execution"].includes(toolName)) {
     return {
       ok: payload.ok ?? true,
@@ -453,6 +482,10 @@ function compactToolTextPayload(toolName, payload) {
       card: payload.card ? compactCardForText(payload.card) : undefined,
       updated_card_ids: payload.updated_card_ids,
       message: payload.message,
+      dependency_attention_check_recommended: payload.dependency_attention_check_recommended,
+      affected_downstream: Array.isArray(payload.affected_downstream) ? payload.affected_downstream.slice(0, 8) : undefined,
+      recommended_next_tool: payload.recommended_next_tool,
+      repair_execution_order_hint: payload.repair_execution_order_hint,
     };
   }
   if (payload.asset || payload.preview) {
@@ -634,6 +667,15 @@ function summarizeToolPayload(toolName, payload) {
       materialized_assets: payload.counts?.materialized_assets,
       planned_assets: payload.counts?.planned_assets,
       blockers: payload.counts?.blockers,
+      dependency_attention: payload.counts?.dependency_attention,
+    };
+  }
+  if (toolName === "inspect_dependency_attention") {
+    return {
+      issue_count: payload.issue_count,
+      returned_issue_count: payload.returned_issue_count,
+      affected_downstream: Array.isArray(payload.affected_downstream) ? payload.affected_downstream.length : undefined,
+      repair_execution_order: Array.isArray(payload.repair_execution_order) ? payload.repair_execution_order.length : undefined,
     };
   }
   if (toolName === "find_cards" || toolName === "find_assets") {
@@ -647,6 +689,7 @@ function summarizeToolPayload(toolName, payload) {
       card_id: payload.card?.card_id,
       status: payload.card?.status,
       runs: Array.isArray(payload.runs) ? payload.runs.length : undefined,
+      dependency_attention: Array.isArray(payload.dependency_attention) ? payload.dependency_attention.length : undefined,
     };
   }
   if (toolName === "get_asset_detail") {
@@ -853,6 +896,8 @@ function summarizeToolPayload(toolName, payload) {
       card_step: payload.card?.step,
       timeline_cards: Array.isArray(payload.timeline?.cards) ? payload.timeline.cards.length : undefined,
       timeline_assets: Array.isArray(payload.timeline?.assets) ? payload.timeline.assets.length : undefined,
+      dependency_attention_check_recommended: payload.dependency_attention_check_recommended,
+      affected_downstream: Array.isArray(payload.affected_downstream) ? payload.affected_downstream.length : undefined,
     };
   }
   if (payload.asset) {
@@ -951,6 +996,34 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           sessionId,
         );
         return toolTextResult("inspect_project_summary", payload);
+      },
+    },
+    {
+      name: "inspect_dependency_attention",
+      label: "Inspect dependency attention",
+      description: "Read derived dependency ATTENTION diagnostics. Call this after update_card/delete_card returns dependency_attention_check_recommended, or when checking stale/missing/outdated upstream asset chains.",
+      parameters: Type.Object({
+        card_ids: Type.Optional(Type.Array(Type.String())),
+        source_card_id: Type.Optional(Type.String()),
+        include_recursive_downstream: Type.Optional(Type.Boolean()),
+        max_issues: Type.Optional(Type.Number()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        const payload = await callLoggedTool(
+          "inspect_dependency_attention",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/dependency-attention/inspect`,
+          {
+            method: "POST",
+            body: params,
+          },
+          signal,
+          sessionId,
+        );
+        return toolTextResult("inspect_dependency_attention", payload);
       },
     },
     {

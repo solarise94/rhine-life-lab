@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -18,7 +19,7 @@ from app.core.config import Settings, get_settings
 from app.models.cards import Card
 from app.models.chat import ChatRequest, ChatSessionMessage
 from app.models.executor import ExecutorContext
-from app.models.graph import Asset, Claim, GraphState, Module, ModuleRef
+from app.models.graph import Asset, Claim, GraphState, Module, ModuleRef, RunRecord
 from app.models.patches import GraphPatch, ValidationResult
 from app.models.runs import CreatedAsset, ExecutorValidationReport, ExpectedOutput, Manifest, TaskPacket
 from app.services.chat_session_service import ChatSessionService
@@ -103,6 +104,15 @@ def expected_output_spec(
         "path_hint": path_hint,
         "asset_id": asset_id,
     }
+
+
+def _is_slow_skip() -> bool:
+    v = os.environ.get("SKIP_SLOW_TESTS", "").strip().lower()
+    return v in {"1", "true", "yes"}
+
+
+def _stub_reviewer_pass(**kwargs: object) -> dict:
+    return {"verdict": "pass", "summary": "test stub reviewer", "issues": [], "mode": "test_stub"}
 
 
 class AnswerOnlyPlanner:
@@ -198,6 +208,7 @@ class ManagerFlowTest(unittest.TestCase):
             "{python} -m app.workers.demo_executor --task-packet {task_packet_path} --run-dir {run_dir} --project-root {project_root}"
         )
         settings.data_root = Path(self.tmpdir)
+        self._seed_library_registry(Path(self.tmpdir))
         self.project_service = ProjectService()
         self.project_service.create_project(
             project_id="test-project",
@@ -220,6 +231,7 @@ class ManagerFlowTest(unittest.TestCase):
         self.project_file_service = ProjectFileService(self.project_service)
         self.chat_session_service = ChatSessionService(self.project_service)
         self.worker = WorkerService(self.project_service, self.manifest_service, self.runtime_approval_service)
+        self.worker.executor_validation_service.reviewer_worker.review = _stub_reviewer_pass
         self.flow_service = FlowService(self.project_service)
 
     def tearDown(self) -> None:
@@ -232,6 +244,59 @@ class ManagerFlowTest(unittest.TestCase):
         settings.executor_conda_base = self._original_executor_conda_base
         settings.worker_timeout_seconds = self._original_worker_timeout_seconds
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @staticmethod
+    def _seed_library_registry(data_root: Path) -> None:
+        """Pre-write library registry files so _ensure_registry skips real HTTP summarizer calls."""
+        library_dir = data_root / "_system" / "library"
+        library_dir.mkdir(parents=True, exist_ok=True)
+        now = "2026-05-28T00:00:00Z"
+        skill_entry = {
+            "id": "spatial-10x-converter",
+            "kind": "skill",
+            "name": "spatial-10x-converter",
+            "summary_short": "用于单细胞空间转录组数据格式转换",
+            "summary_long": "Convert 10x spatial transcriptomics data formats.",
+            "tags": ["skill", "spatial", "10x", "converter"],
+            "use_cases": ["单细胞空间转录组分析"],
+            "source_path": f"{data_root}/library/skills/spatial-10x-converter/SKILL.md",
+            "source_hash": "test-seed-hash-skill",
+            "enabled": True,
+            "runtime_requirements": [],
+            "compatibility_notes": [],
+            "supported_runtimes": [],
+            "launch_hint": None,
+            "generated_by": "test-seed",
+            "generated_at": now,
+            "metadata": {},
+        }
+        mcp_entry = {
+            "id": "omicverse",
+            "kind": "mcp",
+            "name": "omicverse",
+            "summary_short": "用于单细胞组学分析与运行时辅助",
+            "summary_long": "OmicVerse MCP server for omics-oriented tools.",
+            "tags": ["mcp", "omics", "runtime"],
+            "use_cases": ["单细胞组学运行时辅助"],
+            "source_path": None,
+            "source_hash": "test-seed-hash-mcp",
+            "enabled": True,
+            "runtime_requirements": ["omicverse"],
+            "compatibility_notes": [],
+            "supported_runtimes": ["omicverse"],
+            "launch_hint": "requires omicverse runtime",
+            "generated_by": "test-seed",
+            "generated_at": now,
+            "metadata": {"source": "test-seed"},
+        }
+        atomic_write_json(
+            library_dir / "skills.json",
+            {"kind": "skill", "items": [skill_entry], "updated_at": now},
+        )
+        atomic_write_json(
+            library_dir / "mcps.json",
+            {"kind": "mcp", "items": [mcp_entry], "updated_at": now},
+        )
 
     def _add_single_submodule_group_fixture(self) -> tuple[str, str, str, str]:
         store = self.project_service.graph_store("test-project")
@@ -387,6 +452,7 @@ class ManagerFlowTest(unittest.TestCase):
     def test_manager_lightweight_project_tools_avoid_full_payloads(self) -> None:
         summary = self.manager.blueprint_tools.inspect_project_summary("test-project")
         self.assertIn("counts", summary)
+        self.assertIn("dependency_attention", summary["counts"])
         self.assertTrue(summary["cards"])
         self.assertIn("card_id", summary["cards"][0])
         self.assertNotIn("executor_context", summary["cards"][0])
@@ -404,6 +470,7 @@ class ManagerFlowTest(unittest.TestCase):
         detail = self.manager.blueprint_tools.get_card_detail("test-project", card_id)
         self.assertEqual(card_id, detail["card"]["card_id"])
         self.assertIn("executor_context", detail["card"])
+        self.assertIn("dependency_attention", detail)
 
         plan = self.manager.blueprint_tools.plan_card_write(
             "test-project",
@@ -429,6 +496,67 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue(created["ok"])
         self.assertEqual("planned_lightweight_card", created["card_id"])
         self.assertNotIn("timeline", created)
+
+    def test_dependency_attention_inspect_tool_and_mutation_hint(self) -> None:
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        graph = store.load_graph()
+        producer = Card.model_validate(
+            {
+                "card_id": "card_attention_source",
+                "card_type": "module",
+                "title": "Attention source",
+                "status": "accepted",
+                "step": 1,
+                "summary": "Source card",
+                "outputs": [output_contract("table", role="source_table", asset_id="asset_new_source")],
+                "linked_assets": ["asset_new_source"],
+            }
+        )
+        downstream = Card.model_validate(
+            {
+                "card_id": "card_attention_downstream",
+                "card_type": "module",
+                "title": "Attention downstream",
+                "status": "accepted",
+                "step": 2,
+                "summary": "Downstream card",
+                "inputs": [{"label": "table", "asset_id": "asset_old_source"}],
+                "outputs": [output_contract("report", role="report", asset_id="asset_downstream_report")],
+            }
+        )
+        cards.extend([producer, downstream])
+        graph.runs.extend(
+            [
+                RunRecord(run_id="run_attention_old", card_id="card_attention_source", status="reviewed", title="old", summary="old", started_at="2026-05-28T00:00:00Z"),
+                RunRecord(run_id="run_attention_new", card_id="card_attention_source", status="reviewed", title="new", summary="new", started_at="2026-05-28T00:01:00Z"),
+                RunRecord(run_id="run_attention_downstream", card_id="card_attention_downstream", status="reviewed", title="downstream", summary="downstream", started_at="2026-05-28T00:02:00Z"),
+            ]
+        )
+        graph.assets.extend(
+            [
+                Asset(asset_id="asset_old_source", asset_type="table", title="Old source", status="valid", created_by_run="run_attention_old", path="results/old.tsv", summary="Old source", metadata={"role": "source_table"}),
+                Asset(asset_id="asset_new_source", asset_type="table", title="New source", status="valid", created_by_run="run_attention_new", path="results/new.tsv", summary="New source", metadata={"role": "source_table"}),
+                Asset(asset_id="asset_downstream_report", asset_type="document", title="Report", status="valid", created_by_run="run_attention_downstream", path="results/report.html", summary="Report", depends_on=["asset_old_source"], metadata={"role": "report"}),
+            ]
+        )
+        store.save_cards(cards)
+        store.save_graph(graph)
+
+        inspect = self.manager.blueprint_tools.inspect_dependency_attention(
+            "test-project",
+            {"source_card_id": "card_attention_source", "include_recursive_downstream": True},
+        )
+        self.assertEqual(["card_attention_downstream"], inspect["repair_execution_order"])
+        self.assertIn("input_asset_outdated", {issue["kind"] for issue in inspect["dependency_attention"]})
+
+        updated = self.manager.blueprint_tools.update_card(
+            "test-project",
+            {"card_id": "card_attention_source", "summary": "Updated source card"},
+        )
+        self.assertTrue(updated["dependency_attention_check_recommended"])
+        self.assertEqual(["card_attention_downstream"], updated["repair_execution_order_hint"])
+        self.assertNotIn("dependency_attention", updated)
 
     def test_review_replaces_planned_output_asset_ids_with_materialized_assets(self) -> None:
         card = Card.model_validate(
@@ -475,7 +603,7 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertNotIn("planned_filtered_counts", output_asset_ids)
         self.assertIn("asset_run_001_filtered_counts_1", output_asset_ids)
 
-    def test_rebind_downstream_inputs_replaces_superseded_upstream_assets(self) -> None:
+    def test_dependency_attention_replaces_automatic_downstream_rebind(self) -> None:
         producer = Card.model_validate(
             {
                 "card_id": "card_qc",
@@ -483,8 +611,8 @@ class ManagerFlowTest(unittest.TestCase):
                 "title": "QC",
                 "status": "accepted",
                 "summary": "QC",
-                "linked_assets": ["asset_old_counts"],
-                "outputs": [output_contract("counts", role="filtered_counts", asset_id="asset_old_counts")],
+                "linked_assets": ["asset_new_counts"],
+                "outputs": [output_contract("counts", role="filtered_counts", asset_id="asset_new_counts")],
             }
         )
         consumer = Card.model_validate(
@@ -545,24 +673,50 @@ class ManagerFlowTest(unittest.TestCase):
             depends_on_assets=["asset_old_counts"],
         )
 
-        rebinds = self.worker._rebind_downstream_inputs(
-            cards=[producer, consumer],
-            modules=[module],
-            assets=[old_asset, new_asset, downstream_asset],
-            claims=[claim],
-            producer_card=producer,
-            previous_outputs_by_role={"filtered_counts": old_asset},
-            new_assets=[new_asset],
-        )
+        snapshot = {
+            "cards": [producer, consumer],
+            "graph": GraphState(
+                modules=[module],
+                assets=[old_asset, new_asset, downstream_asset],
+                claims=[claim],
+                runs=[
+                    RunRecord(
+                        run_id="run_old",
+                        card_id="card_qc",
+                        status="reviewed",
+                        title="old",
+                        summary="old",
+                        started_at="2026-05-21T00:00:00Z",
+                    ),
+                    RunRecord(
+                        run_id="run_new",
+                        card_id="card_qc",
+                        status="reviewed",
+                        title="new",
+                        summary="new",
+                        started_at="2026-05-22T00:00:00Z",
+                    ),
+                    RunRecord(
+                        run_id="run_pca",
+                        card_id="card_pca",
+                        status="reviewed",
+                        title="pca",
+                        summary="pca",
+                        started_at="2026-05-23T00:00:00Z",
+                    ),
+                ],
+            ),
+        }
+        attention = self.manager.blueprint_tools.dependency_attention_service.analyze_project(snapshot)
 
-        self.assertTrue(rebinds)
-        self.assertEqual("asset_new_counts", consumer.inputs[0].asset_id)
-        self.assertEqual(["asset_new_counts"], consumer.linked_assets)
-        self.assertEqual(["asset_new_counts"], module.depends_on_assets)
-        self.assertEqual(["asset_new_counts"], downstream_asset.depends_on)
-        self.assertEqual("stale", downstream_asset.status)
-        self.assertEqual(["asset_new_counts"], claim.depends_on_assets)
-        self.assertEqual("stale", claim.status)
+        self.assertEqual("asset_old_counts", consumer.inputs[0].asset_id)
+        self.assertEqual(["asset_old_counts"], consumer.linked_assets)
+        self.assertEqual(["asset_old_counts"], module.depends_on_assets)
+        self.assertEqual(["asset_old_counts"], downstream_asset.depends_on)
+        self.assertEqual("valid", downstream_asset.status)
+        self.assertEqual(["asset_old_counts"], claim.depends_on_assets)
+        self.assertEqual("valid", claim.status)
+        self.assertIn("input_asset_outdated", {issue["kind"] for issue in attention["issues"]})
 
     def test_project_files_include_uploads_and_execution_files(self) -> None:
         project_root = self.project_service.project_path("test-project")
@@ -893,6 +1047,8 @@ class ManagerFlowTest(unittest.TestCase):
         )
         self.assertEqual("cancelled", result["card"]["status"])
         self.assertIn("用户暂时不做免疫浸润分析", result["card"]["manager_review"])
+        self.assertIn("dependency_attention_check_recommended", result)
+        self.assertEqual([], result["affected_downstream"])
 
         snapshot = self.project_service.get_project_snapshot("test-project")
         card = next(item for item in snapshot["cards"] if item.card_id == "card_immune_module")
@@ -2449,6 +2605,7 @@ print('BP_EVENT {"type":"progress_update","stage":"provider","progress":10,"mess
         self.assertEqual([], violations)
         self.assertTrue(any(item["path"] == "chat/sessions.json" for item in changes))
 
+    @unittest.skipIf(_is_slow_skip(), "slow: serial audit test with inline sleep")
     def test_project_rejects_parallel_run_start_to_keep_filesystem_audit_scoped(self) -> None:
         script = """
 import json
@@ -2565,6 +2722,7 @@ manifest = {
         events = self.project_service.graph_store("test-project").load_run_events(run["run_id"])
         self.assertTrue(any(event.event_type == "run_failed" and "validator exploded" in event.message for event in events))
 
+    @unittest.skipIf(_is_slow_skip(), "slow: timeout test with inline time.sleep(5)")
     def test_timeout_with_complete_manifest_candidate_continues_to_review(self) -> None:
         script = """
 import json

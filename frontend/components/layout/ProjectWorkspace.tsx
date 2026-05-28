@@ -604,6 +604,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 <CardDetailPanel
                   card={selectedCard}
                   summary={snapshot.summary}
+                  workItem={selectedWorkItem}
                 />
               ) : null}
             </div>
@@ -748,6 +749,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     <CardDetailPanel
                       card={selectedCard}
                       summary={snapshot.summary}
+                      workItem={selectedWorkItem}
                     />
                   ) : null}
                 </>

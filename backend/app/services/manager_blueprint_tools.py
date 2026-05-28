@@ -19,6 +19,7 @@ from app.models.output_contracts import CardOutputSpec
 from app.models.runs import Manifest
 from app.services.app_config_service import AppConfigService
 from app.services.asset_timeline_service import AssetTimelineService
+from app.services.dependency_attention_service import DependencyAttentionService
 from app.services.library_registry_service import LibraryRegistryService
 from app.services.manager_planner import ManagerPlanningError
 from app.services.module_group_state_service import ModuleGroupStateService
@@ -143,6 +144,13 @@ class FindAssetsPayload(BaseModel):
     limit: int = 12
 
 
+class InspectDependencyAttentionPayload(BaseModel):
+    card_ids: list[str] = Field(default_factory=list)
+    source_card_id: str | None = None
+    include_recursive_downstream: bool = False
+    max_issues: int = 50
+
+
 class PlanCardWritePayload(BaseModel):
     action: str = "create"
     card_id: str | None = None
@@ -169,6 +177,7 @@ class ManagerBlueprintTools:
         )
         self.result_asset_service = ResultAssetService(project_service)
         self.asset_timeline_service = AssetTimelineService()
+        self.dependency_attention_service = DependencyAttentionService()
 
     def get_project_context(self, project_id: str) -> dict:
         snapshot = self.project_service.get_project_snapshot(project_id)
@@ -205,6 +214,18 @@ class ManagerBlueprintTools:
             if run.status in {"queued", "running", "reviewing", "needs_approval"}
         ]
         blockers = self._project_blockers(snapshot, timeline)
+        attention = self.dependency_attention_service.analyze_project(snapshot)
+        attention_by_card = attention["issues_by_card"]
+        cards = [
+            {
+                **card,
+                "dependency_attention_count": len(attention_by_card.get(card["card_id"], [])),
+                "attention_severity": DependencyAttentionService.attention_severity(
+                    attention_by_card.get(card["card_id"], [])
+                ),
+            }
+            for card in cards
+        ]
         return {
             "project_id": project_id,
             "project": {
@@ -221,9 +242,13 @@ class ManagerBlueprintTools:
                 "planned_assets": planned_assets,
                 "active_runs": len(active_runs),
                 "blockers": len(blockers),
+                "dependency_attention": attention["issue_count"],
             },
             "active_runs": active_runs[:8],
             "blockers": blockers[:12],
+            "dependency_attention": attention["issues"][:12],
+            "dependency_attention_count": attention["issue_count"],
+            "dependency_attention_fingerprint": attention["fingerprint"],
             "timeline": {
                 "parallel_batches": timeline["parallel_batches"],
                 "cycle_card_ids": timeline["cycle_card_ids"],
@@ -294,7 +319,20 @@ class ManagerBlueprintTools:
             "card": card.model_dump(),
             "timeline": timeline_card,
             "runs": [self._compact_run(run) for run in runs[-8:]],
+            "dependency_attention": self.dependency_attention_service.issues_for_card(snapshot, card_id),
         }
+
+    def inspect_dependency_attention(self, project_id: str, payload: dict | None = None) -> dict:
+        request = InspectDependencyAttentionPayload.model_validate(payload or {})
+        snapshot = self.project_service.get_project_snapshot(project_id)
+        result = self.dependency_attention_service.inspect(
+            snapshot,
+            card_ids=request.card_ids,
+            source_card_id=request.source_card_id,
+            include_recursive_downstream=request.include_recursive_downstream,
+            max_issues=request.max_issues,
+        )
+        return {"project_id": project_id, **result}
 
     def get_asset_detail(self, project_id: str, asset_id: str) -> dict:
         if not asset_id:
@@ -422,7 +460,8 @@ class ManagerBlueprintTools:
             store.save_graph(graph)
             store.save_cards(cards)
             self._audit_card_tool(project_id, "update_card", card_id, payload)
-        return {"ok": True, "card": updated.model_dump(), "card_id": updated.card_id}
+        hint = self.dependency_attention_service.mutation_hint(self.project_service.get_project_snapshot(project_id), updated.card_id)
+        return {"ok": True, "card": updated.model_dump(), "card_id": updated.card_id, **hint}
 
     def configure_card_execution(self, project_id: str, payload: dict) -> dict:
         request = ConfigureCardExecutionPayload.model_validate(payload)
@@ -513,7 +552,13 @@ class ManagerBlueprintTools:
             store.save_graph(graph)
             store.save_cards(cards)
             self._audit_card_tool(project_id, "delete_card", card_id, payload)
-        return {"card": updated.model_dump(), "timeline": self.asset_timeline_service.build(project_id, self.project_service.get_project_snapshot(project_id))}
+        after_snapshot = self.project_service.get_project_snapshot(project_id)
+        hint = self.dependency_attention_service.mutation_hint(after_snapshot, updated.card_id)
+        return {
+            "card": updated.model_dump(),
+            "timeline": self.asset_timeline_service.build(project_id, after_snapshot),
+            **hint,
+        }
 
     def get_tool_policy(self, project_id: str) -> dict:
         snapshot = self.project_service.get_project_snapshot(project_id)

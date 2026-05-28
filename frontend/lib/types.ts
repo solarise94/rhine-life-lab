@@ -52,6 +52,24 @@ export interface Card {
   executor_context?: Record<string, unknown> | null;
 }
 
+export interface DependencyAttentionIssue {
+  issue_id: string;
+  severity: "info" | "warning" | "error" | string;
+  kind: string;
+  card_id?: string;
+  card_title?: string;
+  asset_id?: string;
+  asset_status?: string;
+  label?: string;
+  producer_card_id?: string;
+  producer_role?: string;
+  current_asset_id?: string;
+  message?: string;
+  suggested_actions?: string[];
+  upstream_invalid_assets?: Array<{ asset_id: string; status: string }>;
+  truncated?: boolean;
+}
+
 export interface Asset {
   asset_id: string;
   asset_type: string;
@@ -131,6 +149,10 @@ export interface WorkItem {
   can_start: boolean;
   block_reasons: string[];
   active: boolean;
+  dependency_attention?: DependencyAttentionIssue[];
+  dependency_attention_count?: number;
+  attention_issue_ids?: string[];
+  attention_severity?: "info" | "warning" | "error" | string | null;
 }
 
 export interface WorkOrder {
@@ -144,6 +166,8 @@ export interface WorkOrder {
     edge_type: "work_dependency";
   }>;
   cycle_card_ids: string[];
+  dependency_attention?: DependencyAttentionIssue[];
+  dependency_attention_count?: number;
 }
 
 export interface AssetPreview {

@@ -127,6 +127,10 @@ export function CardStream({
         cards: rowCards,
       }));
   }, [activeCards, workOrder]);
+  const workItemByCard = useMemo(
+    () => new Map(workOrder?.work_items.map((item) => [item.card_id, item]) ?? []),
+    [workOrder],
+  );
 
   useEffect(() => {
     const observers: ResizeObserver[] = [];
@@ -221,6 +225,7 @@ export function CardStream({
                     <ModuleCard
                       projectId={projectId}
                       card={card}
+                      workItem={workItemByCard.get(card.card_id)}
                       active={selectedCardId === card.card_id}
                       onSelect={onSelect}
                       onStartRun={onStartRun}

@@ -95,6 +95,20 @@ def inspect_project_summary(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.post("/dependency-attention/inspect")
+def inspect_dependency_attention(
+    project_id: str,
+    payload: dict | None = None,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.inspect_dependency_attention(project_id, payload or {})
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/data-assets")
 def list_data_assets(
     project_id: str,

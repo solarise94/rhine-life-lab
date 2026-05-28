@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.models.cards import Card
 from app.models.graph import Asset, GraphState, Module, RunRecord
 from app.services.asset_timeline_service import AssetTimelineService
+from app.services.dependency_attention_service import DependencyAttentionService
 from app.services.project_service import ProjectService
 
 
@@ -10,6 +11,7 @@ class FlowService:
     def __init__(self, project_service: ProjectService) -> None:
         self.project_service = project_service
         self.timeline_service = AssetTimelineService()
+        self.dependency_attention_service = DependencyAttentionService()
 
     def get_asset_flow(self, project_id: str) -> dict:
         snapshot = self.project_service.get_project_snapshot(project_id)
@@ -27,6 +29,8 @@ class FlowService:
         snapshot = self.project_service.get_project_snapshot(project_id)
         graph: GraphState = snapshot["graph"]
         timeline = self.timeline_service.build(project_id, snapshot)
+        attention = self.dependency_attention_service.analyze_project(snapshot)
+        attention_by_card = attention["issues_by_card"]
         asset_map = {asset.asset_id: asset for asset in graph.assets}
         card_map = {card.card_id: card for card in snapshot["cards"]}
         work_items: list[dict] = []
@@ -65,6 +69,7 @@ class FlowService:
                 unmet_dependency_ids,
                 missing_script_binding_ids,
             )
+            card_attention = attention_by_card.get(card.card_id, [])
             work_items.append(
                 {
                     "card_id": card.card_id,
@@ -84,6 +89,10 @@ class FlowService:
                     "can_start": can_start,
                     "block_reasons": block_reasons,
                     "active": card.status not in {"accepted", "rejected", "cancelled"},
+                    "dependency_attention": card_attention,
+                    "dependency_attention_count": len(card_attention),
+                    "attention_issue_ids": [issue["issue_id"] for issue in card_attention],
+                    "attention_severity": DependencyAttentionService.attention_severity(card_attention),
                 }
             )
 
@@ -102,6 +111,8 @@ class FlowService:
                 for source_id in sorted(source_ids)
             ],
             "cycle_card_ids": timeline["cycle_card_ids"],
+            "dependency_attention": attention["issues"],
+            "dependency_attention_count": attention["issue_count"],
         }
 
     def get_timeline(self, project_id: str) -> dict:

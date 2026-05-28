@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.workers import agent_cli_executor
 from app.workers.agent_cli_worker import AgentCliWorkerAdapter
@@ -315,6 +316,7 @@ class TestAgentCliWorkerAdapterSpacePaths(unittest.TestCase):
                 pi_command="bash /path/to/launch.sh {executor_prompt_path}",
                 pi_command_json=["bash", "{repo_root}/scripts/launch.sh", "{executor_prompt_path}"],
                 executor_sandbox_mode="none",
+                data_root=Path(tmp),
             )
 
             adapter = AgentCliWorkerAdapter()
@@ -322,13 +324,14 @@ class TestAgentCliWorkerAdapterSpacePaths(unittest.TestCase):
             adapter.provider = "pi"
             adapter.launch_template_setting_name = "pi_command"
 
-            spec = adapter.build_launch_spec(
-                packet=packet,
-                packet_path=packet_path,
-                run_dir=run_dir,
-                project_root=project_root,
-                settings=settings,
-            )
+            with patch.object(adapter, "_resolve_profile_hints", return_value=("pi-default", "cli_native", "deepseek")):
+                spec = adapter.build_launch_spec(
+                    packet=packet,
+                    packet_path=packet_path,
+                    run_dir=run_dir,
+                    project_root=project_root,
+                    settings=settings,
+                )
 
             command = spec.command
             # Find indices of key arguments

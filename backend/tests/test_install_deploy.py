@@ -198,8 +198,12 @@ class TestInstallDeployBehavior(unittest.TestCase):
             )
             return result, parsed
 
-    def test_deploy_backend_env_contains_all_required_keys(self) -> None:
-        """Deploy must write every key in the backend.env runtime contract."""
+    def test_deploy_default_env_writes_all_required_keys_and_defaults(self) -> None:
+        """Verify deploy writes all required backend.env keys, the default
+        extra_ro_binds includes ~/.nvm and ~/.local, and codex is not
+        auto-configured when no codex command is set.  One deploy run
+        replaces the three previously separate tests to avoid redundant
+        subprocess calls."""
         required_keys = {
             "PATH",
             "BACKEND_HOST",
@@ -238,36 +242,19 @@ class TestInstallDeployBehavior(unittest.TestCase):
             "BLUEPRINT_DEEPSEEK_API_KEY=test-key",
         ])
 
-        self.assertEqual(
-            result.returncode, 0,
-            f"Deploy must succeed. stderr:\n{result.stderr}",
-        )
+        self.assertEqual(result.returncode, 0, f"Deploy must succeed. stderr:\n{result.stderr}")
 
         missing = required_keys - set(parsed.keys())
-        self.assertEqual(
-            missing,
-            set(),
-            f"backend.env missing required keys: {sorted(missing)}",
-        )
+        self.assertEqual(missing, set(), f"backend.env missing required keys: {sorted(missing)}")
 
-    def test_deploy_extra_ro_binds_preserves_default(self) -> None:
-        """When BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS is not explicitly set, the deploy
-        script must emit the same default the backend uses (~/.nvm,~/.local)."""
-        result, parsed = self._run_deploy_with_stubs([
-            "BLUEPRINT_DEEPSEEK_API_KEY=test-key",
-        ])
-
-        self.assertEqual(result.returncode, 0)
         binds = parsed.get("BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS", "")
-        self.assertIn(
-            ".nvm",
-            binds,
-            "Default extra_ro_binds must include ~/.nvm",
-        )
-        self.assertIn(
-            ".local",
-            binds,
-            "Default extra_ro_binds must include ~/.local",
+        self.assertIn(".nvm", binds, "Default extra_ro_binds must include ~/.nvm")
+        self.assertIn(".local", binds, "Default extra_ro_binds must include ~/.local")
+
+        self.assertNotIn(
+            "BLUEPRINT_CODEX_COMMAND_JSON",
+            parsed,
+            "Codex must not appear in backend.env when not configured",
         )
 
     def test_deploy_extra_ro_binds_allows_explicit_empty_override(self) -> None:
@@ -305,21 +292,6 @@ class TestInstallDeployBehavior(unittest.TestCase):
             codex_json,
             "Codex command JSON must survive deploy passthrough",
         )
-
-    def test_deploy_codex_not_auto_configured(self) -> None:
-        """When BLUEPRINT_CODEX_COMMAND_JSON is not set, deploy must not write it
-        into backend.env (empty string would cause pydantic validation errors)."""
-        result, parsed = self._run_deploy_with_stubs([
-            "BLUEPRINT_DEEPSEEK_API_KEY=test-key",
-        ])
-
-        self.assertEqual(result.returncode, 0)
-        self.assertNotIn(
-            "BLUEPRINT_CODEX_COMMAND_JSON",
-            parsed,
-            "Codex must not appear in backend.env when not configured",
-        )
-
 
 if __name__ == "__main__":
     unittest.main()
