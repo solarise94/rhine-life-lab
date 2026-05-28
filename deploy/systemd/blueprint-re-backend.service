@@ -9,6 +9,9 @@ WorkingDirectory=__ROOT__/backend
 ExecStart=__ROOT__/.venv/backend/bin/uvicorn app.main:app --host ${BACKEND_HOST} --port ${BACKEND_PORT}
 Restart=on-failure
 RestartSec=2
+TimeoutStopSec=10
+KillMode=control-group
+SendSIGKILL=yes
 
 [Install]
 WantedBy=default.target

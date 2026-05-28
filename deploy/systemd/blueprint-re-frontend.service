@@ -9,6 +9,9 @@ WorkingDirectory=__FRONTEND_RELEASE_DIR__/frontend
 ExecStart=/usr/bin/env HOSTNAME=${FRONTEND_HOST} PORT=${FRONTEND_PORT} __NODE_BIN__ server.js
 Restart=on-failure
 RestartSec=2
+TimeoutStopSec=10
+KillMode=control-group
+SendSIGKILL=yes
 
 [Install]
 WantedBy=default.target

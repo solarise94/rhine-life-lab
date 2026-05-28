@@ -444,9 +444,13 @@ systemctl --user daemon-reload
 systemctl --user enable blueprint-re-manager-agent.service
 systemctl --user enable blueprint-re-backend.service
 systemctl --user enable blueprint-re-frontend.service
+
+# Stop the frontend before backend restart so Next.js proxy/SSE connections do
+# not keep the old backend process alive during systemd's graceful shutdown.
+systemctl --user stop blueprint-re-frontend.service || true
 systemctl --user restart blueprint-re-manager-agent.service
 systemctl --user restart blueprint-re-backend.service
-systemctl --user restart blueprint-re-frontend.service
+systemctl --user start blueprint-re-frontend.service
 
 echo "Blueprint RE deployed."
 echo "Frontend: http://127.0.0.1:13001"
