@@ -483,6 +483,7 @@ export function ManagerChatPanel({
   const [slashCommandState, setSlashCommandState] = useState<SlashCommandState | null>(null);
   const [slashCommandIndex, setSlashCommandIndex] = useState(0);
   const [effortMenuOpen, setEffortMenuOpen] = useState(false);
+  const [autoStopPending, setAutoStopPending] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -502,6 +503,13 @@ export function ManagerChatPanel({
   const notifiedDependencyJobsRef = useRef<Set<string>>(new Set());
   const isAutoOwnerSession = Boolean(managerAuto?.enabled && sessionId && managerAuto.owner_session_id === sessionId);
   const isBtwSession = Boolean(managerAuto?.enabled && sessionId && managerAuto.owner_session_id && managerAuto.owner_session_id !== sessionId);
+  const autoBackgroundRunning = Boolean(
+    managerAuto?.state === "running" ||
+      managerAuto?.state === "thinking" ||
+      managerAuto?.active_run_id ||
+      managerAuto?.active_job_id,
+  );
+  const autoComposerState = !isAutoOwnerSession ? "normal" : autoBackgroundRunning ? "auto_running" : "auto_idle";
   const chatSessionQuery = useChatSession(projectId, sessionId ?? undefined, Boolean(sessionId), {
     refetchInterval: managerAuto?.enabled && !activeStreamControllerRef.current ? 4_000 : false,
   });
@@ -1740,6 +1748,20 @@ export function ManagerChatPanel({
     activeStreamControllerRef.current.abort(new Error("user_aborted"));
   }
 
+  async function stopAutoFromComposer() {
+    if (!sessionId || autoStopPending) return;
+    setAutoStopPending(true);
+    setError(null);
+    try {
+      await api.stopManagerAuto(projectId, sessionId, "user_stop", "因用户停止任务，已退出 auto 模式。");
+      await onRefresh();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "停止 Auto 推进失败。");
+    } finally {
+      setAutoStopPending(false);
+    }
+  }
+
   async function handleAutoCommand(command: string) {
     if (!sessionId) return;
     setBusy(true);
@@ -1931,6 +1953,23 @@ export function ManagerChatPanel({
   const displayMessages = messages.length ? messages : [DEFAULT_MANAGER_MESSAGE];
   const sessionLoadError = chatSessionQuery.error instanceof Error ? chatSessionQuery.error.message : null;
   const sessionBusy = !sessionId || chatSessionQuery.isLoading;
+  const composerInputDisabled = sessionBusy || Boolean(sessionLoadError) || autoComposerState === "auto_running";
+  const composerSendDisabled =
+    autoComposerState === "auto_running"
+      ? autoStopPending || !sessionId || sessionBusy || Boolean(sessionLoadError)
+      : !draft.trim() || sessionBusy || Boolean(sessionLoadError);
+  const composerButtonTitle =
+    autoComposerState === "auto_running"
+      ? "停止 Auto 推进"
+      : autoComposerState === "auto_idle"
+        ? "Auto mode 已开启，发送为追加指令"
+        : "发送";
+  const composerButtonClass =
+    autoComposerState === "auto_running"
+      ? "auto-running"
+      : autoComposerState === "auto_idle"
+        ? "auto-idle"
+        : "";
 
   function renderStatusIcon(status: ToolState | ChatMessage["thinkingState"]) {
     if (status === "running") {
@@ -2204,10 +2243,13 @@ export function ManagerChatPanel({
                 }
                 if (e.key === "Enter" && (e.shiftKey || e.metaKey || e.ctrlKey)) {
                   e.preventDefault();
+                  if (autoComposerState === "auto_running") {
+                    return;
+                  }
                   submit();
                 }
               }}
-              disabled={sessionBusy || Boolean(sessionLoadError)}
+              disabled={composerInputDisabled}
               onClick={(e) => syncComposerState(e.currentTarget.value, e.currentTarget.selectionStart)}
               onKeyUp={(e) => syncComposerState(e.currentTarget.value, e.currentTarget.selectionStart)}
             />
@@ -2263,13 +2305,19 @@ export function ManagerChatPanel({
                   </button>
                 ) : (
                   <button
-                    className={`manager-send-button ${isAutoOwnerSession ? "auto-owner" : ""}`}
-                    onClick={submit}
-                    disabled={!draft.trim() || sessionBusy || Boolean(sessionLoadError)}
+                    className={`manager-send-button ${composerButtonClass}`}
+                    onClick={autoComposerState === "auto_running" ? stopAutoFromComposer : submit}
+                    disabled={composerSendDisabled}
                     type="button"
-                    title={isAutoOwnerSession ? "Auto mode 已开启" : "发送"}
+                    title={composerButtonTitle}
                   >
-                    {isAutoOwnerSession ? <Sparkles size={16} /> : <Send size={16} />}
+                    {autoComposerState === "auto_running" ? (
+                      autoStopPending ? <Loader2 size={16} className="spinning" /> : <Square size={14} />
+                    ) : autoComposerState === "auto_idle" ? (
+                      <Sparkles size={16} />
+                    ) : (
+                      <Send size={16} />
+                    )}
                   </button>
                 )}
               </div>

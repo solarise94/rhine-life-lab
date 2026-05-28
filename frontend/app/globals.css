@@ -2184,9 +2184,14 @@ button {
   color: #fff;
 }
 
-.manager-send-button.auto-owner {
+.manager-send-button.auto-idle {
   background: linear-gradient(135deg, #0f766e, #155eef);
   box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.16), 0 10px 24px rgba(21, 94, 239, 0.18);
+}
+
+.manager-send-button.auto-running {
+  background: linear-gradient(135deg, #0f766e, #2563eb);
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.2), 0 12px 26px rgba(37, 99, 235, 0.24);
   animation: auto-breathe 1.8s ease-in-out infinite;
 }
 
