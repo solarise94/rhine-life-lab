@@ -476,6 +476,7 @@ export function ManagerChatPanel({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [localManagerAuto, setLocalManagerAuto] = useState<ManagerAutoState | null>(managerAuto ?? null);
   const [editingProposalId, setEditingProposalId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [mentionState, setMentionState] = useState<MentionState | null>(null);
@@ -501,17 +502,18 @@ export function ManagerChatPanel({
   const lastSavedSignatureRef = useRef("[]");
   const sessionRevisionRef = useRef(0);
   const notifiedDependencyJobsRef = useRef<Set<string>>(new Set());
-  const isAutoOwnerSession = Boolean(managerAuto?.enabled && sessionId && managerAuto.owner_session_id === sessionId);
-  const isBtwSession = Boolean(managerAuto?.enabled && sessionId && managerAuto.owner_session_id && managerAuto.owner_session_id !== sessionId);
+  const effectiveManagerAuto = localManagerAuto ?? managerAuto;
+  const isAutoOwnerSession = Boolean(effectiveManagerAuto?.enabled && sessionId && effectiveManagerAuto.owner_session_id === sessionId);
+  const isBtwSession = Boolean(effectiveManagerAuto?.enabled && sessionId && effectiveManagerAuto.owner_session_id && effectiveManagerAuto.owner_session_id !== sessionId);
   const autoBackgroundRunning = Boolean(
-    managerAuto?.state === "running" ||
-      managerAuto?.state === "thinking" ||
-      managerAuto?.active_run_id ||
-      managerAuto?.active_job_id,
+    effectiveManagerAuto?.state === "running" ||
+      effectiveManagerAuto?.state === "thinking" ||
+      effectiveManagerAuto?.active_run_id ||
+      effectiveManagerAuto?.active_job_id,
   );
   const autoComposerState = !isAutoOwnerSession ? "normal" : autoBackgroundRunning ? "auto_running" : "auto_idle";
   const chatSessionQuery = useChatSession(projectId, sessionId ?? undefined, Boolean(sessionId), {
-    refetchInterval: managerAuto?.enabled && !activeStreamControllerRef.current ? 4_000 : false,
+    refetchInterval: effectiveManagerAuto?.enabled && !activeStreamControllerRef.current ? 4_000 : false,
   });
   const refetchChatSession = chatSessionQuery.refetch;
 
@@ -562,6 +564,22 @@ export function ManagerChatPanel({
       setError(message);
     },
   });
+
+  useEffect(() => {
+    setLocalManagerAuto(managerAuto ?? null);
+  }, [managerAuto]);
+
+  function applyManagerAutoState(state: ManagerAutoState) {
+    setLocalManagerAuto(state);
+    queryClient.setQueryData(queryKeys.managerAuto(projectId, sessionId), {
+      state,
+      is_owner: Boolean(sessionId && state.enabled && state.owner_session_id === sessionId),
+      btw_mode: Boolean(sessionId && state.enabled && state.owner_session_id && state.owner_session_id !== sessionId),
+    });
+    queryClient.setQueryData<ProjectSnapshot>(queryKeys.project(projectId), (previous) =>
+      previous ? { ...previous, manager_auto: state } : previous,
+    );
+  }
   const uploadMutation = useMutation({
     mutationFn: (file: File) => api.uploadChatFile(projectId, file),
     onSuccess: async (response) => {
@@ -659,9 +677,6 @@ export function ManagerChatPanel({
     if (!sessionId || !chatSessionQuery.data?.session || activeStreamControllerRef.current) {
       return;
     }
-    if (isAutoOwnerSession && managerAuto?.enabled && autoSessionEventSourceRef.current) {
-      return;
-    }
     const nextMessages = normalizeSessionMessages(chatSessionQuery.data.session.messages);
     const mergedMessages = mergeChatMessagesById(messages, nextMessages);
     const nextSignature = sessionMessagesSignature(mergedMessages);
@@ -710,7 +725,7 @@ export function ManagerChatPanel({
       window.clearTimeout(autoSessionReconnectTimerRef.current);
       autoSessionReconnectTimerRef.current = null;
     }
-    if (!sessionId || !isAutoOwnerSession || !managerAuto?.enabled || typeof window === "undefined") {
+    if (!sessionId || !isAutoOwnerSession || !effectiveManagerAuto?.enabled || typeof window === "undefined") {
       return;
     }
     let stopped = false;
@@ -732,6 +747,10 @@ export function ManagerChatPanel({
           event?: ChatStreamEvent;
           revision?: number;
         };
+        if (payload.type !== "heartbeat") {
+          schedulePartialRefresh();
+          void queryClient.refetchQueries({ queryKey: queryKeys.managerAuto(projectId, sessionId), type: "active" });
+        }
         if (payload.type === "stream_event" && payload.message_id && payload.event) {
           remoteHydratingRef.current = true;
           applyStreamEvent(payload.message_id, payload.event);
@@ -777,7 +796,7 @@ export function ManagerChatPanel({
       autoSessionEventSourceRef.current?.close();
       autoSessionEventSourceRef.current = null;
     };
-  }, [isAutoOwnerSession, managerAuto?.enabled, projectId, refetchChatSession, sessionId]);
+  }, [effectiveManagerAuto?.enabled, isAutoOwnerSession, projectId, queryClient, refetchChatSession, sessionId]);
 
   useEffect(() => () => {
     if (saveTimerRef.current !== null && typeof window !== "undefined") {
@@ -1582,7 +1601,7 @@ export function ManagerChatPanel({
         state: "done",
         timeline: [{ id: `${userMessageId}_text`, kind: "text", content: text, status: "done" }],
       },
-      ...(isAutoOwnerSession && managerAuto?.enabled
+      ...(isAutoOwnerSession && effectiveManagerAuto?.enabled
         ? []
         : [{ id: managerMessageId, role: "manager" as const, content: "", thinking: "", thinkingState: "idle" as const, tools: [], state: "thinking" as const, timeline: [] }]),
     ]);
@@ -1590,9 +1609,10 @@ export function ManagerChatPanel({
     setBusy(true);
     setError(null);
     stopRequestedRef.current = false;
-    if (isAutoOwnerSession && managerAuto?.enabled) {
+    if (isAutoOwnerSession && effectiveManagerAuto?.enabled) {
       try {
         const response = await api.addManagerAutoDirective(projectId, sessionId, text, userMessageId);
+        applyManagerAutoState(response.state);
         clearAttachments(projectId);
         const ack = response.wake_event ? "已收到追加指令，AUTO 正在处理。" : "已加入 auto 指令队列，将在下一次唤醒时处理。";
         setMessages((prev) => [
@@ -1753,7 +1773,8 @@ export function ManagerChatPanel({
     setAutoStopPending(true);
     setError(null);
     try {
-      await api.stopManagerAuto(projectId, sessionId, "user_stop", "因用户停止任务，已退出 auto 模式。");
+      const response = await api.stopManagerAuto(projectId, sessionId, "user_stop", "因用户停止任务，已退出 auto 模式。");
+      applyManagerAutoState(response.state);
       await onRefresh();
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "停止 Auto 推进失败。");
@@ -1769,7 +1790,8 @@ export function ManagerChatPanel({
     try {
       if (command === "/auto" || command === "/auto once") {
         const mode = command === "/auto once" ? "once" : "continuous";
-        await api.enableManagerAuto(projectId, sessionId, mode);
+        const response = await api.enableManagerAuto(projectId, sessionId, mode);
+        applyManagerAutoState(response.state);
         setMessages((prev) => [
           ...prev,
           {
@@ -1797,12 +1819,13 @@ export function ManagerChatPanel({
           },
         ]);
       } else if (command === "/auto off" || command === "/auto stop") {
-        await api.stopManagerAuto(
+        const response = await api.stopManagerAuto(
           projectId,
           sessionId,
           command === "/auto stop" ? "user_stop" : "user_off",
           command === "/auto stop" ? "因用户停止任务，已退出 auto 模式。" : "Auto mode 已关闭。",
         );
+        applyManagerAutoState(response.state);
         setMessages((prev) => [
           ...prev,
           {
@@ -1943,13 +1966,6 @@ export function ManagerChatPanel({
       title: `DeepSeek context window: ${sourceLabel}，当前约 ${historyTokens.toLocaleString()} tokens，剩余约 ${remainingTokens.toLocaleString()} tokens。上下文窗口 ${contextLimit.toLocaleString()} tokens。`,
     };
   }, [attachments, draft, messages]);
-  const autoStateLabel = useMemo(() => {
-    if (!managerAuto?.enabled) return null;
-    if (managerAuto.state === "running") return "AUTO 运行中";
-    if (managerAuto.state === "thinking") return "AUTO 推进中";
-    if (managerAuto.state === "stopped") return "AUTO 已停止";
-    return "AUTO 已开启";
-  }, [managerAuto]);
   const displayMessages = messages.length ? messages : [DEFAULT_MANAGER_MESSAGE];
   const sessionLoadError = chatSessionQuery.error instanceof Error ? chatSessionQuery.error.message : null;
   const sessionBusy = !sessionId || chatSessionQuery.isLoading;
@@ -2255,11 +2271,6 @@ export function ManagerChatPanel({
             />
             <div className="manager-composer-actions">
               <div className="manager-effort-menu" ref={effortMenuRef}>
-                {isAutoOwnerSession && autoStateLabel ? (
-                  <span className={`manager-auto-chip ${managerAuto?.state ?? "idle"}`} title="当前 session 正在持有 auto mode">
-                    {autoStateLabel}
-                  </span>
-                ) : null}
                 <button
                   className={`manager-effort-button ${effortMenuOpen ? "open" : ""}`}
                   type="button"

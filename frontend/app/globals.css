@@ -2217,29 +2217,6 @@ button {
   cursor: not-allowed;
 }
 
-.manager-auto-chip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 32px;
-  padding: 0 12px;
-  border-radius: 999px;
-  background: rgba(14, 165, 233, 0.1);
-  color: #0f4c81;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-}
-
-.manager-auto-chip.running,
-.manager-auto-chip.thinking {
-  animation: auto-breathe 1.8s ease-in-out infinite;
-}
-
-.manager-auto-chip.stopped {
-  background: rgba(239, 68, 68, 0.1);
-  color: #991b1b;
-}
-
 .manager-chat-panel .attachment-bar {
   padding: 0 20px 8px;
   margin-bottom: 0;
