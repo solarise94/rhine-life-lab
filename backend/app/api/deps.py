@@ -59,6 +59,7 @@ def get_chat_job_service() -> ChatJobService:
 @lru_cache
 def get_runtime_dependency_job_service() -> RuntimeDependencyJobService:
     return RuntimeDependencyJobService(
+        get_project_service(),
         manager_wake_service=get_manager_wake_service(),
         project_event_service=get_project_event_service(),
     )

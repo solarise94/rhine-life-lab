@@ -55,6 +55,7 @@ class ProjectEventService:
         event_payload = payload or {}
         run_status = self._event_status(event_payload, "run_status", fallback=status)
         card_status = self._event_status(event_payload, "card_status")
+        job_status = self._event_status(event_payload, "job_status")
         revision = self._increment_revision(project_id)
         event = {
             "type": "project_state_changed",
@@ -69,6 +70,7 @@ class ProjectEventService:
             "status": status,
             "run_status": run_status,
             "card_status": card_status,
+            "job_status": job_status,
             "payload": event_payload,
             "created_at": utc_now(),
         }

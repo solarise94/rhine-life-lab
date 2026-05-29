@@ -155,8 +155,8 @@ Available capabilities:
 - write_project_memory stores only explicit user preferences and corrections, such as "remember this", "default to this", or "do not do this again".
 - create_card, update_card, and delete_card directly modify blueprint cards after backend validation.
 - configure_card_execution directly updates card execution permissions, selected skills, MCP servers, and runtime bindings such as tool_policy.rscript and tool_policy.network.
-- install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime when a card reports missing runtime dependencies.
-- get_runtime_dependency_install_status checks whether a previously started dependency installation job has finished.
+- install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime when a card reports missing runtime dependencies. Treat it like card execution background work: after a successful start, report the job_id and stop; do not foreground-poll the job in the same turn.
+- get_runtime_dependency_install_status checks whether a previously started dependency installation job has finished. Use it for explicit user checks, recovery, or a later wake turn; do not use it to poll a just-started job in the same turn.
 - start_card_run, stop_card_run, rerun_card, and review_card_run control card execution directly when execution should happen now. start_card_run and rerun_card launch background executor work; after a successful start, do not poll card status in the same turn. Briefly report the run_id and stop so run events/wake events can carry progress.
 - cleanup_run_history removes old finished run execution files/caches when they are no longer needed; by default it preserves runs that own valid accepted assets.
 - search_card_templates, save_card_template, and instantiate_card_template manage reusable manager-only card templates.
@@ -175,12 +175,13 @@ Judgment:
 - For simple conceptual questions, answer without tools.
 - For blueprint/card changes, use find_cards/get_card_detail for existing cards and find_assets for inputs. Use card write tools directly once you have enough context. Do not describe a change as complete unless a write tool succeeded.
 - After start_card_run or rerun_card returns background/async_boundary/do_not_poll, do not call get_card_detail, find_assets, inspect_project_summary, or cleanup tools just to wait for that run. End the turn with the run_id unless the tool returned ok:false or pending approvals.
+- After install_runtime_dependencies returns background/job_id, do not call get_runtime_dependency_install_status, inspect_project_summary, get_card_detail, find_assets, or cleanup tools just to wait for that job. End the turn with the job_id and wait for project-state events or runtime dependency wake events.
 - Dependency ATTENTION is derived, not a persisted card status. Do not treat linked_assets as current dependency truth; use card.inputs, card.outputs, and asset.depends_on. If update_card or delete_card returns dependency_attention_check_recommended, call inspect_dependency_attention before deciding whether to continue. For input_asset_outdated issues, the old asset_id is still saved in the downstream card's inputs; if current_asset_id is clear and preserves the workflow, call update_card to replace that input asset_id first, then rerun_card in upstream-first order. If you rerun without updating inputs, the executor will reuse the old asset. If the intent is ambiguous, report the ATTENTION to the user.
 - If a write tool returns ok:false, use the message/retry_hint to correct arguments and retry when the correction is clear. If it is not clear, inspect context or ask a focused question.
 ${webJudgmentLines.join("\n")}
 - Write project memory only when the user explicitly asks you to remember a durable preference, says a behavior should be the default, or corrects something you should avoid in future. Keep memory summaries short.
 - Do not ask the user to approve executor runtime permissions in a card prompt. Card agents cannot ask the user interactively. If a card needs Rscript or network access, use configure_card_execution on that card before telling the user it is ready.
-- Card executor agents run in a constrained runtime. They must not install missing R or Python packages on their own. If runtime packages are missing and a specific non-system runtime is selected, you may use install_runtime_dependencies with explicit package names to start a background install job, then check it with get_runtime_dependency_install_status when needed. If that fails or the missing dependency is a system tool, tell the user exactly what dependency must be prepared.
+- Card executor agents run in a constrained runtime. They must not install missing R or Python packages on their own. If runtime packages are missing and a specific non-system runtime is selected, you may use install_runtime_dependencies with explicit package names to start a background install job, then stop the current turn and wait for the dependency-install wake event. If the runtime is a conda R environment, prefer manager "conda" or "mamba" for precompiled packages; CRAN/Bioconductor source installs can require compilers and must be treated as unproven until the package is loadable from the selected Rscript. If installation fails or the missing dependency is a system tool, tell the user exactly what dependency must be prepared.
 - Search the skill/MCP library only when a card clearly may benefit from reusable execution abilities. The list/search tools are intentionally id/name-only; read one item detail only if the id/name is ambiguous.
 - If a task looks like a stable repeated workflow, search_card_templates before creating a new analysis card from scratch.
 - When a template requires script assets, ask the user which project script assets to bind before instantiate_card_template or before starting the card. Do not make card agents ask the user for bindings.
@@ -980,6 +981,16 @@ function isRunAsyncBoundaryPayload(toolName, payload) {
   return pendingApprovals.length === 0 && rejectedApprovals.length === 0;
 }
 
+function isDependencyJobAsyncBoundaryPayload(toolName, payload) {
+  if (toolName !== "install_runtime_dependencies") {
+    return false;
+  }
+  if (!payload || typeof payload !== "object") {
+    return false;
+  }
+  return Boolean(payload.ok && payload.job_id && payload.background && payload.async_boundary && payload.wait_for_wake);
+}
+
 async function callBackendLoggedTool(toolName, toolCallId, projectId, baseUrl, token, path, options = {}, signal, sessionId = null) {
   const startedAt = Date.now();
   logManagerEvent("tool_backend_start", {
@@ -1024,9 +1035,13 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     active: false,
     toolName: null,
     runId: null,
+    jobId: null,
   };
   const callLoggedTool = async (toolName, toolCallId, projectId, baseUrl, token, path, options = {}, signal, sessionId = null) => {
     if (asyncBoundary.active && !(toolName === "stop_card_run" && userRequestedInterrupt)) {
+      const backgroundLabel = asyncBoundary.runId
+        ? `Background run ${asyncBoundary.runId}`
+        : `Background dependency job ${asyncBoundary.jobId || ""}`;
       return {
         ok: false,
         error_type: "async_boundary_active",
@@ -1036,9 +1051,10 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
         async_boundary: true,
         wait_for_wake: true,
         run_id: asyncBoundary.runId,
+        job_id: asyncBoundary.jobId,
         message:
-          `Background run ${asyncBoundary.runId || ""} was already started by ${asyncBoundary.toolName}. ` +
-          "End this turn and wait for run events or a wake event; do not call more tools to poll status.",
+          `${backgroundLabel} was already started by ${asyncBoundary.toolName}. ` +
+          "End this turn and wait for project-state events or a wake event; do not call more tools to poll status.",
       };
     }
     const payload = await callBackendLoggedTool(toolName, toolCallId, projectId, baseUrl, token, path, options, signal, sessionId);
@@ -1046,6 +1062,12 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
       asyncBoundary.active = true;
       asyncBoundary.toolName = toolName;
       asyncBoundary.runId = payload.run_id;
+      asyncBoundary.jobId = null;
+    } else if (isDependencyJobAsyncBoundaryPayload(toolName, payload)) {
+      asyncBoundary.active = true;
+      asyncBoundary.toolName = toolName;
+      asyncBoundary.runId = null;
+      asyncBoundary.jobId = payload.job_id;
     }
     return payload;
   };
@@ -1510,12 +1532,12 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "install_runtime_dependencies",
       label: "Install runtime dependencies",
-      description: "Start a background job that installs explicitly named Python or R packages into an already selected non-system runtime after a card reports missing runtime dependencies. Use only for clear package lists.",
+      description: "Start a background job that installs explicitly named Python or R packages into an already selected non-system runtime after a card reports missing runtime dependencies. Use only for clear package lists. After a successful start, report the job_id and stop this turn; do not poll status with get_runtime_dependency_install_status in the same turn.",
       parameters: Type.Object({
         ecosystem: Type.String({ description: "python or R" }),
         runtime: Type.String({ description: "Selected non-system runtime name, such as omicverse, rnaseq, or R_env. Do not use __system__." }),
         packages: Type.Array(Type.String({ description: "Package names or simple Python version specs." })),
-        manager: Type.Optional(Type.String({ description: "For python: pip or conda. For R: bioconductor or cran. Defaults to pip for python and bioconductor for R." })),
+        manager: Type.Optional(Type.String({ description: "For python: pip or conda. For R: bioconductor, cran, or conda/mamba. Prefer conda/mamba for R conda environments because CRAN/Bioconductor source installs may need compilers. Defaults to pip for python and bioconductor for R." })),
         timeout_seconds: Type.Optional(Type.Number()),
       }),
       execute: async (toolCallId, params, signal) => {
@@ -1543,7 +1565,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "get_runtime_dependency_install_status",
       label: "Get runtime dependency install status",
-      description: "Check whether a background runtime dependency installation job has finished, failed, or is still running.",
+      description: "Check whether a background runtime dependency installation job has finished, failed, or is still running. Use for explicit user checks, recovery, or later wake turns; do not poll a job that was just started in the same turn.",
       parameters: Type.Object({
         job_id: Type.String(),
       }),

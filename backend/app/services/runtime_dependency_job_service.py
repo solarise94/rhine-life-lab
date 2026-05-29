@@ -11,7 +11,8 @@ from uuid import uuid4
 from app.models.manager_auto import ManagerWakeEvent, ManagerWakeSource
 from app.services.manager_wake_service import ManagerWakeService
 from app.services.project_event_service import ProjectEventService
-from app.services.utils import utc_now
+from app.services.project_service import ProjectService
+from app.services.utils import atomic_write_json, read_json, utc_now
 
 
 JobStatus = str
@@ -35,10 +36,12 @@ class RuntimeDependencyJob:
 class RuntimeDependencyJobService:
     def __init__(
         self,
+        project_service: ProjectService,
         max_workers: int = 2,
         manager_wake_service: ManagerWakeService | None = None,
         project_event_service: ProjectEventService | None = None,
     ) -> None:
+        self.project_service = project_service
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="runtime-deps")
         self.jobs: dict[str, RuntimeDependencyJob] = {}
         self.lock = Lock()
@@ -52,7 +55,9 @@ class RuntimeDependencyJobService:
             payload=payload,
         )
         with self.lock:
+            self._load_project_jobs_locked(project_id)
             self.jobs[job.job_id] = job
+            self._persist_project_jobs_locked(project_id)
         self._emit_project_event(job)
         future = self.executor.submit(self._run, job.job_id, handler)
         with self.lock:
@@ -61,13 +66,31 @@ class RuntimeDependencyJobService:
 
     def get(self, job_id: str) -> RuntimeDependencyJob | None:
         with self.lock:
-            return self.jobs.get(job_id)
+            job = self.jobs.get(job_id)
+        if job is not None:
+            return job
+        for project in self.project_service.list_projects():
+            with self.lock:
+                self._load_project_jobs_locked(project.project_id)
+                job = self.jobs.get(job_id)
+                if job is not None:
+                    return job
+        return None
+
+    def get_for_project(self, project_id: str, job_id: str) -> RuntimeDependencyJob | None:
+        with self.lock:
+            self._load_project_jobs_locked(project_id)
+            job = self.jobs.get(job_id)
+            if job is None or job.project_id != project_id:
+                return None
+            return job
 
     def _run(self, job_id: str, handler) -> None:
         with self.lock:
             job = self.jobs[job_id]
             job.status = "running"
             job.started_at = utc_now()
+            self._persist_project_jobs_locked(job.project_id)
             self._emit_project_event(job)
         try:
             result = handler(job.project_id, job.payload)
@@ -77,6 +100,7 @@ class RuntimeDependencyJobService:
                 job.status = "failed"
                 job.error = "".join(traceback.format_exception(exc))
                 job.finished_at = utc_now()
+                self._persist_project_jobs_locked(job.project_id)
                 self._emit_project_event(job)
                 self._emit_wake_event(job, ok=False, message=job.error or "Dependency installation failed.")
             return
@@ -85,6 +109,7 @@ class RuntimeDependencyJobService:
             job.result = result
             job.error = None if result.get("ok") else str(result.get("message") or "Dependency installation failed.")
             job.finished_at = utc_now()
+            self._persist_project_jobs_locked(job.project_id)
             self._emit_project_event(job)
             self._emit_wake_event(job, ok=bool(result.get("ok")), message=job.error or str(result.get("message") or "Dependency installation completed."))
 
@@ -101,10 +126,82 @@ class RuntimeDependencyJobService:
                 run_id=source.get("run_id"),
                 job_id=job.job_id,
                 status=job.status,
-                payload={"runtime": job.payload.get("runtime"), "packages": job.payload.get("packages")},
+                payload={
+                    "job_status": job.status,
+                    "runtime": job.payload.get("runtime"),
+                    "packages": job.payload.get("packages"),
+                    "manager": job.payload.get("manager"),
+                    "started_at": job.started_at,
+                    "finished_at": job.finished_at,
+                    "ok": bool(job.result.get("ok")) if isinstance(job.result, dict) else None,
+                },
             )
         except Exception:
             logger.exception("Failed to emit runtime dependency project event: project_id=%s job_id=%s", job.project_id, job.job_id)
+
+    def _jobs_path(self, project_id: str):
+        return self.project_service.project_path(project_id) / "chat" / "runtime_dependency_jobs.json"
+
+    def _load_project_jobs_locked(self, project_id: str) -> None:
+        now = utc_now()
+        items = read_json(self._jobs_path(project_id), [])
+        if not isinstance(items, list):
+            return
+        changed = False
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                job_id = str(item["job_id"])
+                existing = self.jobs.get(job_id)
+                if existing is not None and existing.project_id == project_id:
+                    continue
+                job = RuntimeDependencyJob(
+                    job_id=job_id,
+                    project_id=str(item.get("project_id") or project_id),
+                    payload=dict(item.get("payload") or {}),
+                    status=str(item.get("status") or "failed"),
+                    result=dict(item["result"]) if isinstance(item.get("result"), dict) else None,
+                    error=str(item["error"]) if item.get("error") is not None else None,
+                    created_at=str(item.get("created_at") or now),
+                    started_at=str(item["started_at"]) if item.get("started_at") is not None else None,
+                    finished_at=str(item["finished_at"]) if item.get("finished_at") is not None else None,
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if job.status in {"queued", "running"}:
+                job.status = "failed"
+                job.error = "Runtime dependency job was interrupted by backend restart."
+                job.finished_at = job.finished_at or now
+                changed = True
+            self.jobs[job.job_id] = job
+        if changed:
+            self._persist_project_jobs_locked(project_id)
+
+    def _persist_project_jobs_locked(self, project_id: str) -> None:
+        project_jobs = [
+            job
+            for job in self.jobs.values()
+            if job.project_id == project_id
+        ]
+        project_jobs.sort(key=lambda item: item.created_at)
+        atomic_write_json(
+            self._jobs_path(project_id),
+            [
+                {
+                    "job_id": job.job_id,
+                    "project_id": job.project_id,
+                    "payload": job.payload,
+                    "status": job.status,
+                    "result": job.result,
+                    "error": job.error,
+                    "created_at": job.created_at,
+                    "started_at": job.started_at,
+                    "finished_at": job.finished_at,
+                }
+                for job in project_jobs
+            ],
+        )
 
     def _emit_wake_event(self, job: RuntimeDependencyJob, *, ok: bool, message: str) -> None:
         if self.manager_wake_service is None:

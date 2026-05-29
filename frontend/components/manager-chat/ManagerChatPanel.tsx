@@ -35,14 +35,6 @@ interface ToolUseState {
   status: ToolState;
 }
 
-interface PendingDependencyInstallJob {
-  jobId: string;
-  sourceMessageId: string;
-  toolCallId?: string;
-  runtime?: string;
-  packages?: string[];
-}
-
 interface MessageTimelineItem {
   id: string;
   kind: TimelineItemKind;
@@ -474,7 +466,6 @@ export function ManagerChatPanel({
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState("");
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>("medium");
-  const [pendingDependencyJobs, setPendingDependencyJobs] = useState<PendingDependencyInstallJob[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -508,7 +499,6 @@ export function ManagerChatPanel({
   const hydratedSessionIdRef = useRef<string | null>(null);
   const lastSavedSignatureRef = useRef("[]");
   const sessionRevisionRef = useRef(0);
-  const notifiedDependencyJobsRef = useRef<Set<string>>(new Set());
   const effectiveManagerAuto = localManagerAuto ?? managerAuto;
   const isAutoOwnerSession = Boolean(effectiveManagerAuto?.enabled && sessionId && effectiveManagerAuto.owner_session_id === sessionId);
   const isBtwSession = Boolean(effectiveManagerAuto?.enabled && sessionId && effectiveManagerAuto.owner_session_id && effectiveManagerAuto.owner_session_id !== sessionId);
@@ -689,8 +679,6 @@ export function ManagerChatPanel({
     setSlashCommandState(null);
     setSlashCommandIndex(0);
     setEffortMenuOpen(false);
-    setPendingDependencyJobs([]);
-    notifiedDependencyJobsRef.current = new Set();
     setMessages([]);
   }, [sessionId]);
 
@@ -944,113 +932,6 @@ export function ManagerChatPanel({
         });
     });
   }, [messages]);
-
-  useEffect(() => {
-    if (!pendingDependencyJobs.length) {
-      return;
-    }
-    let cancelled = false;
-    const poll = async () => {
-      const jobs = [...pendingDependencyJobs];
-      const responses = await Promise.all(
-        jobs.map(async (job) => {
-          try {
-            const status = await api.getRuntimeDependencyJob(projectId, job.jobId);
-            return { job, status };
-          } catch (nextError) {
-            const message = nextError instanceof Error ? nextError.message : "Failed to load dependency job status.";
-            return {
-              job,
-              status: {
-                job_id: job.jobId,
-                status: "failed" as const,
-                message,
-                error: message,
-                runtime: job.runtime,
-                packages: job.packages,
-              },
-            };
-          }
-        }),
-      );
-      if (cancelled) {
-        return;
-      }
-      const completed = new Set<string>();
-      responses.forEach(({ job, status }) => {
-        if (status.status !== "succeeded" && status.status !== "failed") {
-          return;
-        }
-        completed.add(job.jobId);
-        updateMessage(job.sourceMessageId, (current) => {
-          const timeline = current.timeline ?? [];
-          const existing = timeline.find((item) => item.id === job.toolCallId);
-          const summary =
-            status.message ||
-            (status.status === "succeeded"
-              ? `后台环境依赖任务已完成：${status.runtime || job.runtime || "runtime"}`
-              : `后台环境依赖任务失败：${status.runtime || job.runtime || "runtime"}`);
-          return {
-            ...current,
-            timeline: upsertTimelineItem(
-              timeline,
-              {
-                id: job.toolCallId || timelineItemId("tool", undefined, `depjob_${job.jobId}`),
-                kind: "tool",
-                label: status.status === "succeeded" ? "已完成环境依赖任务" : "环境依赖任务失败",
-                toolName: "install_runtime_dependencies",
-                content: summary,
-                status: status.status === "succeeded" ? "done" : "error",
-                startedAt: existing?.startedAt ?? Date.now(),
-                endedAt: Date.now(),
-              },
-              (item) => item.id === job.toolCallId,
-            ),
-            tools: (current.tools ?? []).map((tool) =>
-              tool.id === job.toolCallId || (tool.toolName === "install_runtime_dependencies" && !job.toolCallId)
-                ? {
-                    ...tool,
-                    label: status.status === "succeeded" ? "已完成环境依赖任务" : "环境依赖任务失败",
-                    status: status.status === "succeeded" ? "done" : "error",
-                  }
-                : tool,
-            ),
-          };
-        });
-        if (!notifiedDependencyJobsRef.current.has(job.jobId)) {
-          const packageNames = status.packages ?? job.packages ?? [];
-          const packageText = packageNames.length ? `（${packageNames.slice(0, 4).join(", ")}${packageNames.length > 4 ? "..." : ""}）` : "";
-          const content =
-            status.status === "succeeded"
-              ? `后台环境依赖任务已完成：${status.runtime || job.runtime || "runtime"} ${packageText}`.trim()
-              : `后台环境依赖任务失败：${status.runtime || job.runtime || "runtime"}。${status.message || status.error || ""}`.trim();
-          const messageId = createMessageId();
-          setMessages((current) => [
-            ...current,
-            {
-              id: messageId,
-              role: "manager",
-              content,
-              state: "done",
-              timeline: [{ id: `${messageId}_text`, kind: "text", content, status: "done" }],
-            },
-          ]);
-          notifiedDependencyJobsRef.current.add(job.jobId);
-        }
-      });
-      if (completed.size > 0) {
-        setPendingDependencyJobs((current) => current.filter((job) => !completed.has(job.jobId)));
-      }
-    };
-    void poll();
-    const timer = window.setInterval(() => {
-      void poll();
-    }, 4000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [pendingDependencyJobs, projectId]);
 
   function createMessageId() {
     if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -1856,29 +1737,6 @@ export function ManagerChatPanel({
               endedAt: Date.now(),
             });
             return;
-          }
-          if (event.type === "tool_report" && event.tool_name === "install_runtime_dependencies") {
-            const details = event.details ?? {};
-            const jobId = typeof details.job_id === "string" ? details.job_id : "";
-            if (jobId) {
-              setPendingDependencyJobs((current) => {
-                if (current.some((item) => item.jobId === jobId)) {
-                  return current;
-                }
-                return [
-                  ...current,
-                  {
-                    jobId,
-                    sourceMessageId: managerMessageId,
-                    toolCallId: event.tool_call_id,
-                    runtime: typeof details.runtime === "string" ? details.runtime : undefined,
-                    packages: Array.isArray(details.packages)
-                      ? details.packages.filter((item): item is string => typeof item === "string")
-                      : undefined,
-                  },
-                ];
-              });
-            }
           }
           applyStreamEvent(managerMessageId, event);
           if (event.type === "error") {

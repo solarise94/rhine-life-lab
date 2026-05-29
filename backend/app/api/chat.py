@@ -98,8 +98,8 @@ def get_runtime_dependency_job(
     job_id: str,
     runtime_dependency_job_service: RuntimeDependencyJobService = Depends(get_runtime_dependency_job_service),
 ) -> dict:
-    job = runtime_dependency_job_service.get(job_id)
-    if not job or job.project_id != project_id:
+    job = runtime_dependency_job_service.get_for_project(project_id, job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Runtime dependency job not found")
     result = job.result or {}
     return {

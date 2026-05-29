@@ -62,6 +62,22 @@ class ProjectEventServiceTest(unittest.TestCase):
         self.assertEqual(emitted["run_status"], "queued")
         self.assertEqual(emitted["card_status"], "running")
 
+    def test_emit_preserves_dependency_job_status_payload(self) -> None:
+        emitted = self.service.emit(
+            "event-project",
+            reason="runtime_dependency_job_changed",
+            job_id="depjob_1",
+            status="running",
+            payload={"job_status": "running", "runtime": "R_env", "packages": ["svglite"]},
+        )
+
+        self.assertEqual(emitted["status"], "running")
+        self.assertEqual(emitted["run_status"], "running")
+        self.assertEqual(emitted["job_id"], "depjob_1")
+        self.assertEqual(emitted["job_status"], "running")
+        self.assertEqual(emitted["payload"]["job_status"], "running")
+        self.assertEqual(emitted["payload"]["runtime"], "R_env")
+
     def test_revision_is_persisted_in_graph_metadata(self) -> None:
         self.service.emit("event-project", reason="card_updated", card_id="card_1")
         self.service.emit("event-project", reason="card_updated", card_id="card_1")

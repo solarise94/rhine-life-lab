@@ -681,6 +681,9 @@ class ManagerBlueprintTools:
         return {
             "ok": True,
             "background": True,
+            "async_boundary": True,
+            "do_not_poll": True,
+            "wait_for_wake": True,
             "job_id": job.job_id,
             "status": job.status,
             "ecosystem": request_payload["ecosystem"],
@@ -697,8 +700,8 @@ class ManagerBlueprintTools:
     def get_runtime_dependency_install_status(self, project_id: str, job_id: str) -> dict:
         if self.runtime_dependency_job_service is None:
             raise ManagerPlanningError("runtime dependency job service is unavailable.")
-        job = self.runtime_dependency_job_service.get(job_id)
-        if job is None or job.project_id != project_id:
+        job = self.runtime_dependency_job_service.get_for_project(project_id, job_id)
+        if job is None:
             raise ManagerPlanningError("Runtime dependency job not found.")
         result = job.result or {}
         payload = {
@@ -734,6 +737,7 @@ class ManagerBlueprintTools:
         if not runtime or runtime == "__system__":
             raise ManagerPlanningError("install_runtime_dependencies requires a selected non-system runtime.")
         timeout = max(30, min(int(request.timeout_seconds or 600), 1800))
+        manager_name = self._dependency_manager_label(ecosystem, request.manager)
         if ecosystem == "python":
             command, resolved_runtime = self._python_dependency_command(runtime, packages, request.manager)
         else:
@@ -755,7 +759,7 @@ class ManagerBlueprintTools:
                 "runtime": runtime,
                 "resolved_runtime": resolved_runtime,
                 "packages": packages,
-                "manager": self._dependency_manager_label(ecosystem, request.manager),
+                "manager": manager_name,
                 "message": f"Dependency installation timed out after {timeout} seconds.",
                 "stdout_tail": self._tail_text(exc.stdout),
                 "stderr_tail": self._tail_text(exc.stderr),
@@ -769,7 +773,7 @@ class ManagerBlueprintTools:
                 "runtime": runtime,
                 "resolved_runtime": resolved_runtime,
                 "packages": packages,
-                "manager": self._dependency_manager_label(ecosystem, request.manager),
+                "manager": manager_name,
                 "message": f"Dependency installation could not start: {exc}",
                 "stdout_tail": "",
                 "stderr_tail": str(exc),
@@ -777,13 +781,24 @@ class ManagerBlueprintTools:
                 "finished_at": utc_now(),
             }
         ok = result.returncode == 0
+        if ok and ecosystem == "R" and manager_name != "conda":
+            stderr_lower = (result.stderr or "").lower()
+            failure_terms = (
+                "compilation failed",
+                "installation of package",
+                "had non-zero exit status",
+                "cannot install",
+                "error in",
+            )
+            if any(term in stderr_lower for term in failure_terms):
+                ok = False
         return {
             "ok": ok,
             "ecosystem": ecosystem,
             "runtime": runtime,
             "resolved_runtime": resolved_runtime,
             "packages": packages,
-            "manager": self._dependency_manager_label(ecosystem, request.manager),
+            "manager": manager_name,
             "returncode": result.returncode,
             "message": "Dependencies installed." if ok else "Dependency installation failed; ask the user to prepare the runtime manually if the error is not immediately fixable.",
             "stdout_tail": self._tail_text(result.stdout),
@@ -1222,9 +1237,7 @@ class ManagerBlueprintTools:
         if not env_path.exists():
             raise ManagerPlanningError(f"Python runtime not found: {runtime}")
         if manager_name == "conda":
-            conda_bin = conda_base / "bin" / "conda"
-            if not conda_bin.exists():
-                raise ManagerPlanningError(f"conda executable not found for runtime: {runtime}")
+            conda_bin = self._resolve_conda_solver(conda_base)
             return [str(conda_bin), "install", "-y", "-p", str(env_path), *packages], str(env_path)
         python_bin = env_path / "bin" / "python"
         if not python_bin.exists():
@@ -1236,6 +1249,21 @@ class ManagerBlueprintTools:
         rscript = CommandTemplateWorkerAdapter._resolve_rscript_runtime(runtime, self.project_service.settings)
         if rscript is None or not rscript.exists():
             raise ManagerPlanningError(f"R runtime not found: {runtime}")
+        env_path = rscript.parent.parent
+        conda_base = env_path.parent.parent if env_path.parent.name == "envs" else env_path
+        if manager_name == "conda":
+            conda_bin = self._resolve_conda_solver(conda_base)
+            conda_packages = [f"r-{package.lower()}" for package in packages]
+            return [
+                str(conda_bin),
+                "install",
+                "-y",
+                "-p",
+                str(env_path),
+                "-c",
+                "conda-forge",
+                *conda_packages,
+            ], str(env_path)
         package_vector = "c(" + ", ".join(json.dumps(item) for item in packages) + ")"
         if manager_name == "cran":
             expression = (
@@ -1255,7 +1283,20 @@ class ManagerBlueprintTools:
         normalized = str(manager or "").strip().lower()
         if ecosystem == "python":
             return "conda" if normalized in {"conda", "mamba", "micromamba"} else "pip"
+        if normalized in {"conda", "mamba", "micromamba"}:
+            return "conda"
         return "cran" if normalized == "cran" else "bioconductor"
+
+    @staticmethod
+    def _resolve_conda_solver(conda_base: Path) -> Path:
+        for name in ("mamba", "conda"):
+            candidate = conda_base / "bin" / name
+            if candidate.exists():
+                return candidate
+        micromamba = shutil.which("micromamba")
+        if micromamba:
+            return Path(micromamba)
+        raise ManagerPlanningError(f"No conda solver found at {conda_base}/bin/ (mamba or conda).")
 
     @staticmethod
     def _tail_text(value: object, limit: int = 6000) -> str:
