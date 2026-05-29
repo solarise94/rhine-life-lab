@@ -1420,7 +1420,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
         mcp_servers: Type.Optional(Type.Array(Type.String())),
         tool_policy: Type.Optional(
           Type.Object({
-            network: Type.Optional(Type.String({ description: "allow, deny, or prompt. Use allow when the card agent must access model APIs or download databases without asking the user." })),
+            network: Type.Optional(Type.String({ description: "Literal string allow, deny, or prompt. Do not use boolean true/false. Use allow when the card agent must access model APIs or download databases without asking the user." })),
             python: Type.Optional(Type.Boolean()),
             rscript: Type.Optional(Type.Boolean({ description: "Set true for R/GSVA/ESTIMATE-style cards." })),
             shell: Type.Optional(Type.Boolean()),

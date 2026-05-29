@@ -1764,6 +1764,30 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue(card.executor_context.tool_policy.rscript)
         self.assertEqual("bioconductor", card.executor_context.runtime_bindings.r_env)
 
+    def test_configure_card_execution_accepts_boolean_like_network_policy(self) -> None:
+        result = self.manager.blueprint_tools.configure_card_execution(
+            "test-project",
+            {
+                "card_ids": ["card_enrichment_group"],
+                "tool_policy": {"network": "true", "rscript": True},
+            },
+        )
+
+        self.assertEqual(["card_enrichment_group"], result["updated_card_ids"])
+        card = next(item for item in self.project_service.graph_store("test-project").load_cards() if item.card_id == "card_enrichment_group")
+        self.assertEqual("allow", card.executor_context.tool_policy.network)
+        self.assertTrue(card.executor_context.tool_policy.rscript)
+
+    def test_configure_card_execution_invalid_payload_is_planning_error(self) -> None:
+        with self.assertRaises(ManagerPlanningError):
+            self.manager.blueprint_tools.configure_card_execution(
+                "test-project",
+                {
+                    "card_ids": ["card_enrichment_group"],
+                    "tool_policy": {"network": "sometimes"},
+                },
+            )
+
     def test_manager_can_start_background_python_dependency_install(self) -> None:
         settings = get_settings()
         conda_base = Path(self.tmpdir) / "conda"

@@ -9,7 +9,7 @@ import subprocess
 from typing import Any
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.models.card_templates import CardTemplate, TemplateBundle, TemplateBundleFile, TemplateIoBinding, TemplateSpec
 from app.models.cards import Card, CardAssetRef
@@ -37,6 +37,20 @@ class ToolPolicyPayload(BaseModel):
     rscript: bool | None = None
     shell: bool | None = None
     git_write: bool | None = None
+
+    @field_validator("network", mode="before")
+    @classmethod
+    def normalize_network_policy(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return "allow" if value else "deny"
+        text = str(value).strip().lower()
+        if text == "true":
+            return "allow"
+        if text == "false":
+            return "deny"
+        return text
 
 
 class RuntimeBindingsPayload(BaseModel):
@@ -480,7 +494,10 @@ class ManagerBlueprintTools:
         return {"ok": True, "card": updated.model_dump(), "card_id": updated.card_id, **hint}
 
     def configure_card_execution(self, project_id: str, payload: dict) -> dict:
-        request = ConfigureCardExecutionPayload.model_validate(payload)
+        try:
+            request = ConfigureCardExecutionPayload.model_validate(payload)
+        except ValidationError as exc:
+            raise ManagerPlanningError(f"Invalid configure_card_execution payload: {exc}") from exc
         card_ids = [str(item).strip() for item in request.card_ids if str(item).strip()]
         if not card_ids:
             card_id = str(request.card_id or "").strip()
