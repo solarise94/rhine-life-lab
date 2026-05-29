@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from app.models.manager_auto import ManagerWakeEvent, ManagerWakeSource
 from app.services.manager_wake_service import ManagerWakeService
+from app.services.project_event_service import ProjectEventService
 from app.services.utils import utc_now
 
 
@@ -32,11 +33,17 @@ class RuntimeDependencyJob:
 
 
 class RuntimeDependencyJobService:
-    def __init__(self, max_workers: int = 2, manager_wake_service: ManagerWakeService | None = None) -> None:
+    def __init__(
+        self,
+        max_workers: int = 2,
+        manager_wake_service: ManagerWakeService | None = None,
+        project_event_service: ProjectEventService | None = None,
+    ) -> None:
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="runtime-deps")
         self.jobs: dict[str, RuntimeDependencyJob] = {}
         self.lock = Lock()
         self.manager_wake_service = manager_wake_service
+        self.project_event_service = project_event_service
 
     def submit(self, project_id: str, payload: dict[str, Any], handler) -> RuntimeDependencyJob:
         job = RuntimeDependencyJob(
@@ -46,6 +53,7 @@ class RuntimeDependencyJobService:
         )
         with self.lock:
             self.jobs[job.job_id] = job
+        self._emit_project_event(job)
         future = self.executor.submit(self._run, job.job_id, handler)
         with self.lock:
             job.future = future
@@ -60,6 +68,7 @@ class RuntimeDependencyJobService:
             job = self.jobs[job_id]
             job.status = "running"
             job.started_at = utc_now()
+            self._emit_project_event(job)
         try:
             result = handler(job.project_id, job.payload)
         except Exception as exc:
@@ -68,6 +77,7 @@ class RuntimeDependencyJobService:
                 job.status = "failed"
                 job.error = "".join(traceback.format_exception(exc))
                 job.finished_at = utc_now()
+                self._emit_project_event(job)
                 self._emit_wake_event(job, ok=False, message=job.error or "Dependency installation failed.")
             return
         with self.lock:
@@ -75,7 +85,26 @@ class RuntimeDependencyJobService:
             job.result = result
             job.error = None if result.get("ok") else str(result.get("message") or "Dependency installation failed.")
             job.finished_at = utc_now()
+            self._emit_project_event(job)
             self._emit_wake_event(job, ok=bool(result.get("ok")), message=job.error or str(result.get("message") or "Dependency installation completed."))
+
+    def _emit_project_event(self, job: RuntimeDependencyJob) -> None:
+        if self.project_event_service is None:
+            return
+        source_payload = job.payload.get("source") if isinstance(job.payload, dict) else {}
+        source = source_payload if isinstance(source_payload, dict) else {}
+        try:
+            self.project_event_service.emit(
+                job.project_id,
+                reason="runtime_dependency_job_changed",
+                card_id=source.get("card_id"),
+                run_id=source.get("run_id"),
+                job_id=job.job_id,
+                status=job.status,
+                payload={"runtime": job.payload.get("runtime"), "packages": job.payload.get("packages")},
+            )
+        except Exception:
+            logger.exception("Failed to emit runtime dependency project event: project_id=%s job_id=%s", job.project_id, job.job_id)
 
     def _emit_wake_event(self, job: RuntimeDependencyJob, *, ok: bool, message: str) -> None:
         if self.manager_wake_service is None:

@@ -70,6 +70,10 @@ class GraphStore:
     def load_metadata(self) -> dict:
         return read_json(self._path("graph", "graph.json"), {"schema_version": "0.1.0"})
 
+    def save_metadata(self, metadata: dict) -> None:
+        """Persist only graph-level metadata without rewriting cards/assets/runs."""
+        atomic_write_json(self._path("graph", "graph.json"), metadata)
+
     def load_graph(self) -> GraphState:
         metadata = self.load_metadata()
         return GraphState(
@@ -87,7 +91,7 @@ class GraphStore:
         self.save_claims(graph.claims)
         self.save_runs(graph.runs)
         self.save_report_items(graph.report_items)
-        atomic_write_json(self._path("graph", "graph.json"), graph.metadata)
+        self.save_metadata(graph.metadata)
 
     def load_proposals(self) -> list[Proposal]:
         return [Proposal.model_validate(item) for item in read_json(self._path("graph", "proposals.json"), [])]

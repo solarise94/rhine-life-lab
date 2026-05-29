@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from app.api.deps import get_manager_auto_service, get_manager_service
+from app.api.deps import get_manager_auto_service, get_manager_service, get_project_event_service
 from app.core.config import get_settings
 from app.services.manager_auto_service import ManagerAutoService
 from app.services.manager_planner import ManagerPlanningError
 from app.services.manager_service import ManagerService
+from app.services.project_event_service import ProjectEventService
 
 router = APIRouter(prefix="/internal/manager-tools/projects/{project_id}", tags=["manager-tools"])
+logger = logging.getLogger(__name__)
 
 _MUTATING_TOOL_NAMES = {
     "create_card",
@@ -70,6 +74,29 @@ def _mark_auto_running(
         clear_active_run=clear_active_run,
         clear_active_job=clear_active_job,
     )
+
+
+def _emit_tool_project_event(
+    project_id: str,
+    project_event_service: ProjectEventService,
+    *,
+    reason: str,
+    response: dict,
+) -> None:
+    card = response.get("card") if isinstance(response, dict) else None
+    card_id = card.get("card_id") if isinstance(card, dict) else response.get("card_id") if isinstance(response, dict) else None
+    status = card.get("status") if isinstance(card, dict) else response.get("status") if isinstance(response, dict) else None
+    if card_id is None and reason in {"card_created", "card_updated", "card_deleted", "card_execution_configured", "card_template_instantiated"}:
+        logger.warning("Project event for %s has no card_id: project_id=%s response_keys=%s", reason, project_id, list(response.keys()) if isinstance(response, dict) else None)
+    try:
+        project_event_service.emit(project_id, reason=reason, card_id=card_id, status=status)
+    except Exception:
+        logger.exception("Failed to emit manager tool project event: project_id=%s reason=%s card_id=%s", project_id, reason, card_id)
+
+
+# Run-control project-state events are emitted by WorkerService, which owns run
+# lifecycle persistence. This helper is only for direct card/template mutations
+# performed by manager tools.
 
 
 @router.get("/context")
@@ -172,11 +199,14 @@ def create_card(
     x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
     manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+    project_event_service: ProjectEventService = Depends(get_project_event_service),
 ) -> dict:
     _verify_internal_token(authorization)
     _guard_mutation(project_id, "create_card", x_blueprint_session_id, manager_auto_service)
     try:
-        return manager_service.blueprint_tools.create_card(project_id, payload)
+        response = manager_service.blueprint_tools.create_card(project_id, payload)
+        _emit_tool_project_event(project_id, project_event_service, reason="card_created", response=response)
+        return response
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -204,13 +234,16 @@ def update_card(
     x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
     manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+    project_event_service: ProjectEventService = Depends(get_project_event_service),
 ) -> dict:
     _verify_internal_token(authorization)
     _guard_mutation(project_id, "update_card", x_blueprint_session_id, manager_auto_service)
     try:
         body = dict(payload)
         body["card_id"] = card_id
-        return manager_service.blueprint_tools.update_card(project_id, body)
+        response = manager_service.blueprint_tools.update_card(project_id, body)
+        _emit_tool_project_event(project_id, project_event_service, reason="card_updated", response=response)
+        return response
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -223,11 +256,14 @@ def configure_card_execution(
     x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
     manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+    project_event_service: ProjectEventService = Depends(get_project_event_service),
 ) -> dict:
     _verify_internal_token(authorization)
     _guard_mutation(project_id, "configure_card_execution", x_blueprint_session_id, manager_auto_service)
     try:
-        return manager_service.blueprint_tools.configure_card_execution(project_id, payload)
+        response = manager_service.blueprint_tools.configure_card_execution(project_id, payload)
+        _emit_tool_project_event(project_id, project_event_service, reason="card_execution_configured", response=response)
+        return response
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -241,13 +277,16 @@ def delete_card(
     x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
     manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+    project_event_service: ProjectEventService = Depends(get_project_event_service),
 ) -> dict:
     _verify_internal_token(authorization)
     _guard_mutation(project_id, "delete_card", x_blueprint_session_id, manager_auto_service)
     try:
         body = dict(payload or {})
         body["card_id"] = card_id
-        return manager_service.blueprint_tools.delete_card(project_id, body)
+        response = manager_service.blueprint_tools.delete_card(project_id, body)
+        _emit_tool_project_event(project_id, project_event_service, reason="card_deleted", response=response)
+        return response
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -579,11 +618,14 @@ def instantiate_card_template(
     x_blueprint_session_id: str | None = Header(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
     manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+    project_event_service: ProjectEventService = Depends(get_project_event_service),
 ) -> dict:
     _verify_internal_token(authorization)
     _guard_mutation(project_id, "instantiate_card_template", x_blueprint_session_id, manager_auto_service)
     try:
-        return manager_service.blueprint_tools.instantiate_card_template(project_id, payload)
+        response = manager_service.blueprint_tools.instantiate_card_template(project_id, payload)
+        _emit_tool_project_event(project_id, project_event_service, reason="card_template_instantiated", response=response)
+        return response
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

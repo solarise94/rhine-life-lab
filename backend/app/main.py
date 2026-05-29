@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import advanced, app_settings, chat, chat_sessions, diagnostics, executor_profiles, files, library, manager_auto, manager_tools, projects, report, results, runs
+from app.api import advanced, app_settings, chat, chat_sessions, diagnostics, executor_profiles, files, library, manager_auto, manager_tools, project_events, projects, report, results, runs
 from app.api.deps import get_app_config_service, get_manager_wake_processor, get_worker_service
 from app.core.config import get_settings
 
@@ -56,6 +56,7 @@ app.include_router(runs.router, prefix=settings.api_prefix)
 app.include_router(advanced.router, prefix=settings.api_prefix)
 app.include_router(files.router, prefix=settings.api_prefix)
 app.include_router(chat_sessions.router, prefix=settings.api_prefix)
+app.include_router(project_events.router, prefix=settings.api_prefix)
 app.include_router(executor_profiles.router, prefix=settings.api_prefix)
 
 

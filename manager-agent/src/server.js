@@ -965,7 +965,22 @@ function buildToolReport(toolName, details) {
   return null;
 }
 
-async function callLoggedTool(toolName, toolCallId, projectId, baseUrl, token, path, options = {}, signal, sessionId = null) {
+function isRunAsyncBoundaryPayload(toolName, payload) {
+  if (toolName !== "start_card_run" && toolName !== "rerun_card") {
+    return false;
+  }
+  if (!payload || typeof payload !== "object") {
+    return false;
+  }
+  if (!payload.ok || !payload.run_id || !payload.async_boundary || !payload.wait_for_wake) {
+    return false;
+  }
+  const pendingApprovals = Array.isArray(payload.pending_approvals) ? payload.pending_approvals : [];
+  const rejectedApprovals = Array.isArray(payload.rejected_approvals) ? payload.rejected_approvals : [];
+  return pendingApprovals.length === 0 && rejectedApprovals.length === 0;
+}
+
+async function callBackendLoggedTool(toolName, toolCallId, projectId, baseUrl, token, path, options = {}, signal, sessionId = null) {
   const startedAt = Date.now();
   logManagerEvent("tool_backend_start", {
     project_id: projectId,
@@ -1002,6 +1017,38 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
   const { project_id: projectId, backend_api_base_url: baseUrl, internal_tool_token: token, session_id: sessionId } = request;
   const autoMode = request.auto_mode && typeof request.auto_mode === "object" ? request.auto_mode : {};
   const btwMode = Boolean(autoMode.btw_mode);
+  const userRequestedInterrupt = /stop|cancel|interrupt|abort|停止|取消|中断|打断/.test(String(request.message || "").toLowerCase());
+  // Per-turn boundary only. A later wake turn or user-initiated turn gets a
+  // fresh tool set and may inspect state for its new reason.
+  const asyncBoundary = {
+    active: false,
+    toolName: null,
+    runId: null,
+  };
+  const callLoggedTool = async (toolName, toolCallId, projectId, baseUrl, token, path, options = {}, signal, sessionId = null) => {
+    if (asyncBoundary.active && !(toolName === "stop_card_run" && userRequestedInterrupt)) {
+      return {
+        ok: false,
+        error_type: "async_boundary_active",
+        terminal: true,
+        should_retry: false,
+        retry_hint: null,
+        async_boundary: true,
+        wait_for_wake: true,
+        run_id: asyncBoundary.runId,
+        message:
+          `Background run ${asyncBoundary.runId || ""} was already started by ${asyncBoundary.toolName}. ` +
+          "End this turn and wait for run events or a wake event; do not call more tools to poll status.",
+      };
+    }
+    const payload = await callBackendLoggedTool(toolName, toolCallId, projectId, baseUrl, token, path, options, signal, sessionId);
+    if (isRunAsyncBoundaryPayload(toolName, payload)) {
+      asyncBoundary.active = true;
+      asyncBoundary.toolName = toolName;
+      asyncBoundary.runId = payload.run_id;
+    }
+    return payload;
+  };
   const tools = [
     {
       name: "inspect_project_summary",
@@ -1550,7 +1597,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             signal,
           sessionId,
         );
-          return toolTextResult("start_card_run", payload);
+          return toolTextResult("start_card_run", payload, isRunAsyncBoundaryPayload("start_card_run", payload));
         } catch (error) {
           return toolErrorResult(error, { error_type: "start_card_run_failed", tool_name: "start_card_run" });
         }
@@ -1613,7 +1660,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             signal,
           sessionId,
         );
-          return toolTextResult("rerun_card", payload);
+          return toolTextResult("rerun_card", payload, isRunAsyncBoundaryPayload("rerun_card", payload));
         } catch (error) {
           return toolErrorResult(error, { error_type: "rerun_card_failed", tool_name: "rerun_card" });
         }

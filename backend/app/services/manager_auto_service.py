@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from uuid import uuid4
 
 from fastapi import HTTPException
 
 from app.models.cards import Card
 from app.models.manager_auto import ManagerAutoChainLimitBasis, ManagerAutoDirective, ManagerAutoState
+from app.services.project_event_service import ProjectEventService
 from app.services.project_service import ProjectService
 from app.services.utils import utc_now
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -19,8 +24,9 @@ class ManagerAutoView:
 
 
 class ManagerAutoService:
-    def __init__(self, project_service: ProjectService) -> None:
+    def __init__(self, project_service: ProjectService, project_event_service: ProjectEventService | None = None) -> None:
         self.project_service = project_service
+        self.project_event_service = project_event_service
 
     def get_state(self, project_id: str) -> ManagerAutoState:
         graph = self.project_service.graph_store(project_id).load_graph()
@@ -65,6 +71,7 @@ class ManagerAutoService:
             next_state.max_chain_count = self._max_chain_count(limit_basis.executable_card_count)
             graph.metadata["manager_auto"] = next_state.model_dump()
             store.save_graph(graph)
+            self._emit_auto_event(project_id, next_state)
             return next_state
 
     def stop(self, project_id: str, session_id: str, *, reason: str, message: str) -> ManagerAutoState:
@@ -87,6 +94,7 @@ class ManagerAutoService:
             next_state.stop_message = message
             graph.metadata["manager_auto"] = next_state.model_dump()
             store.save_graph(graph)
+            self._emit_auto_event(project_id, next_state)
             return next_state
 
     def set_runtime_state(
@@ -123,6 +131,7 @@ class ManagerAutoService:
                 next_state.chain_count += 1
             graph.metadata["manager_auto"] = next_state.model_dump()
             store.save_graph(graph)
+            self._emit_auto_event(project_id, next_state)
             return next_state
 
     def add_directive(self, project_id: str, session_id: str, *, text: str, message_id: str | None = None) -> ManagerAutoDirective:
@@ -144,6 +153,7 @@ class ManagerAutoService:
             state.pending_directives.append(directive)
             graph.metadata["manager_auto"] = state.model_dump()
             store.save_graph(graph)
+            self._emit_auto_event(project_id, state)
             return directive
 
     def should_trigger_directive_wake(self, project_id: str) -> bool:
@@ -172,7 +182,23 @@ class ManagerAutoService:
                     resolved.append(item.model_copy(deep=True))
             graph.metadata["manager_auto"] = state.model_dump()
             store.save_graph(graph)
+            self._emit_auto_event(project_id, state)
             return resolved
+
+    def _emit_auto_event(self, project_id: str, state: ManagerAutoState) -> None:
+        if self.project_event_service is None:
+            return
+        try:
+            self.project_event_service.emit(
+                project_id,
+                reason="manager_auto_changed",
+                run_id=state.active_run_id,
+                job_id=state.active_job_id,
+                status=state.state,
+                payload={"enabled": state.enabled, "owner_session_id": state.owner_session_id},
+            )
+        except Exception:
+            logger.exception("Failed to emit manager auto project event: project_id=%s state=%s", project_id, state.state)
 
     def can_mutate(self, project_id: str, session_id: str | None) -> tuple[bool, ManagerAutoState]:
         state = self.get_state(project_id)

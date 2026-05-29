@@ -14,6 +14,7 @@ from app.services.manager_wake_service import ManagerWakeService
 from app.services.patch_apply import PatchApplyService
 from app.services.patch_validator import PatchValidator
 from app.services.project_file_service import ProjectFileService
+from app.services.project_event_service import ProjectEventService
 from app.services.project_service import ProjectService
 from app.services.result_asset_service import ResultAssetService
 from app.services.report_service import ReportService
@@ -57,12 +58,20 @@ def get_chat_job_service() -> ChatJobService:
 
 @lru_cache
 def get_runtime_dependency_job_service() -> RuntimeDependencyJobService:
-    return RuntimeDependencyJobService(manager_wake_service=get_manager_wake_service())
+    return RuntimeDependencyJobService(
+        manager_wake_service=get_manager_wake_service(),
+        project_event_service=get_project_event_service(),
+    )
 
 
 @lru_cache
 def get_chat_session_service() -> ChatSessionService:
     return ChatSessionService(get_project_service(), get_manager_auto_service())
+
+
+@lru_cache
+def get_project_event_service() -> ProjectEventService:
+    return ProjectEventService(get_project_service())
 
 
 @lru_cache
@@ -78,6 +87,7 @@ def get_worker_service() -> WorkerService:
         get_runtime_approval_service(),
         get_library_registry_service(),
         get_manager_wake_service(),
+        project_event_service=get_project_event_service(),
     )
 
 
@@ -121,7 +131,7 @@ def get_library_registry_service() -> LibraryRegistryService:
 
 @lru_cache
 def get_manager_auto_service() -> ManagerAutoService:
-    return ManagerAutoService(get_project_service())
+    return ManagerAutoService(get_project_service(), get_project_event_service())
 
 
 @lru_cache

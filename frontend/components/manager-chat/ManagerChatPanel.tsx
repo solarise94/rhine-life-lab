@@ -99,6 +99,8 @@ interface SlashCommandOption {
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const MANAGER_CONTEXT_WINDOW_TOKENS = 1_000_000;
 const CHARS_PER_TOKEN_ESTIMATE = 3.6;
+const PROJECT_MUTATION_TOOLS = /^(create_card|update_card|delete_card|configure_card_execution|start_card_run|rerun_card|review_card_run|stop_card_run|cleanup_run_history)$/;
+const RUN_CONTROL_TOOLS = /^(start_card_run|rerun_card|review_card_run|stop_card_run|cleanup_run_history)$/;
 const SLASH_COMMANDS: SlashCommandOption[] = [
   { command: "/compact", label: "压缩当前会话上下文" },
   { command: "/auto", label: "开启自动推进模式" },
@@ -491,10 +493,14 @@ export function ManagerChatPanel({
   const effortMenuRef = useRef<HTMLDivElement>(null);
   const thinkingRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const refreshTimerRef = useRef<number | null>(null);
+  const delayedRefreshTimerRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const autoSessionReconnectTimerRef = useRef<number | null>(null);
+  const projectEventReconnectTimerRef = useRef<number | null>(null);
   const activeStreamControllerRef = useRef<AbortController | null>(null);
   const autoSessionEventSourceRef = useRef<EventSource | null>(null);
+  const projectEventSourceRef = useRef<EventSource | null>(null);
+  const activeAutoStreamMessagesRef = useRef<Set<string>>(new Set());
   const remoteHydratingRef = useRef(false);
   const stopRequestedRef = useRef(false);
   const currentSessionIdRef = useRef<string | null>(sessionId ?? null);
@@ -657,6 +663,19 @@ export function ManagerChatPanel({
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
+    if (refreshTimerRef.current !== null && typeof window !== "undefined") {
+      window.clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = null;
+    }
+    if (delayedRefreshTimerRef.current !== null && typeof window !== "undefined") {
+      window.clearTimeout(delayedRefreshTimerRef.current);
+      delayedRefreshTimerRef.current = null;
+    }
+    if (projectEventReconnectTimerRef.current !== null && typeof window !== "undefined") {
+      window.clearTimeout(projectEventReconnectTimerRef.current);
+      projectEventReconnectTimerRef.current = null;
+    }
+    activeAutoStreamMessagesRef.current.clear();
     hydratedSessionIdRef.current = null;
     lastSavedSignatureRef.current = "[]";
     setBusy(false);
@@ -677,7 +696,7 @@ export function ManagerChatPanel({
     if (!sessionId || !chatSessionQuery.data?.session || activeStreamControllerRef.current) {
       return;
     }
-    const nextMessages = normalizeSessionMessages(chatSessionQuery.data.session.messages);
+    const nextMessages = normalizeSessionMessages(chatSessionQuery.data.session.messages.filter((message) => !shouldIgnoreIncomingSessionMessage(message)));
     const mergedMessages = mergeChatMessagesById(messages, nextMessages);
     const nextSignature = sessionMessagesSignature(mergedMessages);
     sessionRevisionRef.current = chatSessionQuery.data.session.revision;
@@ -721,6 +740,7 @@ export function ManagerChatPanel({
   useEffect(() => {
     autoSessionEventSourceRef.current?.close();
     autoSessionEventSourceRef.current = null;
+    activeAutoStreamMessagesRef.current.clear();
     if (autoSessionReconnectTimerRef.current !== null) {
       window.clearTimeout(autoSessionReconnectTimerRef.current);
       autoSessionReconnectTimerRef.current = null;
@@ -753,11 +773,22 @@ export function ManagerChatPanel({
         }
         if (payload.type === "stream_event" && payload.message_id && payload.event) {
           remoteHydratingRef.current = true;
+          if (payload.event.type === "done" || payload.event.type === "error") {
+            activeAutoStreamMessagesRef.current.delete(payload.message_id);
+          } else {
+            activeAutoStreamMessagesRef.current.add(payload.message_id);
+          }
           applyStreamEvent(payload.message_id, payload.event);
           return;
         }
         if (payload.type !== "message_upsert" || !payload.message) {
           return;
+        }
+        if (shouldIgnoreIncomingSessionMessage(payload.message)) {
+          return;
+        }
+        if (payload.message.state === "done" || payload.message.state === "error") {
+          activeAutoStreamMessagesRef.current.delete(payload.message.id);
         }
         const incoming = normalizeSessionMessages([payload.message]);
         if (!incoming.length) return;
@@ -776,6 +807,7 @@ export function ManagerChatPanel({
         if (autoSessionEventSourceRef.current === source) {
           autoSessionEventSourceRef.current = null;
         }
+        activeAutoStreamMessagesRef.current.clear();
         if (stopped) return;
         refetchChatSession();
         const delay = Math.min(10_000, 1_000 * 2 ** reconnectAttempt);
@@ -795,8 +827,74 @@ export function ManagerChatPanel({
       }
       autoSessionEventSourceRef.current?.close();
       autoSessionEventSourceRef.current = null;
+      activeAutoStreamMessagesRef.current.clear();
     };
   }, [effectiveManagerAuto?.enabled, isAutoOwnerSession, projectId, queryClient, refetchChatSession, sessionId]);
+
+  useEffect(() => {
+    projectEventSourceRef.current?.close();
+    projectEventSourceRef.current = null;
+    if (projectEventReconnectTimerRef.current !== null && typeof window !== "undefined") {
+      window.clearTimeout(projectEventReconnectTimerRef.current);
+      projectEventReconnectTimerRef.current = null;
+    }
+    if (typeof window === "undefined") {
+      return;
+    }
+    let stopped = false;
+    let reconnectAttempt = 0;
+
+    const connect = () => {
+      if (stopped) return;
+      const source = new EventSource(apiUrl(`/projects/${projectId}/events`));
+      projectEventSourceRef.current = source;
+      source.onopen = () => {
+        reconnectAttempt = 0;
+      };
+      source.onmessage = (event) => {
+        if (!event.data) return;
+        const payload = JSON.parse(event.data) as {
+          type?: string;
+          reason?: string;
+          run_id?: string | null;
+        };
+        if (payload.type === "heartbeat") {
+          return;
+        }
+        const runId = typeof payload.run_id === "string" ? payload.run_id : null;
+        schedulePartialRefresh(runId);
+        if (payload.type === "project_state_baseline" || payload.reason === "manager_auto_changed") {
+          void queryClient.refetchQueries({ queryKey: queryKeys.managerAuto(projectId, sessionId), type: "active" });
+        }
+      };
+      source.onerror = () => {
+        source.close();
+        if (projectEventSourceRef.current === source) {
+          projectEventSourceRef.current = null;
+        }
+        if (stopped) return;
+        refetchWorkspaceState();
+        void queryClient.refetchQueries({ queryKey: queryKeys.managerAuto(projectId, sessionId), type: "active" });
+        const delay = Math.min(10_000, 1_000 * 2 ** reconnectAttempt);
+        reconnectAttempt += 1;
+        projectEventReconnectTimerRef.current = window.setTimeout(() => {
+          projectEventReconnectTimerRef.current = null;
+          connect();
+        }, delay);
+      };
+    };
+
+    connect();
+    return () => {
+      stopped = true;
+      if (projectEventReconnectTimerRef.current !== null) {
+        window.clearTimeout(projectEventReconnectTimerRef.current);
+        projectEventReconnectTimerRef.current = null;
+      }
+      projectEventSourceRef.current?.close();
+      projectEventSourceRef.current = null;
+    };
+  }, [projectId, queryClient, sessionId]);
 
   useEffect(() => () => {
     if (saveTimerRef.current !== null && typeof window !== "undefined") {
@@ -805,11 +903,18 @@ export function ManagerChatPanel({
     if (refreshTimerRef.current !== null && typeof window !== "undefined") {
       window.clearTimeout(refreshTimerRef.current);
     }
+    if (delayedRefreshTimerRef.current !== null && typeof window !== "undefined") {
+      window.clearTimeout(delayedRefreshTimerRef.current);
+    }
     if (autoSessionReconnectTimerRef.current !== null && typeof window !== "undefined") {
       window.clearTimeout(autoSessionReconnectTimerRef.current);
     }
+    if (projectEventReconnectTimerRef.current !== null && typeof window !== "undefined") {
+      window.clearTimeout(projectEventReconnectTimerRef.current);
+    }
     activeStreamControllerRef.current?.abort();
     autoSessionEventSourceRef.current?.close();
+    projectEventSourceRef.current?.close();
   }, []);
 
   useEffect(() => {
@@ -1082,7 +1187,30 @@ export function ManagerChatPanel({
     });
   }
 
-  function schedulePartialRefresh() {
+  function shouldIgnoreIncomingSessionMessage(message: ChatSessionMessageRecord) {
+    if (!activeAutoStreamMessagesRef.current.has(message.id)) {
+      return false;
+    }
+    // While the EventSource is continuous, live stream deltas are newer than
+    // persisted snapshots. On reconnect the active set is cleared so the next
+    // session snapshot can repair a partial message.
+    return message.state !== "done" && message.state !== "error";
+  }
+
+  function refetchWorkspaceState(runId?: string | null) {
+    const queries = [
+      queryClient.refetchQueries({ queryKey: queryKeys.project(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.workOrder(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.advancedProposals(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.results(projectId), type: "active" }),
+    ];
+    if (runId) {
+      queries.push(queryClient.refetchQueries({ queryKey: queryKeys.runEvents(projectId, runId), type: "active" }));
+    }
+    void Promise.all(queries);
+  }
+
+  function schedulePartialRefresh(runId?: string | null) {
     if (refreshTimerRef.current !== null && typeof window !== "undefined") {
       window.clearTimeout(refreshTimerRef.current);
     }
@@ -1091,12 +1219,21 @@ export function ManagerChatPanel({
     }
     refreshTimerRef.current = window.setTimeout(() => {
       refreshTimerRef.current = null;
-      void Promise.all([
-        queryClient.refetchQueries({ queryKey: queryKeys.project(projectId), type: "active" }),
-        queryClient.refetchQueries({ queryKey: queryKeys.workOrder(projectId), type: "active" }),
-        queryClient.refetchQueries({ queryKey: queryKeys.advancedProposals(projectId), type: "active" }),
-      ]);
+      refetchWorkspaceState(runId);
     }, 120);
+  }
+
+  function scheduleDelayedPartialRefresh(runId?: string | null) {
+    if (delayedRefreshTimerRef.current !== null && typeof window !== "undefined") {
+      window.clearTimeout(delayedRefreshTimerRef.current);
+    }
+    if (typeof window === "undefined") {
+      return;
+    }
+    delayedRefreshTimerRef.current = window.setTimeout(() => {
+      delayedRefreshTimerRef.current = null;
+      refetchWorkspaceState(runId);
+    }, 1_000);
   }
 
   function syncProposal(proposal: Proposal) {
@@ -1349,8 +1486,11 @@ export function ManagerChatPanel({
             };
           }
         case "tool_end":
-          if (!event.is_error && event.tool_name && /create_card|update_card|delete_card|configure_card_execution/.test(event.tool_name)) {
+          if (!event.is_error && event.tool_name && PROJECT_MUTATION_TOOLS.test(event.tool_name)) {
             schedulePartialRefresh();
+            if (RUN_CONTROL_TOOLS.test(event.tool_name)) {
+              scheduleDelayedPartialRefresh();
+            }
           }
           {
             const fallbackIndex = lastTimelineIndex(
@@ -1379,6 +1519,13 @@ export function ManagerChatPanel({
           }
         case "tool_report":
           {
+            const reportedRunId = typeof event.details?.run_id === "string" ? event.details.run_id : null;
+            if (event.tool_name && RUN_CONTROL_TOOLS.test(event.tool_name)) {
+              schedulePartialRefresh(reportedRunId);
+              scheduleDelayedPartialRefresh(reportedRunId);
+            } else if (reportedRunId) {
+              void queryClient.refetchQueries({ queryKey: queryKeys.runEvents(projectId, reportedRunId), type: "active" });
+            }
             const fallbackIndex = lastTimelineIndex(
               timeline,
               (item) => item.kind === "tool" && (!event.tool_name || item.toolName === event.tool_name),

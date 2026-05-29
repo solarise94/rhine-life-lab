@@ -48,6 +48,7 @@ from app.services.library_registry_service import LibraryRegistryService
 from app.services.manifest_service import ManifestService
 from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.manager_wake_service import ManagerWakeService
+from app.services.project_event_service import ProjectEventService
 from app.services.project_service import ProjectService
 from app.services.runtime_approval_service import RuntimeApprovalService
 from app.services.utils import atomic_write_json, utc_now
@@ -134,11 +135,13 @@ class WorkerService:
         runtime_approval_service: RuntimeApprovalService,
         library_registry_service: LibraryRegistryService | None = None,
         manager_wake_service: ManagerWakeService | None = None,
+        project_event_service: ProjectEventService | None = None,
     ) -> None:
         self.project_service = project_service
         self.manifest_service = manifest_service
         self.runtime_approval_service = runtime_approval_service
         self.manager_wake_service = manager_wake_service
+        self.project_event_service = project_event_service
         self.library_registry_service = library_registry_service or LibraryRegistryService(
             project_service,
             AppConfigService(project_service.settings),
@@ -371,6 +374,14 @@ class WorkerService:
             "status": initial_status,
             "latest_event": latest_event.model_dump(),
         }
+        self._emit_project_event(
+            project_id,
+            reason="run_created",
+            card_id=card_id,
+            run_id=run_id,
+            status=initial_status,
+            payload={"card_status": "planned" if rejected else "running"},
+        )
         if unresolved:
             response["pending_approvals"] = unresolved
             self._release_execution_guard(execution_guard, guard_kind)
@@ -515,6 +526,7 @@ class WorkerService:
         # delete run/results directories while the thread is still using them.
         self._append_event(project_id, run_id, run.card_id, event_type="run_cancelled", message=message)
         self._commit_run_stage(project_id, run_id, "cancelled")
+        self._emit_project_event(project_id, reason="run_cancelled", card_id=run.card_id, run_id=run_id, status="cancelled")
         self._enqueue_wake_event(
             project_id,
             kind="card_run_cancelled",
@@ -587,6 +599,7 @@ class WorkerService:
         self._threads.pop(run_id, None)
         self._processes.pop(run_id, None)
         self._commit_run_stage(project_id, run_id, "cleanup")
+        self._emit_project_event(project_id, reason="run_cleanup", card_id=run.card_id, run_id=run_id, status=run.status)
         return {"run_id": run_id, "cleanup_status": "completed", "archived_at": run.archived_at}
 
     def reset_card_run_state(self, project_id: str, card_id: str) -> dict:
@@ -609,6 +622,7 @@ class WorkerService:
             ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
             store.save_graph(graph)
             store.save_cards(cards)
+        self._emit_project_event(project_id, reason="card_run_state_reset", card_id=card_id, status="planned")
         return {"card_id": card_id, "status": "planned"}
 
     def rerun_card(
@@ -906,6 +920,14 @@ class WorkerService:
             run.summary = brief.get("final_report", {}).get("summary") or review_context.summary
             store.save_graph(graph)
             store.save_cards(cards)
+            self._emit_project_event(
+                project_id,
+                reason="run_review_finalized",
+                card_id=card.card_id,
+                run_id=run_id,
+                status=run.status,
+                payload={"card_status": card.status, "accepted": final_accept, "failure_reason": failure_reason},
+            )
             return {
                 "run_id": run_id,
                 "card_id": card.card_id,
@@ -1392,6 +1414,14 @@ class WorkerService:
             store.save_runs(runs)
             store.save_modules(modules)
             store.save_cards(cards)
+        self._emit_project_event(
+            project_id,
+            reason="run_status_changed",
+            card_id=card_id,
+            run_id=run_id,
+            status=status,
+            payload={"card_status": card_status or card.status},
+        )
 
     def _append_event(
         self,
@@ -1921,6 +1951,14 @@ class WorkerService:
             card.progress_note = message
             store.save_runs(graph.runs)
             store.save_cards(cards)
+        self._emit_project_event(
+            project_id,
+            reason="run_attention_changed",
+            card_id=card_id,
+            run_id=run_id,
+            status=run.status,
+            payload={"needs_manager_attention": True, "message": message},
+        )
 
     @staticmethod
     def _active_run_statuses() -> set[str]:
@@ -2433,6 +2471,30 @@ class WorkerService:
             created_at=utc_now(),
         )
         self.manager_wake_service.enqueue(event)
+
+    def _emit_project_event(
+        self,
+        project_id: str,
+        *,
+        reason: str,
+        card_id: str | None = None,
+        run_id: str | None = None,
+        status: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        if self.project_event_service is None:
+            return
+        try:
+            self.project_event_service.emit(
+                project_id,
+                reason=reason,
+                card_id=card_id,
+                run_id=run_id,
+                status=status,
+                payload=payload,
+            )
+        except Exception:
+            logger.exception("Failed to emit project event for project=%s reason=%s run=%s", project_id, reason, run_id)
 
     def _mark_project_needs_git_repair(self, project_id: str, reason: str) -> None:
         root = self.project_service.project_path(project_id)
