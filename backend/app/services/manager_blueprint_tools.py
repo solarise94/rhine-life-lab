@@ -805,7 +805,16 @@ class ManagerBlueprintTools:
                 python_runtime=request.python_runtime,
                 r_runtime=request.r_runtime,
             )
-            return {"ok": True, "can_start": True, **response}
+            return {
+                "ok": True,
+                "can_start": True,
+                "background": True,
+                "async_boundary": True,
+                "do_not_poll": True,
+                "wait_for_wake": True,
+                "message": "Run started in the background. Do not poll card status in this turn; wait for run events or a wake event.",
+                **response,
+            }
         except HTTPException as exc:
             if exc.status_code == 409:
                 detail = exc.detail
@@ -851,7 +860,16 @@ class ManagerBlueprintTools:
                 python_runtime=request.python_runtime,
                 r_runtime=request.r_runtime,
             )
-            return {"ok": True, **response}
+            return {
+                "ok": True,
+                "can_start": True,
+                "background": True,
+                "async_boundary": True,
+                "do_not_poll": True,
+                "wait_for_wake": True,
+                "message": "Rerun started in the background. Do not poll card status in this turn; wait for run events or a wake event.",
+                **response,
+            }
         except HTTPException as exc:
             raise ManagerPlanningError(str(exc.detail)) from exc
 

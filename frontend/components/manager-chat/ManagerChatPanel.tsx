@@ -1606,6 +1606,9 @@ export function ManagerChatPanel({
         : [{ id: managerMessageId, role: "manager" as const, content: "", thinking: "", thinkingState: "idle" as const, tools: [], state: "thinking" as const, timeline: [] }]),
     ]);
     setDraft("");
+    if (messageAttachments.length) {
+      clearAttachments(projectId);
+    }
     setBusy(true);
     setError(null);
     stopRequestedRef.current = false;

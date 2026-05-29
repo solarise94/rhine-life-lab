@@ -157,7 +157,7 @@ Available capabilities:
 - configure_card_execution directly updates card execution permissions, selected skills, MCP servers, and runtime bindings such as tool_policy.rscript and tool_policy.network.
 - install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime when a card reports missing runtime dependencies.
 - get_runtime_dependency_install_status checks whether a previously started dependency installation job has finished.
-- start_card_run, stop_card_run, rerun_card, and review_card_run control card execution directly when execution should happen now.
+- start_card_run, stop_card_run, rerun_card, and review_card_run control card execution directly when execution should happen now. start_card_run and rerun_card launch background executor work; after a successful start, do not poll card status in the same turn. Briefly report the run_id and stop so run events/wake events can carry progress.
 - cleanup_run_history removes old finished run execution files/caches when they are no longer needed; by default it preserves runs that own valid accepted assets.
 - search_card_templates, save_card_template, and instantiate_card_template manage reusable manager-only card templates.
 - read_result_asset reads a whitelisted result asset preview by asset_id.
@@ -174,6 +174,7 @@ Judgment:
 - Treat skills and MCP servers as optional ids for card execution, not as always-on built-in powers. Use list/search only when a card clearly benefits from reusable abilities, and prefer attaching by obvious id/name without reading details.
 - For simple conceptual questions, answer without tools.
 - For blueprint/card changes, use find_cards/get_card_detail for existing cards and find_assets for inputs. Use card write tools directly once you have enough context. Do not describe a change as complete unless a write tool succeeded.
+- After start_card_run or rerun_card returns background/async_boundary/do_not_poll, do not call get_card_detail, find_assets, inspect_project_summary, or cleanup tools just to wait for that run. End the turn with the run_id unless the tool returned ok:false or pending approvals.
 - Dependency ATTENTION is derived, not a persisted card status. Do not treat linked_assets as current dependency truth; use card.inputs, card.outputs, and asset.depends_on. If update_card or delete_card returns dependency_attention_check_recommended, call inspect_dependency_attention before deciding whether to continue. For input_asset_outdated issues, the old asset_id is still saved in the downstream card's inputs; if current_asset_id is clear and preserves the workflow, call update_card to replace that input asset_id first, then rerun_card in upstream-first order. If you rerun without updating inputs, the executor will reuse the old asset. If the intent is ambiguous, report the ATTENTION to the user.
 - If a write tool returns ok:false, use the message/retry_hint to correct arguments and retry when the correction is clear. If it is not clear, inspect context or ask a focused question.
 ${webJudgmentLines.join("\n")}
@@ -773,6 +774,10 @@ function summarizeToolPayload(toolName, payload) {
       run_id: payload.run_id,
       card_id: payload.card_id,
       status: payload.status,
+      background: payload.background,
+      async_boundary: payload.async_boundary,
+      do_not_poll: payload.do_not_poll,
+      wait_for_wake: payload.wait_for_wake,
       can_start: payload.can_start,
       block_reasons: compactItems(payload.block_reasons, (item) => item, 4),
       message: truncateText(payload.message, 180),
@@ -933,6 +938,14 @@ function buildToolReport(toolName, details) {
       summary:
         details.message ||
         `已启动后台依赖安装任务：${runtime}${packageCount ? `，共 ${packageCount} 个包` : ""}。`,
+      details,
+    };
+  }
+  if ((toolName === "start_card_run" || toolName === "rerun_card") && details.background && details.run_id) {
+    return {
+      summary:
+        details.message ||
+        `已启动后台运行 ${details.run_id}。本轮不要轮询卡片状态，等待运行事件或 wake 事件继续。`,
       details,
     };
   }
@@ -1514,7 +1527,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "start_card_run",
       label: "Start card run",
-      description: "Start executing a specific card. Use after the card plan and runtime policy are ready. If can_start is false, inspect block_reasons and fix the blocker before retrying.",
+      description: "Start executing a specific card as background work. Use after the card plan and runtime policy are ready. If successful, report the run_id and stop the turn; do not poll card status while waiting. If can_start is false, inspect block_reasons and fix the blocker before retrying.",
       parameters: Type.Object({
         card_id: Type.String(),
         worker_type: Type.Optional(Type.String()),
@@ -1577,7 +1590,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "rerun_card",
       label: "Rerun card",
-      description: "Start a fresh rerun for a card after a previous run finished or failed. rerun_card reuses the card's saved inputs[].asset_id values; when repairing stale/outdated dependency chains, inspect dependency attention and update_card inputs to current asset ids before rerunning.",
+      description: "Start a fresh background rerun for a card after a previous run finished or failed. If successful, report the run_id and stop the turn; do not poll card status while waiting. rerun_card reuses the card's saved inputs[].asset_id values; when repairing stale/outdated dependency chains, inspect dependency attention and update_card inputs to current asset ids before rerunning.",
       parameters: Type.Object({
         card_id: Type.String(),
         worker_type: Type.Optional(Type.String()),

@@ -3,8 +3,10 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 import logging
+import os
 from pathlib import Path
 import shutil
+import signal
 from threading import Lock, Semaphore, Thread
 from typing import Any
 from uuid import uuid4
@@ -59,6 +61,7 @@ SYSTEM_OUTPUT_ROLES = {"run_summary", "run_preview"}
 
 _SENSITIVE_COMMAND_KEYS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 _EVENT_FLUSH_BATCH_SIZE = 25
+_PROCESS_TERMINATE_GRACE_SECONDS = 5
 
 
 def _is_sensitive_command_key(value: str) -> bool:
@@ -153,6 +156,35 @@ class WorkerService:
         self._event_sequences: dict[tuple[str, str], int] = {}
         self._execution_locks_guard = Lock()
         self._reconcile_active_runs()
+
+    def _terminate_process_group(self, run_id: str, process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=_PROCESS_TERMINATE_GRACE_SECONDS)
+            return
+        except ProcessLookupError:
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            logger.exception("Failed to terminate process group for run=%s; falling back to process.kill()", run_id)
+
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=_PROCESS_TERMINATE_GRACE_SECONDS)
+            return
+        except ProcessLookupError:
+            return
+        except Exception:
+            logger.exception("Failed to kill process group for run=%s; falling back to process.kill()", run_id)
+
+        try:
+            process.kill()
+            process.wait(timeout=_PROCESS_TERMINATE_GRACE_SECONDS)
+        except Exception:
+            logger.exception("Failed to kill process for run=%s", run_id)
 
     def start_run(
         self,
@@ -477,7 +509,7 @@ class WorkerService:
 
         process = self._processes.get(run_id)
         if process is not None and process.poll() is None:
-            process.kill()
+            self._terminate_process_group(run_id, process)
         # Do NOT pop _threads here — the _execute_run finally block does that
         # when the thread actually finishes. Popping early would let cleanup_run
         # delete run/results directories while the thread is still using them.
@@ -910,14 +942,11 @@ class WorkerService:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                start_new_session=True,
             )
             self._processes[run_id] = process
             if self._run_status(project_id, run_id) == "cancelled":
-                try:
-                    process.kill()
-                    process.wait(timeout=5)
-                except Exception:
-                    pass
+                self._terminate_process_group(run_id, process)
                 self._processes.pop(run_id, None)
                 return
             self._set_run_status(project_id, run_id, card_id, status="running", summary="执行器已启动。", progress_note="正在执行分析任务。")
@@ -929,9 +958,13 @@ class WorkerService:
                         return
                     try:
                         for raw_line in process.stdout:
+                            if self._run_status(project_id, run_id) == "cancelled":
+                                break
                             line = raw_line.rstrip()
                             if not line:
                                 continue
+                            if self._run_status(project_id, run_id) == "cancelled":
+                                break
                             transcript.write(f"- {line}\n")
                             transcript.flush()
                             if self._handle_structured_executor_event(project_id, run_id, card_id, line):
@@ -947,7 +980,7 @@ class WorkerService:
                 return_code = process.wait(timeout=self.project_service.settings.worker_timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                process.kill()
+                self._terminate_process_group(run_id, process)
                 return_code = process.wait()
             reader.join(timeout=2)
             if process.stdout is not None:

@@ -1973,6 +1973,10 @@ class ManagerFlowTest(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["can_start"])
+        self.assertTrue(result["background"])
+        self.assertTrue(result["async_boundary"])
+        self.assertTrue(result["do_not_poll"])
+        self.assertTrue(result["wait_for_wake"])
         self.assertIn("run_id", result)
         self._wait_for_run("test-project", result["run_id"])
 
