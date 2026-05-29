@@ -185,17 +185,17 @@ class ChatSessionService:
         message_id: str,
         event: dict,
         revision: int | None = None,
+        seq: int | None = None,
     ) -> None:
-        self._publish_session_event(
-            project_id,
-            session_id,
-            {
-                "type": "stream_event",
-                "message_id": message_id,
-                "event": event,
-                "revision": revision,
-            },
-        )
+        payload = {
+            "type": "stream_event",
+            "message_id": message_id,
+            "event": event,
+            "revision": revision,
+        }
+        if seq is not None:
+            payload["seq"] = seq
+        self._publish_session_event(project_id, session_id, payload)
 
     def delete_session(self, project_id: str, session_id: str) -> None:
         lock = self.project_service.lock_for(project_id)

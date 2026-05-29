@@ -12,6 +12,7 @@ from app.models.chat import ChatAction, ChatRequest, ChatResponse
 from app.models.patches import GraphPatch, Proposal
 from app.core.config import get_settings
 from app.services.app_config_service import AppConfigService
+from app.services.chat_stream_events import iter_sse_payloads
 from app.services.manager_blueprint_tools import ManagerBlueprintTools
 from app.services.manager_intent import ManagerIntentRouter
 from app.services.manager_patch_compiler import ManagerPatchCompiler
@@ -67,47 +68,21 @@ class ManagerService:
 
     def _chat_from_stream(self, project_id: str, chat_request: ChatRequest) -> ChatResponse:
         response_payload: dict | None = None
-        buffer = ""
-        for chunk in self.stream_chat(project_id, chat_request):
-            buffer += chunk.decode("utf-8", errors="replace")
-            while "\n\n" in buffer or "\r\n\r\n" in buffer:
-                lf = buffer.find("\n\n")
-                crlf = buffer.find("\r\n\r\n")
-                if lf == -1 or (crlf != -1 and crlf < lf):
-                    raw_event = buffer[:crlf]
-                    buffer = buffer[crlf + 4 :]
-                else:
-                    raw_event = buffer[:lf]
-                    buffer = buffer[lf + 2 :]
-                payload = self._parse_stream_payload(raw_event)
-                if payload is None:
-                    continue
+        try:
+            payloads = iter_sse_payloads(
+                self.stream_chat(project_id, chat_request),
+                invalid_json_message="Pi manager stream returned invalid JSON",
+            )
+            for payload in payloads:
                 if payload.get("type") == "error":
                     raise ManagerPlanningError(str(payload.get("detail") or "Pi manager stream failed."))
                 if payload.get("type") == "response" and isinstance(payload.get("response"), dict):
                     response_payload = payload["response"]
-        if buffer.strip():
-            payload = self._parse_stream_payload(buffer)
-            if payload and payload.get("type") == "response" and isinstance(payload.get("response"), dict):
-                response_payload = payload["response"]
+        except RuntimeError as exc:
+            raise ManagerPlanningError(str(exc)) from exc
         if response_payload is None:
             raise ManagerPlanningError("Pi manager stream ended without a final response.")
         return ChatResponse.model_validate(response_payload)
-
-    @staticmethod
-    def _parse_stream_payload(raw_event: str) -> dict | None:
-        payload = "\n".join(
-            line[5:].lstrip()
-            for line in raw_event.splitlines()
-            if line.startswith("data:")
-        ).strip()
-        if not payload:
-            return None
-        try:
-            parsed = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            raise ManagerPlanningError(f"Pi manager stream returned invalid JSON: {exc}") from exc
-        return parsed if isinstance(parsed, dict) else None
 
     def stream_chat(self, project_id: str, chat_request: ChatRequest) -> Iterator[bytes]:
         if self.settings.manager_backend != "pi":

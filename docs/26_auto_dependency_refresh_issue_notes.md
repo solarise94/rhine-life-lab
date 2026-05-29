@@ -63,17 +63,16 @@ Auto wake:
 ```text
 ManagerWakeProcessor
 -> manager_service.stream_chat()
--> parse internal SSE payloads
--> publish selected stream_event payloads to ChatSessionService subscribers
--> periodically persist full message snapshots with message_upsert
+-> ChatStreamRelay parses internal SSE payloads
+-> ChatStreamRelay publishes ordered stream_event payloads to ChatSessionService subscribers
+-> ChatStreamRelay periodically persists full message snapshots with message_upsert
 -> frontend EventSource receives both stream_event and message_upsert
--> frontend also periodically refetches chat session while auto is enabled
 ```
 
 ### Likely causes
 
 1. Auto uses a background session-replay path, not the same direct browser stream as manual chat.
-2. `ManagerWakeProcessor` throttles stream publication and persistence:
+2. Auto uses a backend relay because there is no browser HTTP request waiting for the wake turn:
    - stream events are throttled for delta-like events;
    - full message snapshots are persisted less often.
 3. The frontend applies incremental `stream_event` updates and also merges full `message_upsert` snapshots into the same message.
@@ -102,6 +101,32 @@ Prefer a single frontend source of truth while an auto wake message is actively 
 - or introduce a monotonic stream revision / sequence number so older snapshots cannot overwrite newer local stream state.
 
 Manual chat and auto wake should eventually share one reducer/state machine for stream event application.
+
+### Current remediation status
+
+The backend wake-specific stream handling has been removed from `ManagerWakeProcessor`.
+
+Current backend shape:
+
+```text
+ManagerWakeProcessor
+-> ChatStreamRelay.run_to_session()
+-> manager_service.stream_chat()
+-> chat_stream_events.iter_sse_payloads()
+-> ordered stream_event publish + message_upsert snapshots
+```
+
+`ManagerWakeProcessor` should not regain private SSE parsing, timeline assembly, or delta throttling logic. It owns wake claiming, auto-state updates, directive consumption, and error handling only.
+
+Manual chat remains intentionally unchanged:
+
+```text
+frontend fetch /chat-stream
+-> direct SSE events
+-> local applyStreamEvent()
+```
+
+Manual chat is already the stable path. Do not reroute manual chat through backend session relay unless there is a separate product decision to change manual session persistence semantics.
 
 ## 3. Card status refresh lag after Manager starts a run
 
@@ -403,15 +428,41 @@ The existing chat session SSE is still useful, but its job should be limited:
 - deliver final `message_upsert` snapshots;
 - reconnect and hydrate chat history.
 
-It should not be treated as the source of truth for card/run status. When chat SSE receives a tool event, it may still schedule a best-effort refresh, but the project-state stream should be the primary path.
+It should not be treated as the source of truth for card/run status. Chat-session SSE must not trigger project/work-order/result refresh for every non-heartbeat event. Text and thinking deltas are chat output, not project-state changes. Project/card/run refresh should come from:
+
+- explicit tool events that are known to mutate graph/run state, as a compatibility fallback; and
+- the project-state event stream from P0B as the authoritative path.
+
+Remove or avoid top-level handlers like:
+
+```text
+on every non-heartbeat chat-session event -> schedulePartialRefresh()
+```
+
+That pattern turns token-level auto output into workspace refetch traffic and can produce visible UI jitter, stale cache races, and unnecessary backend load.
 
 For active auto wake messages:
 
 - `stream_event` is the live source;
-- non-final `message_upsert` must not overwrite the active streamed message;
+- non-final `message_upsert` must not overwrite the active streamed message while the EventSource connection is continuous;
 - final `message_upsert` may settle the message after `done` / `error`;
-- events should carry a monotonic `seq` or stream revision so old snapshots cannot move the UI backward.
-- after an EventSource reconnect, a newer persisted `message_upsert` may hydrate or replace the partial active message if its revision is greater than the local revision. Otherwise a network blip could freeze a partial message forever.
+- after an EventSource reconnect, clear the active-stream marker and allow a persisted `message_upsert` or full session refetch to repair the partial message;
+- events should eventually carry a monotonic `seq` or stream revision so old snapshots cannot move the UI backward.
+
+Stable two-hop contract:
+
+```text
+stream_event:
+  primary live display source for active auto messages
+
+message_upsert:
+  initial placeholder
+  periodic recovery snapshot
+  final done/error settlement
+  reconnect / browser refresh hydration
+```
+
+During a continuous connection, the frontend should ignore stale non-final `message_upsert` for a message that is already active via `stream_event`. After reconnect, the active set is cleared and the next session snapshot is allowed to repair local state.
 
 Auto wake segmentation is intentional:
 
@@ -420,6 +471,45 @@ Auto wake segmentation is intentional:
 - do not merge multiple wake responses into one synthetic assistant message, because that would change conversation history semantics.
 
 "Same visible stream model" means the same reducer/schema per assistant message, not one continuous message across the whole auto run.
+
+### P0C.1: Stabilize Two-Hop Chat Delivery Contract
+
+There are two risks that need explicit tests and code comments:
+
+1. `stream_event` and `message_upsert` can race for the same message.
+2. Multiple auto wake responses can look like one continuous chat even though they are separate turns.
+
+Fix for risk 1:
+
+- Treat `stream_event` as the only live source for active auto messages.
+- Treat `message_upsert` as a recovery/finalization snapshot.
+- Ignore non-final `message_upsert` while the message id is in the active auto stream set.
+- Accept `done` / `error` snapshots.
+- On EventSource error/reconnect, clear the active set and refetch the session.
+
+Suggested regression test:
+
+```text
+stream_event(text_delta: "A")
+message_upsert(state: streaming, content: "")
+stream_event(text_delta: "B")
+message_upsert(state: done, content: "AB")
+
+Expected UI content: "AB"; the stale streaming snapshot never removes "A".
+```
+
+Fix for risk 2:
+
+- Keep one `wake_response_<wake_id>` message per wake.
+- Do not merge multiple wake responses into one synthetic assistant message.
+- If a more continuous UI is desired, group messages visually by auto chain/wake sequence, but preserve separate message identities and audit semantics.
+- Keep `wake_id` and later `chain_id` / `seq` available for grouping, not for message merging.
+
+Newly identified issue:
+
+- Chat-session SSE currently risks doing workspace refresh work for every non-heartbeat message event.
+- This should be removed or narrowed so chat output does not drive project-state invalidation.
+- Project-state SSE should own card/run/work-order refresh. Tool-specific refresh triggers can remain only as a compatibility fallback.
 
 ### Detailed Chat Stream Reducer Plan
 

@@ -45,6 +45,22 @@ class ProjectEventServiceTest(unittest.TestCase):
         self.assertEqual(received["seq"], baseline["seq"] + 1)
         self.assertEqual(received["card_id"], "card_1")
         self.assertEqual(received["run_id"], "run_1")
+        self.assertEqual(received["run_status"], "running")
+        self.assertIsNone(received["card_status"])
+
+    def test_emit_exposes_card_and_run_status_separately(self) -> None:
+        emitted = self.service.emit(
+            "event-project",
+            reason="run_created",
+            card_id="card_1",
+            run_id="run_1",
+            status="queued",
+            payload={"card_status": "running"},
+        )
+
+        self.assertEqual(emitted["status"], "queued")
+        self.assertEqual(emitted["run_status"], "queued")
+        self.assertEqual(emitted["card_status"], "running")
 
     def test_revision_is_persisted_in_graph_metadata(self) -> None:
         self.service.emit("event-project", reason="card_updated", card_id="card_1")

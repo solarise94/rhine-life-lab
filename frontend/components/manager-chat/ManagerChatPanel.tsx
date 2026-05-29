@@ -501,6 +501,7 @@ export function ManagerChatPanel({
   const autoSessionEventSourceRef = useRef<EventSource | null>(null);
   const projectEventSourceRef = useRef<EventSource | null>(null);
   const activeAutoStreamMessagesRef = useRef<Set<string>>(new Set());
+  const autoStreamSeqRef = useRef<Map<string, number>>(new Map());
   const remoteHydratingRef = useRef(false);
   const stopRequestedRef = useRef(false);
   const currentSessionIdRef = useRef<string | null>(sessionId ?? null);
@@ -676,6 +677,7 @@ export function ManagerChatPanel({
       projectEventReconnectTimerRef.current = null;
     }
     activeAutoStreamMessagesRef.current.clear();
+    autoStreamSeqRef.current.clear();
     hydratedSessionIdRef.current = null;
     lastSavedSignatureRef.current = "[]";
     setBusy(false);
@@ -741,6 +743,7 @@ export function ManagerChatPanel({
     autoSessionEventSourceRef.current?.close();
     autoSessionEventSourceRef.current = null;
     activeAutoStreamMessagesRef.current.clear();
+    autoStreamSeqRef.current.clear();
     if (autoSessionReconnectTimerRef.current !== null) {
       window.clearTimeout(autoSessionReconnectTimerRef.current);
       autoSessionReconnectTimerRef.current = null;
@@ -766,15 +769,23 @@ export function ManagerChatPanel({
           message_id?: string;
           event?: ChatStreamEvent;
           revision?: number;
+          seq?: number;
         };
-        if (payload.type !== "heartbeat") {
-          schedulePartialRefresh();
+        if (payload.type === "message_upsert") {
           void queryClient.refetchQueries({ queryKey: queryKeys.managerAuto(projectId, sessionId), type: "active" });
         }
         if (payload.type === "stream_event" && payload.message_id && payload.event) {
+          if (typeof payload.seq === "number") {
+            const lastSeq = autoStreamSeqRef.current.get(payload.message_id) ?? 0;
+            if (payload.seq <= lastSeq) {
+              return;
+            }
+            autoStreamSeqRef.current.set(payload.message_id, payload.seq);
+          }
           remoteHydratingRef.current = true;
           if (payload.event.type === "done" || payload.event.type === "error") {
             activeAutoStreamMessagesRef.current.delete(payload.message_id);
+            autoStreamSeqRef.current.delete(payload.message_id);
           } else {
             activeAutoStreamMessagesRef.current.add(payload.message_id);
           }
@@ -789,6 +800,7 @@ export function ManagerChatPanel({
         }
         if (payload.message.state === "done" || payload.message.state === "error") {
           activeAutoStreamMessagesRef.current.delete(payload.message.id);
+          autoStreamSeqRef.current.delete(payload.message.id);
         }
         const incoming = normalizeSessionMessages([payload.message]);
         if (!incoming.length) return;
@@ -808,6 +820,7 @@ export function ManagerChatPanel({
           autoSessionEventSourceRef.current = null;
         }
         activeAutoStreamMessagesRef.current.clear();
+        autoStreamSeqRef.current.clear();
         if (stopped) return;
         refetchChatSession();
         const delay = Math.min(10_000, 1_000 * 2 ** reconnectAttempt);
@@ -828,6 +841,7 @@ export function ManagerChatPanel({
       autoSessionEventSourceRef.current?.close();
       autoSessionEventSourceRef.current = null;
       activeAutoStreamMessagesRef.current.clear();
+      autoStreamSeqRef.current.clear();
     };
   }, [effectiveManagerAuto?.enabled, isAutoOwnerSession, projectId, queryClient, refetchChatSession, sessionId]);
 

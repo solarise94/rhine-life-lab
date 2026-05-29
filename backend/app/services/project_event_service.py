@@ -52,6 +52,9 @@ class ProjectEventService:
     ) -> dict[str, Any]:
         # `reasons` is reserved for future coalesced UI/cache events. Current
         # callers usually emit one committed mutation at a time.
+        event_payload = payload or {}
+        run_status = self._event_status(event_payload, "run_status", fallback=status)
+        card_status = self._event_status(event_payload, "card_status")
         revision = self._increment_revision(project_id)
         event = {
             "type": "project_state_changed",
@@ -64,11 +67,18 @@ class ProjectEventService:
             "run_id": run_id,
             "job_id": job_id,
             "status": status,
-            "payload": payload or {},
+            "run_status": run_status,
+            "card_status": card_status,
+            "payload": event_payload,
             "created_at": utc_now(),
         }
         self._publish(project_id, event)
         return event
+
+    @staticmethod
+    def _event_status(payload: dict[str, Any], key: str, *, fallback: str | None = None) -> str | None:
+        value = payload.get(key)
+        return value if isinstance(value, str) else fallback
 
     def _baseline_event(self, project_id: str) -> dict[str, Any]:
         revision = self._current_revision(project_id)
