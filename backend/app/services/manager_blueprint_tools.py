@@ -9,7 +9,7 @@ import subprocess
 from typing import Any
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.models.card_templates import CardTemplate, TemplateBundle, TemplateBundleFile, TemplateIoBinding, TemplateSpec
 from app.models.cards import Card, CardAssetRef
@@ -19,6 +19,7 @@ from app.models.output_contracts import CardOutputSpec
 from app.models.runs import Manifest
 from app.services.app_config_service import AppConfigService
 from app.services.asset_timeline_service import AssetTimelineService
+from app.services.artifact_format_service import DEFAULT_CLASS_FORMAT, FORMAT_TO_CLASS
 from app.services.dependency_attention_service import DependencyAttentionService
 from app.services.library_registry_service import LibraryRegistryService
 from app.services.manager_planner import ManagerPlanningError
@@ -116,19 +117,18 @@ class SaveCardTemplatePayload(BaseModel):
 
 
 class ScriptAssetBindingPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     requirement_id: str
     asset_id: str
 
 
 class InstantiateCardTemplatePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     template_id: str
-    card_id: str
     title: str | None = None
     step: int | None = None
-    input_bindings: list[dict[str, Any]] = Field(default_factory=list)
-    output_bindings: list[dict[str, Any]] = Field(default_factory=list)
+    input_bindings: list[ManagerCardInputPayload] = Field(default_factory=list)
     script_asset_bindings: list[ScriptAssetBindingPayload] = Field(default_factory=list)
-    runtime_overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 class InstallRuntimeDependenciesPayload(BaseModel):
@@ -165,10 +165,45 @@ class InspectDependencyAttentionPayload(BaseModel):
     max_issues: int = 50
 
 
-class PlanCardWritePayload(BaseModel):
-    action: str = "create"
-    card_id: str | None = None
-    card: dict[str, Any] = Field(default_factory=dict)
+class ManagerCardInputPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    asset_id: str
+
+
+class ManagerCardOutputPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: str
+    artifact_class: str
+    description: str | None = None
+
+
+class CreateCardPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str
+    summary: str
+    step: int | None = None
+    inputs: list[ManagerCardInputPayload] = Field(default_factory=list)
+    outputs: list[ManagerCardOutputPayload] = Field(default_factory=list)
+
+
+class UpdateCardPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    card_id: str
+    title: str | None = None
+    summary: str | None = None
+    step: int | None = None
+    inputs: list[ManagerCardInputPayload] | None = None
+    outputs: list[ManagerCardOutputPayload] | None = None
+
+
+class CardWriteValidationError(ManagerPlanningError):
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+        first_message = ""
+        errors = payload.get("errors") or []
+        if errors:
+            first_message = str(errors[0].get("message") or "")
+        super().__init__(first_message or str(payload.get("error_type") or "card_write_validation_failed"))
 
 
 class ManagerBlueprintTools:
@@ -359,45 +394,6 @@ class ManagerBlueprintTools:
             raise ManagerPlanningError("get_asset_detail requires asset_id.")
         return self.result_asset_service.get_asset_detail(project_id, asset_id)
 
-    def plan_card_write(self, project_id: str, payload: dict) -> dict:
-        request = PlanCardWritePayload.model_validate(payload)
-        action = str(request.action or "create").strip().lower()
-        card_payload = dict(request.card or {})
-        if request.card_id and "card_id" not in card_payload:
-            card_payload["card_id"] = request.card_id
-        snapshot = self.project_service.get_project_snapshot(project_id)
-        replacing_card_id = card_payload.get("card_id") if action == "update" else None
-        try:
-            if action == "update":
-                existing = next((item for item in snapshot["cards"] if item.card_id == str(card_payload.get("card_id") or "")), None)
-                if not existing:
-                    raise ManagerPlanningError(f"Card not found: {card_payload.get('card_id') or request.card_id or ''}")
-                candidate = self._normalize_card_payload({**existing.model_dump(), **card_payload}, allow_missing_card_id=True)
-            else:
-                candidate = self._normalize_card_payload(card_payload, allow_missing_card_id=False)
-                if any(item.card_id == candidate.card_id for item in snapshot["cards"]):
-                    raise ManagerPlanningError(f"Duplicate card_id: {candidate.card_id}")
-            normalized, errors = self.asset_timeline_service.validate_card(snapshot, candidate, replacing_card_id=replacing_card_id)
-        except Exception as exc:
-            message = str(exc)
-            return {
-                "ok": False,
-                "project_id": project_id,
-                "action": action,
-                "errors": [message],
-                "retry_hints": [self._retry_hint_for_validation_error(message)],
-            }
-        return {
-            "ok": not errors,
-            "project_id": project_id,
-            "action": action,
-            "card": self._compact_card(normalized, None, []),
-            "normalized_outputs": [output.model_dump() for output in normalized.outputs],
-            "recommended_step": self._recommended_step(snapshot, normalized),
-            "errors": errors,
-            "retry_hints": [self._retry_hint_for_validation_error(error) for error in errors],
-        }
-
     def list_data_assets(self, project_id: str) -> dict:
         snapshot = self.project_service.get_project_snapshot(project_id)
         timeline = self.asset_timeline_service.build(project_id, snapshot)
@@ -434,15 +430,22 @@ class ManagerBlueprintTools:
 
     def create_card(self, project_id: str, payload: dict) -> dict:
         snapshot = self.project_service.get_project_snapshot(project_id)
-        card = self._normalize_card_payload(payload, allow_missing_card_id=False)
+        card = self._normalize_create_card_payload(snapshot, payload)
         card, errors = self.asset_timeline_service.validate_card(snapshot, card)
+        errors = self._append_output_role_errors(card, errors)
         if errors:
-            raise ManagerPlanningError("; ".join(errors))
+            raise CardWriteValidationError(self._card_write_error_response("create", card.card_id, errors))
         with self.project_service.lock_for(project_id):
             store = self.project_service.graph_store(project_id)
             cards = store.load_cards()
             if any(item.card_id == card.card_id for item in cards):
-                raise ManagerPlanningError(f"Duplicate card_id: {card.card_id}")
+                raise CardWriteValidationError(
+                    self._card_write_error_response(
+                        "create",
+                        card.card_id,
+                        [f"Duplicate card_id: {card.card_id}"],
+                    )
+                )
             cards.append(card)
             graph = store.load_graph()
             self._sync_module_links(graph, card, previous_card=None)
@@ -454,23 +457,57 @@ class ManagerBlueprintTools:
         return {"ok": True, "card": card.model_dump(), "card_id": card.card_id}
 
     def update_card(self, project_id: str, payload: dict) -> dict:
-        card_id = str(payload.get("card_id") or "").strip()
-        if not card_id:
-            raise ManagerPlanningError("update_card requires card_id.")
+        try:
+            request = UpdateCardPayload.model_validate(payload)
+        except ValidationError as exc:
+            raise CardWriteValidationError(self._payload_validation_error_response("update", payload, exc)) from exc
+        card_id = str(request.card_id or "").strip()
         snapshot = self.project_service.get_project_snapshot(project_id)
         existing = next((item for item in snapshot["cards"] if item.card_id == card_id), None)
         if not existing:
-            raise ManagerPlanningError(f"Card not found: {card_id}")
-        updated = self._normalize_card_payload({**existing.model_dump(), **payload}, allow_missing_card_id=True)
+            raise CardWriteValidationError(
+                {
+                    "ok": False,
+                    "error_type": "card_write_validation_failed",
+                    "action": "update",
+                    "errors": [
+                        {
+                            "code": "update_card_not_found",
+                            "field": "card_id",
+                            "card_id": card_id,
+                            "message": f"Card not found: {card_id}",
+                            "blocking": True,
+                            "repair": {"tool": "find_cards", "query": card_id},
+                        }
+                    ],
+                }
+            )
+        updated = self._normalize_update_card_payload(snapshot, existing, request)
         updated, errors = self.asset_timeline_service.validate_card(snapshot, updated, replacing_card_id=card_id)
+        errors = self._append_output_role_errors(updated, errors)
         if errors:
-            raise ManagerPlanningError("; ".join(errors))
+            raise CardWriteValidationError(self._card_write_error_response("update", card_id, errors))
         with self.project_service.lock_for(project_id):
             store = self.project_service.graph_store(project_id)
             cards = store.load_cards()
             index = next((idx for idx, item in enumerate(cards) if item.card_id == card_id), None)
             if index is None:
-                raise ManagerPlanningError(f"Card not found: {card_id}")
+                raise CardWriteValidationError(
+                    {
+                        "ok": False,
+                        "error_type": "card_write_validation_failed",
+                        "action": "update",
+                        "errors": [
+                            {
+                                "code": "update_card_not_found",
+                                "field": "card_id",
+                                "card_id": card_id,
+                                "message": f"Card not found: {card_id}",
+                                "blocking": True,
+                            }
+                        ],
+                    }
+                )
             previous = cards[index]
             cards[index] = updated
             graph = store.load_graph()
@@ -480,10 +517,22 @@ class ManagerBlueprintTools:
                 try:
                     WorkerService._assert_acceptance_graph_consistent(updated, graph, previous.linked_runs[-1] if previous.linked_runs else "")
                 except AssertionError as exc:
-                    action = "直接设置 accepted" if previous.status != "accepted" else "保存会破坏 accepted 状态"
-                    raise ManagerPlanningError(
-                        f"accepted card 图一致性检查失败：{exc}。"
-                        f"请先运行/审核/重新绑定输出，而不是{action}。"
+                    raise CardWriteValidationError(
+                        {
+                            "ok": False,
+                            "error_type": "card_write_validation_failed",
+                            "action": "update",
+                            "errors": [
+                                {
+                                    "code": "accepted_card_consistency_failed",
+                                    "field": "status",
+                                    "card_id": card_id,
+                                    "message": f"accepted card 图一致性检查失败：{exc}",
+                                    "blocking": True,
+                                    "repair": {"tool": "review_card_run"},
+                                }
+                            ],
+                        }
                     ) from exc
             ModuleGroupStateService.sync_linked_module_status_from_card(updated, graph.modules)
             ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
@@ -1044,6 +1093,7 @@ class ManagerBlueprintTools:
         snapshot = self.project_service.get_project_snapshot(project_id)
         card_payload = self._instantiate_card_payload(project_id, snapshot, template, request)
         result = self.create_card(project_id, card_payload)
+        self._apply_template_execution_context(project_id, result["card_id"], template, request)
         templates = self._load_card_templates()
         for index, item in enumerate(templates):
             if item.template_id != template.template_id:
@@ -1057,6 +1107,57 @@ class ManagerBlueprintTools:
             break
         self._save_card_templates(templates)
         return {"template_id": template.template_id, **result}
+
+    def _apply_template_execution_context(
+        self,
+        project_id: str,
+        card_id: str,
+        template: CardTemplate,
+        request: InstantiateCardTemplatePayload,
+    ) -> None:
+        context = template.spec.executor_context.model_copy(deep=True)
+        context.script_asset_requirements = [item.model_copy(deep=True) for item in template.spec.bundle.script_asset_requirements]
+        context.template_metadata = {
+            "template_id": template.template_id,
+            "instantiated_at": utc_now(),
+        }
+        copied_references = self._copy_template_bundle_into_project(project_id, card_id, template)
+        context.references.extend(copied_references)
+        asset_map = {asset.asset_id: asset for asset in self.project_service.get_project_snapshot(project_id)["graph"].assets}
+        bindings: list[ExecutorScriptAssetBinding] = []
+        for binding_request in request.script_asset_bindings:
+            asset = asset_map.get(binding_request.asset_id)
+            if asset is None:
+                raise ManagerPlanningError(f"Script asset not found: {binding_request.asset_id}")
+            bindings.append(
+                ExecutorScriptAssetBinding(
+                    requirement_id=binding_request.requirement_id,
+                    asset_id=asset.asset_id,
+                    path=asset.path,
+                    title=asset.title,
+                    bound_at=utc_now(),
+                )
+            )
+        context.script_asset_bindings = bindings
+        tool_policy = context.tool_policy.model_dump(exclude_none=True)
+        runtime_bindings = context.runtime_bindings.model_dump(exclude_none=True)
+        payload = {
+            "card_id": card_id,
+            "skills": list(context.skills),
+            "mcp_servers": list(context.mcp_servers),
+            "tool_policy": tool_policy,
+            "runtime_bindings": runtime_bindings,
+            "instruction_blocks": list(context.instruction_blocks),
+        }
+        self.configure_card_execution(project_id, payload)
+        with self.project_service.lock_for(project_id):
+            store = self.project_service.graph_store(project_id)
+            cards = store.load_cards()
+            index = next((idx for idx, item in enumerate(cards) if item.card_id == card_id), None)
+            if index is None:
+                raise ManagerPlanningError(f"Card not found: {card_id}")
+            cards[index].executor_context = context
+            store.save_cards(cards)
 
     def list_project_memory(self, project_id: str, payload: dict | None = None) -> dict:
         payload = payload or {}
@@ -1156,6 +1257,211 @@ class ManagerBlueprintTools:
         if not card_payload["summary"]:
             raise ManagerPlanningError("card summary is required.")
         return Card.model_validate(card_payload)
+
+    def _normalize_create_card_payload(self, snapshot: dict[str, Any], payload: dict) -> Card:
+        try:
+            request = CreateCardPayload.model_validate(payload)
+        except ValidationError as exc:
+            raise CardWriteValidationError(self._payload_validation_error_response("create", payload, exc)) from exc
+        card_id = self._generated_card_id(request.title)
+        return self._normalize_card_payload(
+            {
+                "card_id": card_id,
+                "title": request.title,
+                "status": "planned",
+                "step": request.step,
+                "summary": request.summary,
+                "inputs": [self._normalized_input_ref(snapshot, item.asset_id) for item in request.inputs],
+                "outputs": [
+                    {
+                        "role": item.role,
+                        "label": self._display_label_from_role(item.role),
+                        "artifact_class": item.artifact_class,
+                        "accepted_formats": self._accepted_formats_for_class(item.artifact_class),
+                        "preferred_format": self._preferred_format_for_class(item.artifact_class),
+                        "description": item.description,
+                    }
+                    for item in request.outputs
+                ],
+            },
+            allow_missing_card_id=False,
+        )
+
+    def _normalize_update_card_payload(self, snapshot: dict[str, Any], existing: Card, request: UpdateCardPayload) -> Card:
+        update_payload: dict[str, Any] = {
+            "card_id": existing.card_id,
+            "title": request.title if request.title is not None else existing.title,
+            "status": existing.status,
+            "step": request.step if request.step is not None else existing.step,
+            "summary": request.summary if request.summary is not None else existing.summary,
+            "inputs": (
+                [self._normalized_input_ref(snapshot, item.asset_id) for item in request.inputs]
+                if request.inputs is not None
+                else existing.inputs
+            ),
+        }
+        if request.outputs is not None:
+            prior_by_role = {str(output.role): output for output in existing.outputs}
+            update_payload["outputs"] = [
+                {
+                    "role": item.role,
+                    "label": self._display_label_from_role(item.role),
+                    "artifact_class": item.artifact_class,
+                    "accepted_formats": self._accepted_formats_for_class(item.artifact_class),
+                    "preferred_format": self._preferred_format_for_class(item.artifact_class),
+                    "description": item.description,
+                    "asset_id": prior_by_role.get(str(item.role)).asset_id if prior_by_role.get(str(item.role)) else None,
+                    "status": prior_by_role.get(str(item.role)).status if prior_by_role.get(str(item.role)) else None,
+                }
+                for item in request.outputs
+            ]
+        else:
+            update_payload["outputs"] = existing.outputs
+        return self._normalize_card_payload(update_payload, allow_missing_card_id=True)
+
+    @staticmethod
+    def _generated_card_id(title: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "_", str(title or "").strip().lower()).strip("_")[:32] or "card"
+        stamp = utc_now().replace("-", "").replace(":", "").replace("T", "_").replace("Z", "")[:15]
+        return f"card_{slug}_{stamp}"
+
+    @staticmethod
+    def _display_label_from_role(role: str) -> str:
+        text = re.sub(r"[_\-]+", " ", str(role or "").strip())
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            return "Output"
+        return text.title()
+
+    @staticmethod
+    def _accepted_formats_for_class(artifact_class: str) -> list[str]:
+        normalized = str(artifact_class or "").strip().lower()
+        return [fmt for fmt, cls in FORMAT_TO_CLASS.items() if cls == normalized]
+
+    @staticmethod
+    def _preferred_format_for_class(artifact_class: str) -> str | None:
+        return DEFAULT_CLASS_FORMAT.get(str(artifact_class or "").strip().lower())  # type: ignore[arg-type]
+
+    @staticmethod
+    def _append_output_role_errors(card: Card, errors: list[str]) -> list[str]:
+        seen: set[str] = set()
+        duplicate_roles: list[str] = []
+        for output in card.outputs:
+            role = str(output.role or "").strip()
+            if not role:
+                continue
+            if role in seen and role not in duplicate_roles:
+                duplicate_roles.append(role)
+            seen.add(role)
+        if not duplicate_roles:
+            return errors
+        return list(errors) + [f"Duplicate output role values: {', '.join(duplicate_roles)}"]
+
+    @staticmethod
+    def _input_label_from_asset_id(snapshot: dict[str, Any], asset_id: str) -> str:
+        normalized_asset_id = str(asset_id or "").strip()
+        if not normalized_asset_id:
+            return "Input"
+        graph = snapshot["graph"]
+        materialized = next((asset for asset in graph.assets if asset.asset_id == normalized_asset_id), None)
+        if materialized is not None:
+            role = str(materialized.metadata.get("role") or "").strip() if isinstance(materialized.metadata, dict) else ""
+            return role or materialized.title or normalized_asset_id
+        for card in snapshot["cards"]:
+            for output in card.outputs:
+                if output.asset_id == normalized_asset_id:
+                    return output.label or output.role or normalized_asset_id
+        return normalized_asset_id
+
+    def _normalized_input_ref(self, snapshot: dict[str, Any], asset_id: str) -> dict[str, Any]:
+        normalized_asset_id = str(asset_id or "").strip()
+        return {
+            "asset_id": normalized_asset_id,
+            "label": self._input_label_from_asset_id(snapshot, normalized_asset_id),
+        }
+
+    def _payload_validation_error_response(self, action: str, payload: dict, exc: ValidationError) -> dict[str, Any]:
+        errors: list[dict[str, Any]] = []
+        for item in exc.errors():
+            loc = item.get("loc") or ()
+            field = ".".join(str(part) for part in loc)
+            message = str(item.get("msg") or "Invalid payload.")
+            code = "invalid_payload"
+            if "title" in field:
+                code = "empty_title"
+            elif "summary" in field:
+                code = "empty_summary"
+            elif "artifact_class" in field:
+                code = "invalid_artifact_class"
+            errors.append(
+                {
+                    "code": code,
+                    "field": field,
+                    "message": message,
+                    "blocking": True,
+                }
+            )
+        return {
+            "ok": False,
+            "error_type": "card_write_validation_failed",
+            "action": action,
+            "errors": errors or [{"code": "invalid_payload", "message": "Invalid payload.", "blocking": True}],
+        }
+
+    def _card_write_error_response(self, action: str, card_id: str, messages: list[str]) -> dict[str, Any]:
+        errors: list[dict[str, Any]] = []
+        for message in messages:
+            lowered = message.lower()
+            code = "card_write_validation_failed"
+            field = None
+            repair: dict[str, Any] | None = None
+            cycle_card_ids: list[str] | None = None
+            asset_id: str | None = None
+            if "step too early" in lowered:
+                code = "step_too_early"
+                field = "step"
+            elif "card step is required" in lowered:
+                code = "missing_step"
+                field = "step"
+            elif "input asset" in lowered and "missing" in lowered:
+                code = "input_asset_not_selectable"
+                field = "inputs"
+                asset_id = re.search(r"Input asset ([^ ]+)", message).group(1) if re.search(r"Input asset ([^ ]+)", message) else None
+                repair = {"tool": "find_assets", "query": asset_id or ""}
+            elif "planned output asset_id already exists as a materialized asset" in lowered:
+                code = "duplicate_output_asset_id"
+                field = "outputs"
+            elif "duplicate planned output asset_id values" in lowered:
+                code = "duplicate_output_asset_id"
+                field = "outputs"
+            elif "duplicate output role values" in lowered:
+                code = "output_role_duplicate"
+                field = "outputs"
+            elif "dependency cycle" in lowered:
+                code = "dependency_cycle"
+                field = "inputs"
+                cycle_card_ids = [card_id]
+            elif "duplicate" in lowered and "asset_id" in lowered:
+                code = "duplicate_output_asset_id"
+                field = "outputs"
+            errors.append(
+                {
+                    "code": code,
+                    "field": field,
+                    "card_id": card_id,
+                    "asset_id": asset_id,
+                    "cycle_card_ids": cycle_card_ids,
+                    "message": message,
+                    "blocking": True,
+                    "repair": repair,
+                }
+            )
+        return {
+            "ok": False,
+            "error_type": "card_write_validation_failed",
+            "action": action,
+            "errors": errors,
+        }
 
     @staticmethod
     def _tool_policy(snapshot: dict) -> dict:
@@ -1533,85 +1839,20 @@ class ManagerBlueprintTools:
         template: CardTemplate,
         request: InstantiateCardTemplatePayload,
     ) -> dict[str, Any]:
-        context = template.spec.executor_context.model_copy(deep=True)
-        context.template_metadata = {
-            "template_id": template.template_id,
-            "instantiated_at": utc_now(),
-        }
-        copied_references = self._copy_template_bundle_into_project(project_id, request.card_id, template)
-        context.references.extend(copied_references)
-        asset_map = {asset.asset_id: asset for asset in snapshot["graph"].assets}
-        bindings: list[ExecutorScriptAssetBinding] = []
-        for binding_request in request.script_asset_bindings:
-            asset = asset_map.get(binding_request.asset_id)
-            if asset is None:
-                raise ManagerPlanningError(f"Script asset not found: {binding_request.asset_id}")
-            bindings.append(
-                ExecutorScriptAssetBinding(
-                    requirement_id=binding_request.requirement_id,
-                    asset_id=asset.asset_id,
-                    path=asset.path,
-                    title=asset.title,
-                    bound_at=utc_now(),
-                )
-            )
-            context.references.append(
-                ExecutorReference(
-                    type="file",
-                    path=asset.path,
-                    description=f"Script asset binding for {binding_request.requirement_id}: {asset.title}",
-                )
-            )
-        context.script_asset_bindings = bindings
-        if request.runtime_overrides:
-            override_context = ExecutorContext.model_validate(request.runtime_overrides)
-            context = WorkerService._merge_executor_context(context, override_context)
-        missing_requirement_ids = {
-            requirement.requirement_id
-            for requirement in context.script_asset_requirements
-            if requirement.requirement_id and not requirement.optional
-        } - {
-            binding.requirement_id
-            for binding in context.script_asset_bindings
-            if binding.requirement_id and (binding.asset_id or binding.path)
-        }
-        next_actions = ["运行前检查输入输出与运行时配置。"]
-        progress_note = None
-        if missing_requirement_ids:
-            progress_note = f"Missing script asset bindings: {', '.join(sorted(missing_requirement_ids))}"
-            next_actions.insert(0, "绑定脚本资产后再运行。")
-            context.instruction_blocks.append(
-                f"Do not run until these script asset bindings are resolved: {', '.join(sorted(missing_requirement_ids))}."
-            )
+        card_title = (request.title or template.spec.card_title_pattern).strip()
         return {
-            "card_id": request.card_id,
-            "card_type": template.card_type,
-            "title": (request.title or template.spec.card_title_pattern).strip(),
-            "status": "planned",
+            "title": card_title,
             "step": request.step,
             "summary": template.spec.summary_template,
-            "why": template.spec.why_template,
-            "inputs": request.input_bindings or [{"label": item.label, "status": item.status} for item in template.spec.inputs_schema],
-            "outputs": request.output_bindings
-            or [
+            "inputs": [{"asset_id": item.asset_id} for item in request.input_bindings],
+            "outputs": [
                 {
                     "role": item.role,
-                    "label": item.label,
                     "artifact_class": item.artifact_class,
-                    "accepted_formats": list(item.accepted_formats),
-                    "preferred_format": item.preferred_format,
-                    "asset_id": None,
-                    "status": "planned",
-                    "required": item.required,
                     "description": item.description,
                 }
                 for item in template.spec.outputs_schema
             ],
-            "key_findings": [],
-            "manager_review": f"Instantiated from card template {template.template_id}.",
-            "next_actions": next_actions,
-            "progress_note": progress_note,
-            "executor_context": context.model_dump(),
         }
 
     def _copy_template_bundle_into_project(self, project_id: str, card_id: str, template: CardTemplate) -> list[ExecutorReference]:

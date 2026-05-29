@@ -148,7 +148,6 @@ Available capabilities:
 - find_assets searches materialized and planned assets by role, artifact_class, format, producer card, status, or query.
 - get_card_detail reads one card body, executor_context, inputs, outputs, and recent runs.
 - get_asset_detail reads one asset detail when file preview, script binding, or manifest-level diagnosis is needed.
-- plan_card_write validates a proposed create/update card payload before writing when step, asset_id, or output contracts are uncertain.
 - get_project_context reads the full project context. Use it only when compact inspect/find/detail tools are insufficient.
 - list_data_assets reads the full data asset timeline. Use it only when compact inspect/find/detail tools are insufficient.
 - list_project_memory reads short-lived-to-long-term project preferences and corrections. It is not the source of project execution facts.
@@ -186,7 +185,6 @@ ${webJudgmentLines.join("\n")}
 - If a task looks like a stable repeated workflow, search_card_templates before creating a new analysis card from scratch.
 - When a template requires script assets, ask the user which project script assets to bind before instantiate_card_template or before starting the card. Do not make card agents ask the user for bindings.
 - For multi-step workflow creation, you may create multiple cards in one conversation. Re-check the timeline when useful.
-- Use plan_card_write before create_card/update_card when output contracts, asset ids, or step ordering are uncertain. Skip it for obvious small edits.
 - Reuse existing card ids when updating existing work. Create new ids only for genuinely new cards.
 - Do not use or mention blueprint proposal, blueprint review, or approval flows. Card tools are the source of truth for blueprint edits.
 - Do not restate the full DAG in chat; focus on the selected card, immediate blockers, and the next action.
@@ -197,14 +195,14 @@ ${webJudgmentLines.join("\n")}
 - Keep final replies concise and user-facing.
 
 Card fields:
-- Required for create_card: card_id, card_type, title, status, summary.
-- Common card_type values: module, module_group.
-- Common status values: planned, proposed, accepted, cancelled, failed, stale, superseded.
-- Useful fields: step, why, inputs, outputs, key_findings, manager_review, next_actions, linked_modules, linked_runs, linked_assets, progress_note.
-- executor_context may include instruction_blocks for soft execution guidance such as script-language preference. Prefer configure_card_execution for tool_policy/runtime permission changes.
-- Inputs are arrays shaped like { label, asset_id?, status? }.
-- Outputs must be explicit contract objects shaped like { role, label, artifact_class, accepted_formats?, preferred_format?, asset_id?, status?, required?, description? }.
-- Prefer status "planned" for future work, "cancelled" for dormant/deleted cards, and "accepted" only for completed accepted work.`;
+- create_card requires title, summary, and usually outputs.
+- update_card requires exact card_id; it is a selector, not a replacement identity field.
+- step is optional and controls timeline grouping.
+- Inputs are selected asset ids, shaped like { asset_id }. Use exact asset ids from find_assets or planned upstream outputs from card detail.
+- Outputs are explicit semantic contracts shaped like { role, artifact_class, description? }.
+- Do not send card_id on create. The backend generates it.
+- Do not send card_type, why, key_findings, manager_review, next_actions, linked_modules, linked_runs, linked_assets, progress_note, executor_context, accepted_formats, preferred_format, output label, output asset_id, or output status.
+- Card status is not part of normal create/update payloads. New cards start as planned; later status transitions come from runs, review, delete_card, or system-derived stale state.`;
 }
 
 const TOOL_STATUS_LABELS = {
@@ -231,10 +229,6 @@ const TOOL_STATUS_LABELS = {
   get_asset_detail: {
     active: "正在读取资产",
     done: "已读取资产",
-  },
-  plan_card_write: {
-    active: "正在预检卡片",
-    done: "已预检卡片",
   },
   get_project_context: {
     active: "正在查看蓝图",
@@ -710,14 +704,6 @@ function summarizeToolPayload(toolName, payload) {
     return {
       asset_id: payload.asset?.asset_id,
       preview_kind: payload.preview?.kind,
-    };
-  }
-  if (toolName === "plan_card_write") {
-    return {
-      ok: payload.ok,
-      card_id: payload.card?.card_id,
-      errors: Array.isArray(payload.errors) ? payload.errors.length : undefined,
-      recommended_step: payload.recommended_step,
     };
   }
   if (toolName === "get_project_context") {
@@ -1225,33 +1211,6 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
       },
     },
     {
-      name: "plan_card_write",
-      label: "Plan card write",
-      description: "Validate a proposed create/update card payload without writing. Use when step ordering, asset ids, or output contracts are uncertain.",
-      parameters: Type.Object({
-        action: Type.Optional(Type.String({ description: "create or update" })),
-        card_id: Type.Optional(Type.String()),
-        card: Type.Record(Type.String(), Type.Any()),
-      }),
-      execute: async (toolCallId, params, signal) => {
-        const payload = await callLoggedTool(
-          "plan_card_write",
-          toolCallId,
-          projectId,
-          baseUrl,
-          token,
-          `/internal/manager-tools/projects/${projectId}/cards/plan-write`,
-          {
-            method: "POST",
-            body: params,
-          },
-          signal,
-          sessionId,
-        );
-        return toolTextResult("plan_card_write", payload);
-      },
-    },
-    {
       name: "get_project_context",
       label: "Read project context",
       description: "Read the full Blueprint project. This is large; use inspect_project_summary, find_cards, find_assets, or get_card_detail first unless full graph data is required.",
@@ -1358,25 +1317,24 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "create_card",
       label: "Create card",
-      description: "Create a new blueprint card directly. A card is a blueprint unit. Use inputs[].asset_id and outputs[].asset_id to connect the DAG; use step to place it in the timeline. outputs[] must be explicit output contracts, not only labels. Backend validation returns ok:false with retry hints when arguments need correction.",
+      description: "Create a new blueprint card directly. A card is a blueprint unit. Use selected input asset ids and semantic output contracts. The backend generates card_id, output asset ids, labels, formats, and default statuses. Validation errors come back as structured repair guidance.",
       parameters: Type.Object({
-        card_id: Type.String(),
-        card_type: Type.String({ description: "Usually module or module_group." }),
         title: Type.String(),
-        status: Type.String({ description: "Usually planned for future work; proposed for tentative work; accepted only for completed accepted work; cancelled for removed work." }),
         step: Type.Optional(Type.Number()),
         summary: Type.String(),
-        why: Type.Optional(Type.String()),
-        inputs: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()), { description: "Array of { label, asset_id?, status? }. Use exact asset_id values from find_assets when known." })),
-        outputs: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()), { description: "Array of explicit output contracts: { role, label, artifact_class, accepted_formats?, preferred_format?, asset_id?, status?, required?, description? }. artifact_class is required. accepted_formats is optional and may contain multiple formats." })),
-        key_findings: Type.Optional(Type.Array(Type.String())),
-        manager_review: Type.Optional(Type.String()),
-        next_actions: Type.Optional(Type.Array(Type.String())),
-        linked_modules: Type.Optional(Type.Array(Type.String())),
-        linked_runs: Type.Optional(Type.Array(Type.String())),
-        linked_assets: Type.Optional(Type.Array(Type.String())),
-        progress_note: Type.Optional(Type.String()),
-        executor_context: Type.Optional(Type.Record(Type.String(), Type.Any())),
+        inputs: Type.Optional(Type.Array(Type.Object({ asset_id: Type.String() }), { description: "Selected input asset ids. Use exact asset ids from find_assets or planned upstream outputs." })),
+        outputs: Type.Optional(Type.Array(Type.Object({
+          role: Type.String(),
+          artifact_class: Type.Union([
+            Type.Literal("document"),
+            Type.Literal("table"),
+            Type.Literal("figure"),
+            Type.Literal("model"),
+            Type.Literal("archive"),
+            Type.Literal("binary"),
+          ]),
+          description: Type.Optional(Type.String()),
+        }), { description: "Semantic output contracts. The backend derives labels, formats, statuses, and output asset ids." })),
       }),
       execute: async (toolCallId, params, signal) => {
         try {
@@ -1403,25 +1361,25 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "update_card",
       label: "Update card",
-      description: "Update an existing blueprint card directly. Use this for modifying blueprint content, status, step, inputs, outputs, or linked assets. When repairing dependency ATTENTION/input_asset_outdated, update inputs[].asset_id to the reported current_asset_id before rerunning the card. outputs[] must stay as explicit output contracts rather than label-only refs. Backend validation returns ok:false with retry hints when arguments need correction.",
+      description: "Update an existing blueprint card directly. Use this for modifying title, summary, step, selected input asset ids, or semantic outputs. When repairing dependency ATTENTION/input_asset_outdated, replace the downstream input asset id before rerunning. Validation errors come back as structured repair guidance.",
       parameters: Type.Object({
         card_id: Type.String(),
-        card_type: Type.Optional(Type.String({ description: "Usually module or module_group." })),
         title: Type.Optional(Type.String()),
-        status: Type.Optional(Type.String({ description: "Usually planned, proposed, accepted, cancelled, failed, stale, or superseded." })),
         step: Type.Optional(Type.Number()),
         summary: Type.Optional(Type.String()),
-        why: Type.Optional(Type.String()),
-        inputs: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
-        outputs: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
-        key_findings: Type.Optional(Type.Array(Type.String())),
-        manager_review: Type.Optional(Type.String()),
-        next_actions: Type.Optional(Type.Array(Type.String())),
-        linked_modules: Type.Optional(Type.Array(Type.String())),
-        linked_runs: Type.Optional(Type.Array(Type.String())),
-        linked_assets: Type.Optional(Type.Array(Type.String())),
-        progress_note: Type.Optional(Type.String()),
-        executor_context: Type.Optional(Type.Record(Type.String(), Type.Any())),
+        inputs: Type.Optional(Type.Array(Type.Object({ asset_id: Type.String() }))),
+        outputs: Type.Optional(Type.Array(Type.Object({
+          role: Type.String(),
+          artifact_class: Type.Union([
+            Type.Literal("document"),
+            Type.Literal("table"),
+            Type.Literal("figure"),
+            Type.Literal("model"),
+            Type.Literal("archive"),
+            Type.Literal("binary"),
+          ]),
+          description: Type.Optional(Type.String()),
+        }))),
       }),
       execute: async (toolCallId, params, signal) => {
         const { card_id: cardId, ...body } = params;
@@ -1824,11 +1782,9 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
       description: "Create a new card from a saved template. If the template requires script assets, ask the user which project script assets to bind before calling this tool.",
       parameters: Type.Object({
         template_id: Type.String(),
-        card_id: Type.String(),
         title: Type.Optional(Type.String()),
         step: Type.Optional(Type.Number()),
-        input_bindings: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
-        output_bindings: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
+        input_bindings: Type.Optional(Type.Array(Type.Object({ asset_id: Type.String() }))),
         script_asset_bindings: Type.Optional(
           Type.Array(
             Type.Object({
@@ -1837,7 +1793,6 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             }),
           ),
         ),
-        runtime_overrides: Type.Optional(Type.Record(Type.String(), Type.Any())),
       }),
       execute: async (toolCallId, params, signal) => {
         try {

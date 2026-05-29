@@ -81,7 +81,7 @@ Use these op contracts:
 - `create_module_group`: requires `module_id`, `title`. Optional: `status`, `summary`, `depends_on_assets`, `expected_outputs`, `linked_cards`.
 - `add_submodule`: requires `parent_module_id`, `module_id`, `title`. `parent_module_id` must be an existing module group. `module_id` should usually refer to a module created in the same change or an existing module.
 - `create_card`: must create a valid card object. Required fields include `card_id`, `card_type`, `title`, `status`, `summary`. Prefer also setting `step`, `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_runs`, `linked_assets`, `executor_context`.
-- `update_card`: requires `card_id` of an existing card. Only use card fields such as `step`, `title`, `status`, `summary`, `why`, `inputs`, `outputs`, `key_findings`, `manager_review`, `next_actions`, `linked_modules`, `linked_assets`, `progress_note`, `executor_context`. Never use it for modules. To delete a card, set `status` to `cancelled` and keep the card metadata intact for auditability.
+- `update_card`: requires `card_id` of an existing card. Use only normal card fields exposed by the runtime contract such as `title`, `summary`, `step`, `inputs`, and `outputs`. Never use it for modules.
 - Every `outputs[]` entry must be an explicit output contract with `role`, `label`, and `artifact_class`. `accepted_formats` is optional and may contain multiple acceptable formats. Do not create label-only outputs.
 - `update_module`: requires `module_id` of an existing module. Only use module fields such as `title`, `status`, `summary`, `depends_on_assets`, `expected_outputs`, `linked_cards`.
 - `set_card_status`: requires `card_id`, `status`.
@@ -371,19 +371,11 @@ class DeepSeekManagerPlanner:
                 },
                 "create_card": {
                     "target": "new_card",
-                    "required_fields": ["card_id", "card_type", "title", "status", "summary"],
+                    "required_fields": ["title", "summary"],
                     "optional_fields": [
-                        "why",
+                        "step",
                         "inputs",
                         "outputs",
-                        "key_findings",
-                        "manager_review",
-                        "next_actions",
-                        "linked_modules",
-                        "linked_runs",
-                        "linked_assets",
-                        "progress_note",
-                        "executor_context",
                     ],
                 },
                 "update_card": {
@@ -391,18 +383,10 @@ class DeepSeekManagerPlanner:
                     "required_fields": ["card_id"],
                     "optional_fields": [
                         "title",
-                        "status",
                         "summary",
-                        "why",
+                        "step",
                         "inputs",
                         "outputs",
-                        "key_findings",
-                        "manager_review",
-                        "next_actions",
-                        "linked_modules",
-                        "linked_assets",
-                        "progress_note",
-                        "executor_context",
                     ],
                 },
                 "update_module": {

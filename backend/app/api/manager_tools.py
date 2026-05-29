@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from app.api.deps import get_manager_auto_service, get_manager_service, get_project_event_service
 from app.core.config import get_settings
 from app.services.manager_auto_service import ManagerAutoService
+from app.services.manager_blueprint_tools import CardWriteValidationError
 from app.services.manager_planner import ManagerPlanningError
 from app.services.manager_service import ManagerService
 from app.services.project_event_service import ProjectEventService
@@ -177,20 +178,6 @@ def find_assets(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.post("/cards/plan-write")
-def plan_card_write(
-    project_id: str,
-    payload: dict,
-    authorization: str | None = Header(default=None),
-    manager_service: ManagerService = Depends(get_manager_service),
-) -> dict:
-    _verify_internal_token(authorization)
-    try:
-        return manager_service.blueprint_tools.plan_card_write(project_id, payload)
-    except ManagerPlanningError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
 @router.post("/cards")
 def create_card(
     project_id: str,
@@ -207,6 +194,8 @@ def create_card(
         response = manager_service.blueprint_tools.create_card(project_id, payload)
         _emit_tool_project_event(project_id, project_event_service, reason="card_created", response=response)
         return response
+    except CardWriteValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.payload) from exc
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -221,6 +210,8 @@ def get_card_detail(
     _verify_internal_token(authorization)
     try:
         return manager_service.blueprint_tools.get_card_detail(project_id, card_id)
+    except CardWriteValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.payload) from exc
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -244,6 +235,8 @@ def update_card(
         response = manager_service.blueprint_tools.update_card(project_id, body)
         _emit_tool_project_event(project_id, project_event_service, reason="card_updated", response=response)
         return response
+    except CardWriteValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.payload) from exc
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

@@ -18,7 +18,7 @@ from pydantic import SecretStr
 from app.core.config import Settings, get_settings
 from app.models.cards import Card
 from app.models.chat import ChatRequest, ChatSessionMessage
-from app.models.executor import ExecutorContext
+from app.models.executor import ExecutorContext, ExecutorScriptAssetRequirement
 from app.models.graph import Asset, Claim, GraphState, Module, ModuleRef, RunRecord
 from app.models.manager_auto import ManagerWakeEvent
 from app.models.patches import GraphPatch, ValidationResult
@@ -29,6 +29,7 @@ from app.services.executor_reviewer_worker import ExecutorReviewerWorker
 from app.services.executor_validation_service import ExecutorValidationService
 from app.services.flow_service import FlowService
 from app.services.manager_planner import DeepSeekManagerPlanner, ManagerPlanningError
+from app.services.manager_blueprint_tools import CardWriteValidationError
 from app.services.provider_errors import ProviderAPIError
 from app.services.manager_auto_service import ManagerAutoService
 from app.services.manager_service import ManagerService
@@ -560,29 +561,18 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertIn("executor_context", detail["card"])
         self.assertIn("dependency_attention", detail)
 
-        plan = self.manager.blueprint_tools.plan_card_write(
+        created = self.manager.blueprint_tools.create_card(
             "test-project",
             {
-                "action": "create",
-                "card": {
-                    "card_id": "planned_lightweight_card",
-                    "card_type": "module",
-                    "title": "Lightweight planned card",
-                    "status": "planned",
-                    "step": 2,
-                    "summary": "Exercise lightweight planning.",
-                    "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
-                    "outputs": [output_contract("Lightweight output", role="lightweight_output")],
-                },
+                "title": "Lightweight planned card",
+                "step": 2,
+                "summary": "Exercise lightweight planning.",
+                "inputs": [{"asset_id": "deg_table_v1"}],
+                "outputs": [{"role": "lightweight_output", "artifact_class": "table"}],
             },
         )
-        self.assertTrue(plan["ok"])
-        self.assertEqual("planned_lightweight_card", plan["card"]["card_id"])
-        self.assertNotIn("timeline", plan)
-
-        created = self.manager.blueprint_tools.create_card("test-project", plan["card"] | {"outputs": plan["normalized_outputs"]})
         self.assertTrue(created["ok"])
-        self.assertEqual("planned_lightweight_card", created["card_id"])
+        self.assertTrue(created["card_id"].startswith("card_lightweight_planned_card_"))
         self.assertNotIn("timeline", created)
 
     def test_dependency_attention_inspect_tool_and_mutation_hint(self) -> None:
@@ -1171,21 +1161,20 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue(any(asset["asset_id"] == "deg_table_v1" for asset in context["assets"]))
 
     def test_list_data_assets_exposes_materialized_and_planned_timeline(self) -> None:
-        self.manager.blueprint_tools.create_card(
+        created = self.manager.blueprint_tools.create_card(
             "test-project",
             {
-                "card_id": "card_go_bp",
                 "title": "GO BP 富集分析",
                 "summary": "基于 DEG 结果进行 GO BP 富集。",
                 "step": 2,
-                "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
-                "outputs": [output_contract("GO BP enrichment", role="go_bp_enrichment", asset_id="go_bp_result")],
+                "inputs": [{"asset_id": "deg_table_v1"}],
+                "outputs": [{"role": "go_bp_enrichment", "artifact_class": "table"}],
             },
         )
 
         listing = self.manager.blueprint_tools.list_data_assets("test-project")
         self.assertTrue(any(asset["asset_id"] == "deg_table_v1" for asset in listing["materialized_assets"]))
-        self.assertTrue(any(asset["planned"] and asset["producer_card_id"] == "card_go_bp" for asset in listing["planned_assets"]))
+        self.assertTrue(any(asset["planned"] and asset["producer_card_id"] == created["card_id"] for asset in listing["planned_assets"]))
         enrichment = next(card for card in listing["cards"] if card["card_id"] == "card_enrichment_group")
         self.assertEqual(2, enrichment["step"])
         self.assertEqual(["deg_table_v1", "ranked_gene_list_v1"], enrichment["required_asset_ids"])
@@ -1195,109 +1184,126 @@ class ManagerFlowTest(unittest.TestCase):
         result = self.manager.blueprint_tools.create_card(
             "test-project",
             {
-                "card_id": "card_go_bp",
                 "title": "GO BP 富集分析",
                 "summary": "基于 DEG 结果进行 GO BP 富集。",
                 "step": 2,
-                "why": "解释差异基因的生物过程。",
-                "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
-                "outputs": [output_contract("GO BP enrichment", role="go_bp_enrichment")],
-                "linked_modules": ["module_group_enrichment"],
-                "linked_assets": ["deg_table_v1"],
+                "inputs": [{"asset_id": "deg_table_v1"}],
+                "outputs": [{"role": "go_bp_enrichment", "artifact_class": "table"}],
             },
         )
 
         card = Card.model_validate(result["card"])
-        self.assertEqual("card_go_bp", card.card_id)
+        self.assertTrue(card.card_id.startswith("card_go_bp_"))
         self.assertEqual(2, card.step)
         self.assertTrue(card.outputs[0].asset_id)
         snapshot = self.project_service.get_project_snapshot("test-project")
-        self.assertTrue(any(item.card_id == "card_go_bp" for item in snapshot["cards"]))
+        self.assertTrue(any(item.card_id == card.card_id for item in snapshot["cards"]))
 
     def test_create_card_rejects_missing_step(self) -> None:
-        with self.assertRaisesRegex(ManagerPlanningError, "Card step is required"):
+        with self.assertRaises(CardWriteValidationError) as ctx:
             self.manager.blueprint_tools.create_card(
                 "test-project",
                 {
-                    "card_id": "card_no_step",
                     "title": "No Step",
                     "summary": "Should fail because step is explicit metadata now.",
-                    "inputs": [{"label": "DEG table", "asset_id": "deg_table_v1"}],
-                    "outputs": [output_contract("result", asset_id="no_step_result")],
+                    "inputs": [{"asset_id": "deg_table_v1"}],
+                    "outputs": [{"role": "result", "artifact_class": "table"}],
                 },
             )
+        self.assertEqual("card_write_validation_failed", ctx.exception.payload["error_type"])
+        self.assertEqual("step", ctx.exception.payload["errors"][0]["field"])
 
-    def test_create_card_rejects_missing_input_with_retryable_error(self) -> None:
-        with self.assertRaisesRegex(ManagerPlanningError, "Input asset missing_deg is missing"):
+    def test_create_card_rejects_legacy_extra_fields(self) -> None:
+        with self.assertRaises(CardWriteValidationError) as ctx:
             self.manager.blueprint_tools.create_card(
                 "test-project",
                 {
-                    "card_id": "card_missing_input",
+                    "title": "Legacy payload",
+                    "summary": "Old card-write fields should be rejected.",
+                    "step": 1,
+                    "why": "legacy field",
+                    "inputs": [{"asset_id": "deg_table_v1"}],
+                    "outputs": [{"role": "result", "artifact_class": "table"}],
+                },
+            )
+        self.assertEqual("invalid_payload", ctx.exception.payload["errors"][0]["code"])
+        self.assertEqual("why", ctx.exception.payload["errors"][0]["field"])
+
+    def test_create_card_rejects_missing_input_with_retryable_error(self) -> None:
+        with self.assertRaises(CardWriteValidationError) as ctx:
+            self.manager.blueprint_tools.create_card(
+                "test-project",
+                {
                     "title": "Missing Input",
                     "summary": "Should fail because input is unknown.",
                     "step": 1,
-                    "inputs": [{"label": "missing", "asset_id": "missing_deg"}],
-                    "outputs": [output_contract("result", asset_id="missing_input_result")],
+                    "inputs": [{"asset_id": "missing_deg"}],
+                    "outputs": [{"role": "result", "artifact_class": "table"}],
                 },
             )
+        self.assertEqual("input_asset_not_selectable", ctx.exception.payload["errors"][0]["code"])
+        self.assertEqual("missing_deg", ctx.exception.payload["errors"][0]["asset_id"])
 
     def test_create_card_rejects_step_earlier_than_input_asset_timeline(self) -> None:
-        self.manager.blueprint_tools.create_card(
+        created = self.manager.blueprint_tools.create_card(
             "test-project",
             {
-                "card_id": "card_qc",
                 "title": "QC",
                 "summary": "Produce filtered counts.",
                 "step": 1,
-                "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
-                "outputs": [output_contract("filtered counts", role="filtered_counts", asset_id="filtered_counts")],
+                "inputs": [{"asset_id": "count_matrix_v1"}],
+                "outputs": [{"role": "filtered_counts", "artifact_class": "table"}],
             },
         )
+        filtered_counts_asset_id = created["card"]["outputs"][0]["asset_id"]
 
-        with self.assertRaisesRegex(ManagerPlanningError, "Increase step to at least 2"):
+        with self.assertRaises(CardWriteValidationError) as ctx:
             self.manager.blueprint_tools.create_card(
                 "test-project",
                 {
-                    "card_id": "card_downstream_too_early",
                     "title": "Downstream",
                     "summary": "Consumes a planned upstream output.",
                     "step": 1,
-                    "inputs": [{"label": "filtered counts", "asset_id": "filtered_counts"}],
-                    "outputs": [output_contract("downstream result", asset_id="downstream_result")],
+                    "inputs": [{"asset_id": filtered_counts_asset_id}],
+                    "outputs": [{"role": "downstream_result", "artifact_class": "table"}],
                 },
             )
+        self.assertEqual("step_too_early", ctx.exception.payload["errors"][0]["code"])
 
     def test_update_card_changes_content_and_revalidates_step(self) -> None:
-        self.manager.blueprint_tools.create_card(
+        created = self.manager.blueprint_tools.create_card(
             "test-project",
             {
-                "card_id": "card_qc",
                 "title": "QC",
                 "summary": "Produce filtered counts.",
                 "step": 1,
-                "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
-                "outputs": [output_contract("filtered counts", role="filtered_counts", asset_id="filtered_counts")],
+                "inputs": [{"asset_id": "count_matrix_v1"}],
+                "outputs": [{"role": "filtered_counts", "artifact_class": "table"}],
             },
         )
+        card_id = created["card_id"]
+        filtered_counts_asset_id = created["card"]["outputs"][0]["asset_id"]
         result = self.manager.blueprint_tools.update_card(
             "test-project",
             {
-                "card_id": "card_qc",
+                "card_id": card_id,
                 "title": "QC and filtering",
                 "summary": "Filter low-quality samples and features.",
             },
         )
         self.assertEqual("QC and filtering", result["card"]["title"])
+        self.assertEqual("Filter low-quality samples and features.", result["card"]["summary"])
 
-        with self.assertRaisesRegex(ManagerPlanningError, "Increase step to at least 2"):
+        with self.assertRaises(CardWriteValidationError) as ctx:
             self.manager.blueprint_tools.update_card(
                 "test-project",
                 {
-                    "card_id": "card_qc",
-                    "inputs": [{"label": "own output", "asset_id": "filtered_counts"}],
+                    "card_id": card_id,
+                    "inputs": [{"asset_id": filtered_counts_asset_id}],
                     "step": 1,
                 },
             )
+        self.assertEqual("step_too_early", ctx.exception.payload["errors"][0]["code"])
 
     def test_update_card_rejects_invalid_edit_on_existing_accepted_card(self) -> None:
         # An already-accepted card cannot have its outputs corrupted via update_card.
@@ -1337,14 +1343,15 @@ class ManagerFlowTest(unittest.TestCase):
         store.save_cards(cards)
         store.save_graph(graph)
 
-        with self.assertRaisesRegex(ManagerPlanningError, "accepted card 图一致性检查失败"):
-            self.manager.blueprint_tools.update_card(
-                "test-project",
-                {
-                    "card_id": "card_accepted_guard",
-                    "outputs": [output_contract("result", role="result", asset_id="asset_missing")],
-                },
-            )
+        result = self.manager.blueprint_tools.update_card(
+            "test-project",
+            {
+                "card_id": "card_accepted_guard",
+                "outputs": [{"role": "result", "artifact_class": "table"}],
+            },
+        )
+        self.assertEqual("asset_result", result["card"]["outputs"][0]["asset_id"])
+        self.assertEqual("valid", result["card"]["outputs"][0]["status"])
 
         # Verify the card was NOT modified.
         snapshot = self.project_service.get_project_snapshot("test-project")
@@ -1410,55 +1417,43 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertEqual("cancelled", card.status)
 
     def test_create_card_rejects_duplicate_card_id_and_output_asset(self) -> None:
-        with self.assertRaisesRegex(ManagerPlanningError, "Duplicate card_id"):
+        with self.assertRaises(CardWriteValidationError) as ctx:
             self.manager.blueprint_tools.create_card(
                 "test-project",
                 {
-                    "card_id": "card_de_analysis",
-                    "title": "Duplicate",
-                    "summary": "Duplicate card id.",
-                    "step": 1,
-                    "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
-                    "outputs": [output_contract("duplicate", asset_id="duplicate_output")],
-                },
-            )
-
-        with self.assertRaisesRegex(ManagerPlanningError, "already exists as a materialized asset"):
-            self.manager.blueprint_tools.create_card(
-                "test-project",
-                {
-                    "card_id": "card_duplicate_deg",
                     "title": "Duplicate DEG",
                     "summary": "Duplicate a planned or materialized output.",
                     "step": 1,
-                    "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
-                    "outputs": [output_contract("DEG", role="deg", asset_id="deg_table_v1")],
+                    "inputs": [{"asset_id": "count_matrix_v1"}],
+                    "outputs": [
+                        {"role": "deg_result", "artifact_class": "table"},
+                        {"role": "deg_result", "artifact_class": "table", "description": "dup"},
+                    ],
                 },
             )
+        self.assertEqual("output_role_duplicate", ctx.exception.payload["errors"][0]["code"])
 
-        self.manager.blueprint_tools.create_card(
+        first = self.manager.blueprint_tools.create_card(
             "test-project",
             {
-                "card_id": "card_first_planned_output",
                 "title": "First planned output",
                 "summary": "Creates a planned output asset.",
                 "step": 1,
-                "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
-                "outputs": [output_contract("planned result", role="planned_result", asset_id="planned_duplicate_result")],
+                "inputs": [{"asset_id": "count_matrix_v1"}],
+                "outputs": [{"role": "planned_result", "artifact_class": "table"}],
             },
         )
-        with self.assertRaisesRegex(ManagerPlanningError, "Duplicate planned output asset_id values"):
-            self.manager.blueprint_tools.create_card(
-                "test-project",
-                {
-                    "card_id": "card_second_planned_output",
-                    "title": "Second planned output",
-                    "summary": "Tries to create the same planned output asset.",
-                    "step": 1,
-                    "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
-                    "outputs": [output_contract("planned result", role="planned_result", asset_id="planned_duplicate_result")],
-                },
-            )
+        second = self.manager.blueprint_tools.create_card(
+            "test-project",
+            {
+                "title": "Second planned output",
+                "summary": "System should derive a distinct planned output asset id.",
+                "step": 1,
+                "inputs": [{"asset_id": "count_matrix_v1"}],
+                "outputs": [{"role": "other_role", "artifact_class": "table"}],
+            },
+        )
+        self.assertNotEqual(first["card"]["outputs"][0]["asset_id"], second["card"]["outputs"][0]["asset_id"])
 
     def test_multi_card_timeline_and_dag_are_derived_from_card_outputs(self) -> None:
         self.project_service.create_project(
@@ -1484,71 +1479,70 @@ class ManagerFlowTest(unittest.TestCase):
         )
         manager = ManagerService(self.project_service, planner=AnswerOnlyPlanner())
 
-        manager.blueprint_tools.create_card(
+        qc = manager.blueprint_tools.create_card(
             "timeline-project",
             {
-                "card_id": "card_qc",
                 "title": "数据校验与过滤",
                 "summary": "过滤低质量样本并输出 filtered counts。",
                 "step": 1,
-                "inputs": [{"label": "Raw counts", "asset_id": "raw_counts"}],
-                "outputs": [output_contract("Filtered counts", role="filtered_counts", asset_id="filtered_counts")],
+                "inputs": [{"asset_id": "raw_counts"}],
+                "outputs": [{"role": "filtered_counts", "artifact_class": "table"}],
             },
         )
-        manager.blueprint_tools.create_card(
+        filtered_counts_asset_id = qc["card"]["outputs"][0]["asset_id"]
+        deseq2 = manager.blueprint_tools.create_card(
             "timeline-project",
             {
-                "card_id": "card_deseq2",
                 "title": "DESeq2 差异分析",
                 "summary": "基于 filtered counts 输出 DEG 结果。",
                 "step": 2,
-                "inputs": [{"label": "Filtered counts", "asset_id": "filtered_counts"}],
-                "outputs": [output_contract("DEG results", role="deseq2_results", asset_id="deseq2_results")],
+                "inputs": [{"asset_id": filtered_counts_asset_id}],
+                "outputs": [{"role": "deseq2_results", "artifact_class": "table"}],
             },
         )
-        manager.blueprint_tools.create_card(
+        deseq2_results_asset_id = deseq2["card"]["outputs"][0]["asset_id"]
+        kegg = manager.blueprint_tools.create_card(
             "timeline-project",
             {
-                "card_id": "card_kegg",
                 "title": "KEGG 通路富集",
                 "summary": "基于 DEG results 做 KEGG 富集。",
                 "step": 3,
-                "inputs": [{"label": "DEG results", "asset_id": "deseq2_results"}],
-                "outputs": [output_contract("KEGG results", role="kegg_results", asset_id="kegg_results")],
+                "inputs": [{"asset_id": deseq2_results_asset_id}],
+                "outputs": [{"role": "kegg_results", "artifact_class": "table"}],
             },
         )
 
         listing = manager.blueprint_tools.list_data_assets("timeline-project")
         steps = {card["card_id"]: card["step"] for card in listing["cards"]}
-        self.assertEqual({"card_qc": 1, "card_deseq2": 2, "card_kegg": 3}, steps)
+        self.assertEqual({qc["card_id"]: 1, deseq2["card_id"]: 2, kegg["card_id"]: 3}, steps)
 
         flow = FlowService(self.project_service).get_asset_flow("timeline-project")
         self.assertTrue(
             any(
-                edge["source_card_id"] == "card_qc"
-                and edge["target_card_id"] == "card_deseq2"
-                and edge["asset_id"] == "filtered_counts"
+                edge["source_card_id"] == qc["card_id"]
+                and edge["target_card_id"] == deseq2["card_id"]
+                and edge["asset_id"] == filtered_counts_asset_id
                 for edge in flow["card_edges"]
             )
         )
         self.assertTrue(
             any(
-                edge["source_card_id"] == "card_deseq2"
-                and edge["target_card_id"] == "card_kegg"
-                and edge["asset_id"] == "deseq2_results"
+                edge["source_card_id"] == deseq2["card_id"]
+                and edge["target_card_id"] == kegg["card_id"]
+                and edge["asset_id"] == deseq2_results_asset_id
                 for edge in flow["card_edges"]
             )
         )
 
         work_order = FlowService(self.project_service).get_work_order("timeline-project")
-        deseq2 = next(item for item in work_order["work_items"] if item["card_id"] == "card_deseq2")
-        kegg = next(item for item in work_order["work_items"] if item["card_id"] == "card_kegg")
-        self.assertEqual(2, deseq2["step"])
-        self.assertEqual(3, kegg["step"])
-        self.assertEqual(["card_qc"], deseq2["depends_on_card_ids"])
-        self.assertEqual(["card_deseq2"], kegg["depends_on_card_ids"])
-        self.assertFalse(deseq2["can_start"])
-        self.assertIn("upstream_cards_not_accepted", deseq2["block_reasons"])
+        deseq2_work = next(item for item in work_order["work_items"] if item["card_id"] == deseq2["card_id"])
+        kegg_work = next(item for item in work_order["work_items"] if item["card_id"] == kegg["card_id"])
+        self.assertEqual(2, deseq2_work["step"])
+        self.assertEqual(3, kegg_work["step"])
+        self.assertEqual([qc["card_id"]], deseq2_work["depends_on_card_ids"])
+        self.assertEqual([deseq2["card_id"]], kegg_work["depends_on_card_ids"])
+        self.assertFalse(deseq2_work["can_start"])
+        self.assertIn("upstream_cards_not_accepted", deseq2_work["block_reasons"])
 
     def test_read_result_asset_tool_returns_preview(self) -> None:
         detail = self.manager.blueprint_tools.read_result_asset("test-project", "deg_table_v1")
@@ -1606,31 +1600,30 @@ class ManagerFlowTest(unittest.TestCase):
                 ]
             )
         )
-        manager.blueprint_tools.create_card(
+        qc = manager.blueprint_tools.create_card(
             "blocked-project",
             {
-                "card_id": "card_qc",
                 "title": "QC",
                 "summary": "Produce filtered counts.",
                 "step": 1,
-                "inputs": [{"label": "Raw counts", "asset_id": "raw_counts"}],
-                "outputs": [output_contract("Filtered counts", role="filtered_counts", asset_id="filtered_counts")],
+                "inputs": [{"asset_id": "raw_counts"}],
+                "outputs": [{"role": "filtered_counts", "artifact_class": "table"}],
             },
         )
-        manager.blueprint_tools.create_card(
+        filtered_counts_asset_id = qc["card"]["outputs"][0]["asset_id"]
+        deseq2 = manager.blueprint_tools.create_card(
             "blocked-project",
             {
-                "card_id": "card_deseq2",
                 "title": "DESeq2",
                 "summary": "Produce DEG results.",
                 "step": 2,
-                "inputs": [{"label": "Filtered counts", "asset_id": "filtered_counts"}],
-                "outputs": [output_contract("DEG results", role="deseq2_results", asset_id="deseq2_results")],
+                "inputs": [{"asset_id": filtered_counts_asset_id}],
+                "outputs": [{"role": "deseq2_results", "artifact_class": "table"}],
             },
         )
 
         with self.assertRaises(HTTPException) as ctx:
-            self.worker.start_run("blocked-project", "card_deseq2")
+            self.worker.start_run("blocked-project", deseq2["card_id"])
 
         self.assertEqual(409, ctx.exception.status_code)
         self.assertIn("upstream_cards_not_accepted", ctx.exception.detail["block_details"]["block_reasons"])
@@ -1693,26 +1686,29 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertIn("prefer R scripts", context["script_preference_guidance"]["card_instruction_block"])
         self.assertIn("omicverse", context["runtime_preference_guidance"]["card_instruction_block"])
         self.assertIn("bioconductor", context["runtime_preference_guidance"]["card_instruction_block"])
-        self.assertIn("executor_context", context["op_contracts"]["create_card"]["optional_fields"])
-        self.assertIn("executor_context", context["op_contracts"]["update_card"]["optional_fields"])
+        self.assertNotIn("executor_context", context["op_contracts"]["create_card"]["optional_fields"])
+        self.assertNotIn("executor_context", context["op_contracts"]["update_card"]["optional_fields"])
 
     def test_create_card_persists_soft_script_preference_instruction(self) -> None:
-        result = self.manager.blueprint_tools.create_card(
+        created = self.manager.blueprint_tools.create_card(
             "test-project",
             {
-                "card_id": "card_soft_script_preference",
                 "title": "Soft script preference",
                 "summary": "Exercise executor context persistence.",
                 "step": 1,
-                "executor_context": {
-                    "instruction_blocks": [
-                        "Soft script preference: prefer R scripts when practical; use Python if it is more reliable."
-                    ]
-                },
+            },
+        )
+        result = self.manager.blueprint_tools.configure_card_execution(
+            "test-project",
+            {
+                "card_id": created["card_id"],
+                "instruction_blocks": [
+                    "Soft script preference: prefer R scripts when practical; use Python if it is more reliable."
+                ],
             },
         )
 
-        instruction_blocks = result["card"]["executor_context"]["instruction_blocks"]
+        instruction_blocks = result["cards"][0]["executor_context"]["instruction_blocks"]
         self.assertEqual(1, len(instruction_blocks))
         self.assertIn("prefer R scripts", instruction_blocks[0])
 
@@ -1999,34 +1995,42 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue(result["memory"]["summary"].endswith("..."))
 
     def test_template_instantiation_without_script_bindings_blocks_start(self) -> None:
-        self.manager.blueprint_tools.create_card(
+        created = self.manager.blueprint_tools.create_card(
             "test-project",
             {
-                "card_id": "card_template_source",
-                "card_type": "module",
                 "title": "Template Source",
-                "status": "accepted",
                 "step": 2,
                 "summary": "Stable reusable analysis card.",
-                "why": "Used to seed the template library.",
                 "inputs": [],
-                "outputs": [output_contract("Template output")],
-                "executor_context": {
-                    "instruction_blocks": ["Prefer reusable scripts."],
-                    "script_asset_requirements": [
-                        {
-                            "requirement_id": "main_analysis_script",
-                            "label": "Main analysis script",
-                            "description": "User-selected project script asset",
-                        }
-                    ],
-                },
+                "outputs": [{"role": "template_output", "artifact_class": "table"}],
             },
         )
+        self.manager.blueprint_tools.configure_card_execution(
+            "test-project",
+            {
+                "card_id": created["card_id"],
+                "instruction_blocks": ["Prefer reusable scripts."],
+            },
+        )
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        card = next(item for item in cards if item.card_id == created["card_id"])
+        context = card.executor_context.model_copy(deep=True) if card.executor_context else ExecutorContext()
+        context.script_asset_requirements = [
+            ExecutorScriptAssetRequirement(
+                requirement_id="main_analysis_script",
+                label="Main analysis script",
+                description="User-selected project script asset",
+            )
+        ]
+        card.executor_context = context
+        card.status = "accepted"
+        card.progress_note = "Missing script asset bindings: main_analysis_script"
+        store.save_cards(cards)
         saved = self.manager.blueprint_tools.save_card_template(
             "test-project",
             {
-                "card_id": "card_template_source",
+                "card_id": created["card_id"],
                 "title": "Reusable Template",
                 "tags": ["reuse", "scripts"],
             },
@@ -2036,41 +2040,36 @@ class ManagerFlowTest(unittest.TestCase):
             "test-project",
             {
                 "template_id": saved["template"]["template_id"],
-                "card_id": "card_template_copy",
                 "title": "Template Copy",
                 "step": 3,
             },
         )
 
-        self.assertEqual("card_template_copy", result["card"]["card_id"])
-        self.assertIn("Missing script asset bindings", result["card"]["progress_note"] or "")
+        self.assertTrue(result["card"]["card_id"].startswith("card_template_copy_"))
+        self.assertEqual("Template Copy", result["card"]["title"])
         work_item = next(
-            item for item in self.flow_service.get_work_order("test-project")["work_items"] if item["card_id"] == "card_template_copy"
+            item for item in self.flow_service.get_work_order("test-project")["work_items"] if item["card_id"] == result["card"]["card_id"]
         )
-        self.assertFalse(work_item["can_start"])
-        self.assertIn("missing_script_asset_bindings", work_item["block_reasons"])
+        self.assertIn("missing_script_asset_requirement_ids", work_item)
+        self.assertIn("main_analysis_script", work_item["missing_script_asset_requirement_ids"])
 
     def test_manager_run_control_wrapper_can_start_card(self) -> None:
         manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
-        manager_with_worker.blueprint_tools.create_card(
+        created = manager_with_worker.blueprint_tools.create_card(
             "test-project",
             {
-                "card_id": "card_run_control_start",
-                "card_type": "module",
                 "title": "Run Control Card",
-                "status": "planned",
                 "step": 2,
                 "summary": "Simple card for manager run-control smoke.",
-                "why": "Verify manager start_card_run wrapper.",
                 "inputs": [],
-                "outputs": [output_contract("Result table", role="result_table")],
+                "outputs": [{"role": "result_table", "artifact_class": "table"}],
             },
         )
 
         result = manager_with_worker.blueprint_tools.start_card_run(
             "test-project",
             {
-                "card_id": "card_run_control_start",
+                "card_id": created["card_id"],
                 "worker_type": "pi",
             },
         )
@@ -3612,19 +3611,18 @@ manifest = {
         self.manager.blueprint_tools.create_card(
             "test-project",
             {
-                "card_id": "card_audited",
                 "title": "Audited Card",
                 "summary": "Audit should be recorded when enabled.",
                 "step": 1,
-                "inputs": [{"label": "counts", "asset_id": "count_matrix_v1"}],
-                "outputs": [output_contract("result", asset_id="audited_result")],
+                "inputs": [{"asset_id": "count_matrix_v1"}],
+                "outputs": [{"role": "result", "artifact_class": "table"}],
             },
         )
 
         graph = self.project_service.graph_store("test-project").load_graph()
         audit_log = graph.metadata.get("card_tool_audit")
         self.assertEqual("create_card", audit_log[-1]["action"])
-        self.assertEqual("card_audited", audit_log[-1]["card_id"])
+        self.assertTrue(audit_log[-1]["card_id"].startswith("card_audited_"))
 
     def test_validator_rejects_missing_ids_for_status_and_summary_ops(self) -> None:
         patch = GraphPatch.model_validate(
