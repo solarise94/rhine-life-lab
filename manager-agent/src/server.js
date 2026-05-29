@@ -1439,9 +1439,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "configure_card_execution",
       label: "Configure card execution",
-      description: "Update execution permissions, selected skills, MCP servers, and runtime bindings for one or more cards. Use this when cards need Rscript, network access, selected runtimes, or non-interactive permission policy changes. This merges into existing executor_context without rewriting the whole card.",
+      description: "Update execution permissions, selected skills, MCP servers, and runtime bindings for one or more cards. Use this when cards need Rscript, network access, selected runtimes, or non-interactive permission policy changes. This merges into existing executor_context without rewriting the whole card. card_ids selects the target cards; skills and mcp_servers replace current lists, while instruction_blocks appends unique blocks.",
       parameters: Type.Object({
-        card_id: Type.Optional(Type.String()),
         card_ids: Type.Optional(Type.Array(Type.String())),
         skills: Type.Optional(Type.Array(Type.String())),
         mcp_servers: Type.Optional(Type.Array(Type.String())),
@@ -1463,7 +1462,6 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           }),
         ),
         instruction_blocks: Type.Optional(Type.Array(Type.String())),
-        progress_note: Type.Optional(Type.String()),
       }),
       execute: async (toolCallId, params, signal) => {
         try {

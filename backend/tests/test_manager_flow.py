@@ -1760,6 +1760,19 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue(card.executor_context.tool_policy.rscript)
         self.assertEqual("bioconductor", card.executor_context.runtime_bindings.r_env)
 
+    def test_configure_card_execution_keeps_backend_card_id_compatibility(self) -> None:
+        result = self.manager.blueprint_tools.configure_card_execution(
+            "test-project",
+            {
+                "card_id": "card_enrichment_group",
+                "instruction_blocks": ["Use Rscript when practical."],
+            },
+        )
+
+        self.assertEqual(["card_enrichment_group"], result["updated_card_ids"])
+        card = next(item for item in self.project_service.graph_store("test-project").load_cards() if item.card_id == "card_enrichment_group")
+        self.assertIn("Use Rscript when practical.", card.executor_context.instruction_blocks)
+
     def test_configure_card_execution_accepts_boolean_like_network_policy(self) -> None:
         result = self.manager.blueprint_tools.configure_card_execution(
             "test-project",
@@ -1781,6 +1794,15 @@ class ManagerFlowTest(unittest.TestCase):
                 {
                     "card_ids": ["card_enrichment_group"],
                     "tool_policy": {"network": "sometimes"},
+                },
+            )
+
+        with self.assertRaises(ManagerPlanningError):
+            self.manager.blueprint_tools.configure_card_execution(
+                "test-project",
+                {
+                    "card_ids": ["card_enrichment_group"],
+                    "progress_note": "Manager should not write short status notes.",
                 },
             )
 

@@ -33,6 +33,8 @@ from app.services.worker_service import WorkerService
 
 
 class ToolPolicyPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     network: str | None = Field(default=None, pattern="^(allow|deny|prompt)$")
     python: bool | None = None
     rscript: bool | None = None
@@ -55,6 +57,8 @@ class ToolPolicyPayload(BaseModel):
 
 
 class RuntimeBindingsPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     conda_env: str | None = None
     r_env: str | None = None
     working_dir: str | None = None
@@ -62,6 +66,8 @@ class RuntimeBindingsPayload(BaseModel):
 
 
 class ConfigureCardExecutionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     card_id: str | None = None
     card_ids: list[str] = Field(default_factory=list)
     skills: list[str] | None = None
@@ -69,7 +75,6 @@ class ConfigureCardExecutionPayload(BaseModel):
     tool_policy: ToolPolicyPayload | None = None
     runtime_bindings: RuntimeBindingsPayload | None = None
     instruction_blocks: list[str] | None = None
-    progress_note: str | None = None
 
 
 class StartCardRunPayload(BaseModel):
@@ -599,7 +604,6 @@ class ManagerBlueprintTools:
                             existing_blocks.append(block_text)
                     context.instruction_blocks = existing_blocks
                 card.executor_context = context
-                card.progress_note = str(request.progress_note or card.progress_note or "").strip() or card.progress_note
                 updated_cards.append(card)
                 self._audit_card_tool(project_id, "configure_card_execution", card.card_id, payload)
             store.save_cards(cards)
