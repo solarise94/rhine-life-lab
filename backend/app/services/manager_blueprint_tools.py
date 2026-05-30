@@ -32,6 +32,12 @@ from app.workers.command_worker import CommandTemplateWorkerAdapter
 from app.services.worker_service import WorkerService
 
 
+class DependencyResolutionError(ManagerPlanningError):
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+        super().__init__(str(payload.get("message") or payload.get("error_code") or "dependency resolution failed"))
+
+
 class RuntimeBindingsPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -110,6 +116,8 @@ class InstantiateCardTemplatePayload(BaseModel):
 
 
 class InstallRuntimeDependenciesPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     ecosystem: str
     runtime: str
     packages: list[str] = Field(default_factory=list)
@@ -768,7 +776,19 @@ class ManagerBlueprintTools:
     def install_runtime_dependencies(self, project_id: str, payload: dict) -> dict:
         if self.runtime_dependency_job_service is None:
             raise ManagerPlanningError("runtime dependency job service is unavailable.")
-        request_payload = self._validated_runtime_dependency_payload(payload)
+        try:
+            request_payload = self._validated_runtime_dependency_payload(payload)
+        except DependencyResolutionError as exc:
+            return {
+                "ok": False,
+                "background": False,
+                "async_boundary": False,
+                "do_not_poll": False,
+                "wait_for_wake": False,
+                **exc.payload,
+            }
+        except ValidationError as exc:
+            raise ManagerPlanningError(f"Invalid install_runtime_dependencies payload: {exc}") from exc
         job = self.runtime_dependency_job_service.submit(
             project_id,
             request_payload,
@@ -799,6 +819,11 @@ class ManagerBlueprintTools:
         job = self.runtime_dependency_job_service.get_for_project(project_id, job_id)
         if job is None:
             raise ManagerPlanningError("Runtime dependency job not found.")
+        if job.status in {"succeeded", "failed"} and job.future is not None:
+            try:
+                job.future.result(timeout=0.2)
+            except Exception:
+                pass
         result = job.result or {}
         payload = {
             "job_id": job.job_id,
@@ -819,6 +844,10 @@ class ManagerBlueprintTools:
                     "resolved_runtime": result.get("resolved_runtime"),
                     "packages": result.get("packages"),
                     "manager": result.get("manager"),
+                    "requested_package": result.get("requested_package"),
+                    "attempted_candidates": result.get("attempted_candidates"),
+                    "fallback_available": result.get("fallback_available"),
+                    "error_code": result.get("error_code"),
                     "stdout_tail": result.get("stdout_tail"),
                     "stderr_tail": result.get("stderr_tail"),
                 }
@@ -834,10 +863,25 @@ class ManagerBlueprintTools:
             raise ManagerPlanningError("install_runtime_dependencies requires a selected non-system runtime.")
         timeout = max(30, min(int(request.timeout_seconds or 600), 1800))
         manager_name = self._dependency_manager_label(ecosystem, request.manager)
-        if ecosystem == "python":
-            command, resolved_runtime = self._python_dependency_command(runtime, packages, request.manager)
-        else:
-            command, resolved_runtime = self._r_dependency_command(runtime, packages, request.manager)
+        try:
+            if ecosystem == "python":
+                command, resolved_runtime = self._python_dependency_command(runtime, packages, request.manager)
+            else:
+                command, resolved_runtime = self._r_dependency_command(runtime, packages, request.manager)
+        except DependencyResolutionError as exc:
+            payload = dict(exc.payload)
+            payload.update(
+                {
+                    "ok": False,
+                    "ecosystem": ecosystem,
+                    "runtime": runtime,
+                    "packages": packages,
+                    "manager": manager_name,
+                    "started_at": utc_now(),
+                    "finished_at": utc_now(),
+                }
+            )
+            return payload
         started_at = utc_now()
         try:
             result = subprocess.run(
@@ -851,6 +895,7 @@ class ManagerBlueprintTools:
         except subprocess.TimeoutExpired as exc:
             return {
                 "ok": False,
+                "error_code": "dependency_install_timeout",
                 "ecosystem": ecosystem,
                 "runtime": runtime,
                 "resolved_runtime": resolved_runtime,
@@ -865,6 +910,7 @@ class ManagerBlueprintTools:
         except OSError as exc:
             return {
                 "ok": False,
+                "error_code": "dependency_install_start_failed",
                 "ecosystem": ecosystem,
                 "runtime": runtime,
                 "resolved_runtime": resolved_runtime,
@@ -877,19 +923,17 @@ class ManagerBlueprintTools:
                 "finished_at": utc_now(),
             }
         ok = result.returncode == 0
-        if ok and ecosystem == "R" and manager_name != "conda":
-            stderr_lower = (result.stderr or "").lower()
-            failure_terms = (
-                "compilation failed",
-                "installation of package",
-                "had non-zero exit status",
-                "cannot install",
-                "error in",
-            )
-            if any(term in stderr_lower for term in failure_terms):
-                ok = False
+        if ok and ecosystem == "R" and manager_name != "conda" and self._is_r_compilation_failure(result.stderr):
+            ok = False
+        error_code = None
+        if not ok:
+            if ecosystem == "R" and manager_name != "conda" and self._is_r_compilation_failure(result.stderr):
+                error_code = "dependency_install_compilation_failed"
+            if error_code is None:
+                error_code = "dependency_install_failed"
         return {
             "ok": ok,
+            "error_code": error_code,
             "ecosystem": ecosystem,
             "runtime": runtime,
             "resolved_runtime": resolved_runtime,
@@ -1632,6 +1676,29 @@ class ManagerBlueprintTools:
             raise ManagerPlanningError("install_runtime_dependencies requires at least one package.")
         if len(cleaned) > 40:
             raise ManagerPlanningError("install_runtime_dependencies accepts at most 40 packages per call.")
+        source_install_specs = [
+            item for item in cleaned
+            if "github.com" in item.lower()
+            or item.lower().startswith("git+")
+            or item.lower().startswith("http://")
+            or item.lower().startswith("https://")
+            or item.lower().endswith(".tar.gz")
+            or "/" in item
+        ]
+        if source_install_specs:
+            code = "github_source_install_not_supported" if any("github" in item.lower() or "/" in item for item in source_install_specs) else "external_source_install_not_supported"
+            raise DependencyResolutionError(
+                {
+                    "error_code": code,
+                    "requested_package": source_install_specs[0],
+                    "attempted_candidates": [],
+                    "fallback_available": [],
+                    "message": (
+                        "Source-install dependencies are not supported by install_runtime_dependencies. "
+                        "Use a separate explicit environment-preparation workflow instead."
+                    ),
+                }
+            )
         python_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*(\[[A-Za-z0-9_,.-]+\])?([<>=!~]=?[A-Za-z0-9_.+*-]+)?$")
         r_re = re.compile(r"^[A-Za-z][A-Za-z0-9.]*$")
         invalid = [
@@ -1650,7 +1717,8 @@ class ManagerBlueprintTools:
             raise ManagerPlanningError(f"Python runtime not found: {runtime}")
         if manager_name == "conda":
             conda_bin = self._resolve_conda_solver(conda_base)
-            return [str(conda_bin), "install", "-y", "-p", str(env_path), *packages], str(env_path)
+            resolved_packages = [self._resolve_conda_python_package(conda_bin, package) for package in packages]
+            return [str(conda_bin), "install", "-y", "-p", str(env_path), *resolved_packages], str(env_path)
         python_bin = env_path / "bin" / "python"
         if not python_bin.exists():
             raise ManagerPlanningError(f"Python executable not found for runtime: {runtime}")
@@ -1665,7 +1733,7 @@ class ManagerBlueprintTools:
         conda_base = env_path.parent.parent if env_path.parent.name == "envs" else env_path
         if manager_name == "conda":
             conda_bin = self._resolve_conda_solver(conda_base)
-            conda_packages = [f"r-{package.lower()}" for package in packages]
+            conda_packages = [self._resolve_conda_r_package(conda_bin, package) for package in packages]
             return [
                 str(conda_bin),
                 "install",
@@ -1694,10 +1762,16 @@ class ManagerBlueprintTools:
     def _dependency_manager_label(ecosystem: str, manager: str | None) -> str:
         normalized = str(manager or "").strip().lower()
         if ecosystem == "python":
-            return "conda" if normalized in {"conda", "mamba", "micromamba"} else "pip"
+            if normalized == "pip":
+                return "pip"
+            return "conda"
         if normalized in {"conda", "mamba", "micromamba"}:
             return "conda"
-        return "cran" if normalized == "cran" else "bioconductor"
+        if normalized == "cran":
+            return "cran"
+        if normalized == "bioconductor":
+            return "bioconductor"
+        return "conda"
 
     @staticmethod
     def _resolve_conda_solver(conda_base: Path) -> Path:
@@ -1709,6 +1783,132 @@ class ManagerBlueprintTools:
         if micromamba:
             return Path(micromamba)
         raise ManagerPlanningError(f"No conda solver found at {conda_base}/bin/ (mamba or conda).")
+
+    def _resolve_conda_python_package(self, conda_bin: Path, package: str) -> str:
+        candidates = self._python_conda_candidates(package)
+        return self._resolve_conda_package_candidate(
+            conda_bin,
+            requested_package=package,
+            candidates=candidates,
+            fallback_available=["pip"],
+        )
+
+    def _resolve_conda_r_package(self, conda_bin: Path, package: str) -> str:
+        candidates = self._r_conda_candidates(package)
+        fallback_available: list[str] = ["cran", "bioconductor"]
+        return self._resolve_conda_package_candidate(
+            conda_bin,
+            requested_package=package,
+            candidates=candidates,
+            fallback_available=fallback_available,
+        )
+
+    def _resolve_conda_package_candidate(
+        self,
+        conda_bin: Path,
+        *,
+        requested_package: str,
+        candidates: list[str],
+        fallback_available: list[str],
+    ) -> str:
+        attempted: list[str] = []
+        for candidate in candidates:
+            if candidate in attempted:
+                continue
+            attempted.append(candidate)
+            if self._conda_package_exists(conda_bin, candidate):
+                return candidate
+        raise DependencyResolutionError(
+            {
+                "error_code": "package_not_found_in_conda_channels",
+                "requested_package": requested_package,
+                "attempted_candidates": attempted,
+                "fallback_available": fallback_available,
+                "message": (
+                    f"Package {requested_package} was not found in conda channels. "
+                    f"Attempted: {', '.join(attempted)}."
+                ),
+            }
+        )
+
+    @staticmethod
+    def _python_conda_candidates(package: str) -> list[str]:
+        normalized = str(package or "").strip()
+        lowered = normalized.lower()
+        swapped = lowered.replace("_", "-")
+        underscored = lowered.replace("-", "_")
+        return [normalized, lowered, swapped, underscored]
+
+    @staticmethod
+    def _r_conda_candidates(package: str) -> list[str]:
+        normalized = str(package or "").strip()
+        lowered = normalized.lower()
+        return [
+            f"r-{lowered}",
+            f"bioconductor-{lowered}",
+        ]
+
+    @staticmethod
+    def _conda_package_exists(conda_bin: Path, package_name: str) -> bool:
+        solver_name = conda_bin.name.lower()
+        if solver_name in {"mamba", "micromamba"}:
+            repoquery_match = ManagerBlueprintTools._repoquery_package_exists(conda_bin, package_name)
+            if repoquery_match is not None:
+                return repoquery_match
+        return ManagerBlueprintTools._json_search_package_exists(conda_bin, package_name)
+
+    @staticmethod
+    def _repoquery_package_exists(conda_bin: Path, package_name: str) -> bool | None:
+        result = subprocess.run(
+            [str(conda_bin), "repoquery", "search", package_name],
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        stdout = str(result.stdout or "")
+        try:
+            payload = json.loads(stdout or "{}")
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            matches = payload.get(package_name)
+            if isinstance(matches, list) and len(matches) > 0:
+                return True
+        pattern = re.compile(rf"(?m)^\s*{re.escape(package_name)}(?:\s|$)")
+        return bool(pattern.search(stdout))
+
+    @staticmethod
+    def _json_search_package_exists(conda_bin: Path, package_name: str) -> bool:
+        result = subprocess.run(
+            [str(conda_bin), "search", "--json", package_name],
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        if result.returncode != 0:
+            return False
+        try:
+            payload = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            return False
+        matches = payload.get(package_name)
+        return isinstance(matches, list) and len(matches) > 0
+
+    @staticmethod
+    def _is_r_compilation_failure(stderr: object) -> bool:
+        stderr_lower = str(stderr or "").lower()
+        failure_terms = (
+            "compilation failed",
+            "installation of package",
+            "had non-zero exit status",
+            "cannot install",
+            "error in",
+        )
+        return any(term in stderr_lower for term in failure_terms)
 
     @staticmethod
     def _tail_text(value: object, limit: int = 6000) -> str:

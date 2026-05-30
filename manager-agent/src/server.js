@@ -154,7 +154,7 @@ Available capabilities:
 - write_project_memory stores only explicit user preferences and corrections, such as "remember this", "default to this", or "do not do this again".
 - create_card, revise_card_plan, annotate_card, and delete_card directly modify blueprint cards after backend validation.
 - configure_card_execution directly updates selected skills, MCP servers, and Python/R runtime bindings for one or more cards.
-- install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime when a card reports missing runtime dependencies. Treat it like card execution background work: after a successful start, report the job_id and stop; do not foreground-poll the job in the same turn.
+- install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime. Treat it like card execution background work: after a successful start, report the job_id and stop; do not foreground-poll the job in the same turn.
 - get_runtime_dependency_install_status checks whether a previously started dependency installation job has finished. Use it for explicit user checks, recovery, or a later wake turn; do not use it to poll a just-started job in the same turn.
 - start_card_run, stop_card_run, rerun_card, and review_card_run control card execution directly when execution should happen now. start_card_run and rerun_card launch background executor work; after a successful start, do not poll card status in the same turn. Briefly report the run_id and stop so run events/wake events can carry progress.
 - cleanup_run_history removes old finished run execution files/caches when they are no longer needed; by default it preserves runs that own valid accepted assets.
@@ -180,7 +180,7 @@ Judgment:
 ${webJudgmentLines.join("\n")}
 - Write project memory only when the user explicitly asks you to remember a durable preference, says a behavior should be the default, or corrects something you should avoid in future. Keep memory summaries short.
 - Card agents cannot ask the user interactively. If a card needs a non-default Python or R runtime, use configure_card_execution on that card before telling the user it is ready.
-- Card executor agents run in a constrained runtime. They must not install missing R or Python packages on their own. If runtime packages are missing and a specific non-system runtime is selected, you may use install_runtime_dependencies with explicit package names to start a background install job, then stop the current turn and wait for the dependency-install wake event. If the runtime is a conda R environment, prefer manager "conda" or "mamba" for precompiled packages; CRAN/Bioconductor source installs can require compilers and must be treated as unproven until the package is loadable from the selected Rscript. If installation fails or the missing dependency is a system tool, tell the user exactly what dependency must be prepared.
+- Card executor agents run in a constrained runtime. They must not install missing R or Python packages on their own. If runtime packages are missing or the user explicitly wants packages added to a selected non-system runtime, you may use install_runtime_dependencies with explicit package names to start a background install job, then stop the current turn and wait for the dependency-install wake event. Prefer manager "conda" for conda-based runtimes unless you specifically need pip, cran, or bioconductor. Backend will pick the best available conda-family solver automatically. If installation fails or the missing dependency is a system tool, tell the user exactly what dependency must be prepared.
 - Search the skill/MCP library only when a card clearly may benefit from reusable execution abilities. The list/search tools are intentionally id/name-only; read one item detail only if the id/name is ambiguous.
 - If a task looks like a stable repeated workflow, search_card_templates before creating a new analysis card from scratch.
 - When a template requires script assets, ask the user which project script assets to bind before instantiate_card_template or before starting the card. Do not make card agents ask the user for bindings.
@@ -609,7 +609,36 @@ function retryHintForToolError(message) {
   if (/title is required|summary is required|required/i.test(message)) {
     return "Fill the required card fields and retry.";
   }
+  if (/Source-install dependencies are not supported|github_source_install_not_supported|external_source_install_not_supported/i.test(message)) {
+    return "Do not retry the normal dependency installer. Use a supported registry-backed package name or tell the user this requires a separate source-install environment workflow.";
+  }
   return "Inspect the error and retry with corrected arguments if the correction is clear.";
+}
+
+function dependencyInstallRetryHint(details = {}) {
+  if (!details || typeof details !== "object") {
+    return null;
+  }
+  const errorCode = details.error_code || "";
+  const fallback = Array.isArray(details.fallback_available) ? details.fallback_available.filter(Boolean) : [];
+  const attempted = Array.isArray(details.attempted_candidates) ? details.attempted_candidates.filter(Boolean) : [];
+  const requestedPackage = details.requested_package || "the requested package";
+  if (errorCode === "package_not_found_in_conda_channels") {
+    if (fallback.length) {
+      return `Conda channels do not contain ${requestedPackage}. Retry install_runtime_dependencies with manager=${fallback[0]} if that fallback fits; attempted candidates: ${attempted.join(", ") || "none"}.`;
+    }
+    return `Conda channels do not contain ${requestedPackage}. Do not blindly retry the same conda install; verify the real distribution name first.`;
+  }
+  if (errorCode === "github_source_install_not_supported" || errorCode === "external_source_install_not_supported") {
+    return "Do not retry install_runtime_dependencies with source URLs, GitHub repos, or tarballs. Use a registry-backed package name or ask for a separate manual environment-preparation workflow.";
+  }
+  if (errorCode === "dependency_install_compilation_failed") {
+    if (fallback.length) {
+      return `The source-style install path failed during compilation. Prefer a binary-backed retry with manager=${fallback[0]} if available; otherwise the runtime likely needs manual preparation.`;
+    }
+    return "The install failed during compilation. Prefer a binary-backed package source when possible, or tell the user the runtime needs manual preparation.";
+  }
+  return null;
 }
 
 function scriptPreferenceGuidance(scriptPreference) {
@@ -757,6 +786,10 @@ function summarizeToolPayload(toolName, payload) {
       packages: compactItems(payload.packages, (item) => item, 5),
       background: payload.background,
       ok: payload.ok,
+      requested_package: payload.requested_package,
+      error_code: payload.error_code,
+      attempted_candidates: compactItems(payload.attempted_candidates, (item) => item, 5),
+      fallback_available: compactItems(payload.fallback_available, (item) => item, 5),
       message: truncateText(payload.message, 180),
     };
   }
@@ -944,6 +977,22 @@ function buildToolReport(toolName, details) {
       details,
     };
   }
+  if (toolName === "install_runtime_dependencies" && details.ok === false) {
+    const requestedPackage = details.requested_package ? ` 目标包：${details.requested_package}。` : "";
+    const attempted = Array.isArray(details.attempted_candidates) && details.attempted_candidates.length
+      ? ` 候选尝试：${details.attempted_candidates.join(", ")}。`
+      : "";
+    const fallback = Array.isArray(details.fallback_available) && details.fallback_available.length
+      ? ` 可尝试：${details.fallback_available.join(", ")}。`
+      : "";
+    const retryHint = dependencyInstallRetryHint(details);
+    return {
+      summary:
+        details.message ||
+        `依赖安装未启动：${details.error_code || "unknown_error"}。${requestedPackage}${attempted}${fallback}`.trim(),
+      details: retryHint ? { ...details, retry_hint: retryHint } : details,
+    };
+  }
   if ((toolName === "start_card_run" || toolName === "rerun_card") && details.background && details.run_id) {
     return {
       summary:
@@ -954,15 +1003,23 @@ function buildToolReport(toolName, details) {
   }
   if (toolName === "get_runtime_dependency_install_status" && details.job_id) {
     const status = details.status || "unknown";
+    const requestedPackage = details.requested_package ? ` 目标包：${details.requested_package}。` : "";
+    const attempted = Array.isArray(details.attempted_candidates) && details.attempted_candidates.length
+      ? ` 候选尝试：${details.attempted_candidates.join(", ")}。`
+      : "";
+    const fallback = Array.isArray(details.fallback_available) && details.fallback_available.length
+      ? ` 可尝试：${details.fallback_available.join(", ")}。`
+      : "";
+    const retryHint = status === "failed" ? dependencyInstallRetryHint(details) : null;
     return {
       summary:
         details.message ||
         (status === "succeeded"
           ? "后台依赖安装已完成。"
           : status === "failed"
-            ? "后台依赖安装失败。"
+            ? `后台依赖安装失败。${requestedPackage}${attempted}${fallback}`.trim()
             : "后台依赖安装仍在进行。"),
-      details,
+      details: retryHint ? { ...details, retry_hint: retryHint } : details,
     };
   }
   return null;
@@ -1523,12 +1580,12 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "install_runtime_dependencies",
       label: "Install runtime dependencies",
-      description: "Start a background job that installs explicitly named Python or R packages into an already selected non-system runtime after a card reports missing runtime dependencies. Use only for clear package lists. After a successful start, report the job_id and stop this turn; do not poll status with get_runtime_dependency_install_status in the same turn.",
+      description: "Start a background job that installs explicitly named Python or R packages into an already selected non-system runtime. Use only for clear package lists. Prefer manager `conda` for conda-based runtimes unless you specifically need `pip`, `cran`, or `bioconductor`; backend will choose the best available conda-family solver automatically. After a successful start, report the job_id and stop this turn; do not poll status with get_runtime_dependency_install_status in the same turn.",
       parameters: Type.Object({
         ecosystem: Type.String({ description: "python or R" }),
         runtime: Type.String({ description: "Selected non-system runtime name, such as omicverse, rnaseq, or R_env. Do not use __system__." }),
         packages: Type.Array(Type.String({ description: "Package names or simple Python version specs." })),
-        manager: Type.Optional(Type.String({ description: "For python: pip or conda. For R: bioconductor, cran, or conda/mamba. Prefer conda/mamba for R conda environments because CRAN/Bioconductor source installs may need compilers. Defaults to pip for python and bioconductor for R." })),
+        manager: Type.Optional(Type.String({ description: "For python: conda or pip. For R: conda, cran, or bioconductor. Use ecosystem-native package names; backend resolves conda-family package names and chooses the best available conda-family solver automatically." })),
         timeout_seconds: Type.Optional(Type.Number()),
       }),
       execute: async (toolCallId, params, signal) => {

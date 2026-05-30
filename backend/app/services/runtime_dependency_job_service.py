@@ -45,6 +45,7 @@ class RuntimeDependencyJobService:
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="runtime-deps")
         self.jobs: dict[str, RuntimeDependencyJob] = {}
         self.lock = Lock()
+        self.runtime_locks: dict[tuple[str, str], Lock] = {}
         self.manager_wake_service = manager_wake_service
         self.project_event_service = project_event_service
 
@@ -92,8 +93,12 @@ class RuntimeDependencyJobService:
             job.started_at = utc_now()
             self._persist_project_jobs_locked(job.project_id)
             self._emit_project_event(job)
+            runtime = str(job.payload.get("runtime") or "").strip()
+            runtime_key = (job.project_id, runtime)
+            runtime_lock = self.runtime_locks.setdefault(runtime_key, Lock())
         try:
-            result = handler(job.project_id, job.payload)
+            with runtime_lock:
+                result = handler(job.project_id, job.payload)
         except Exception as exc:
             logger.exception("Runtime dependency job failed: %s", job_id)
             with self.lock:

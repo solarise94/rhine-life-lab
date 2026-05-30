@@ -1889,24 +1889,38 @@ class ManagerFlowTest(unittest.TestCase):
         settings = get_settings()
         conda_base = Path(self.tmpdir) / "conda"
         python_bin = conda_base / "envs" / "rnaseq" / "bin" / "python"
+        conda_bin = conda_base / "bin" / "conda"
         python_bin.parent.mkdir(parents=True)
+        conda_bin.parent.mkdir(parents=True)
         python_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        conda_bin.write_text("#!/bin/sh\n", encoding="utf-8")
         settings.executor_conda_base = conda_base
 
-        completed = subprocess.CompletedProcess(
+        search_completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({"scanpy": [{"name": "scanpy", "version": "1.10.0"}]}),
+            stderr="",
+        )
+        install_completed = subprocess.CompletedProcess(
             args=[],
             returncode=0,
             stdout="installed scanpy\n",
             stderr="",
         )
-        with patch("app.services.manager_blueprint_tools.subprocess.run", return_value=completed) as run:
+
+        def fake_run(command, **kwargs):
+            if "search" in command:
+                return search_completed
+            return install_completed
+
+        with patch("app.services.manager_blueprint_tools.subprocess.run", side_effect=fake_run) as run:
             result = self.manager.blueprint_tools.install_runtime_dependencies(
                 "test-project",
                 {
                     "ecosystem": "python",
                     "runtime": "rnaseq",
                     "packages": ["scanpy"],
-                    "manager": "pip",
                 },
             )
             for _ in range(40):
@@ -1921,9 +1935,9 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertEqual(["scanpy"], result["packages"])
         self.assertEqual("succeeded", status["status"])
         self.assertTrue(status["ok"])
-        command = run.call_args.args[0]
-        self.assertEqual(str(python_bin), command[0])
-        self.assertEqual(["-m", "pip", "install", "scanpy"], command[1:])
+        command = run.call_args_list[-1].args[0]
+        self.assertEqual(str(conda_bin), command[0])
+        self.assertEqual(["install", "-y", "-p", str(conda_base / "envs" / "rnaseq"), "scanpy"], command[1:])
         self.assertTrue(result["async_boundary"])
         self.assertTrue(result["do_not_poll"])
         self.assertTrue(result["wait_for_wake"])
@@ -1967,6 +1981,36 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertIn("BiocManager::install", command[-1])
         self.assertIn('"GSVA"', command[-1])
 
+    def test_manager_can_force_pip_for_python_dependency_install(self) -> None:
+        settings = get_settings()
+        conda_base = Path(self.tmpdir) / "conda"
+        python_bin = conda_base / "envs" / "rnaseq" / "bin" / "python"
+        python_bin.parent.mkdir(parents=True)
+        python_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        settings.executor_conda_base = conda_base
+
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
+        with patch("app.services.manager_blueprint_tools.subprocess.run", return_value=completed) as run:
+            result = self.manager.blueprint_tools.install_runtime_dependencies(
+                "test-project",
+                {
+                    "ecosystem": "python",
+                    "runtime": "rnaseq",
+                    "packages": ["scanpy"],
+                    "manager": "pip",
+                },
+            )
+            for _ in range(40):
+                status = self.manager.blueprint_tools.get_runtime_dependency_install_status("test-project", result["job_id"])
+                if status["status"] in {"succeeded", "failed"}:
+                    break
+                time.sleep(0.01)
+
+        self.assertEqual("succeeded", status["status"])
+        command = run.call_args.args[0]
+        self.assertEqual(str(python_bin), command[0])
+        self.assertEqual(["-m", "pip", "install", "scanpy"], command[1:])
+
     def test_manager_can_start_background_r_conda_dependency_install_against_resolved_r_env(self) -> None:
         settings = get_settings()
         configured_base = Path(self.tmpdir) / "miniconda3"
@@ -1979,9 +2023,18 @@ class ManagerFlowTest(unittest.TestCase):
         mamba.write_text("#!/bin/sh\n", encoding="utf-8")
         settings.executor_conda_base = configured_base
 
-        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
+        search_completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({"r-svglite": [{"name": "r-svglite", "version": "2.1.0"}]}),
+            stderr="",
+        )
+        install_completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
         with (
-            patch("app.services.manager_blueprint_tools.subprocess.run", return_value=completed) as run,
+            patch(
+                "app.services.manager_blueprint_tools.subprocess.run",
+                side_effect=lambda command, **kwargs: search_completed if "search" in command else install_completed,
+            ) as run,
             patch("app.workers.command_worker.default_conda_base_candidates", return_value=[configured_base, actual_base]),
         ):
             result = self.manager.blueprint_tools.install_runtime_dependencies(
@@ -2001,10 +2054,54 @@ class ManagerFlowTest(unittest.TestCase):
 
         self.assertEqual("succeeded", status["status"])
         self.assertEqual("conda", result["manager"])
-        command = run.call_args.args[0]
+        command = run.call_args_list[-1].args[0]
         self.assertEqual(str(mamba), command[0])
         self.assertEqual(["install", "-y", "-p", str(actual_base / "envs" / "R_env"), "-c", "conda-forge", "r-svglite"], command[1:])
         self.assertEqual(str(actual_base / "envs" / "R_env"), status["resolved_runtime"])
+
+    def test_conda_resolution_prefers_mamba_repoquery_before_json_search(self) -> None:
+        settings = get_settings()
+        conda_base = Path(self.tmpdir) / "miniforge3"
+        python_bin = conda_base / "envs" / "rnaseq" / "bin" / "python"
+        mamba = conda_base / "bin" / "mamba"
+        python_bin.parent.mkdir(parents=True)
+        mamba.parent.mkdir(parents=True)
+        python_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        mamba.write_text("#!/bin/sh\n", encoding="utf-8")
+        settings.executor_conda_base = conda_base
+
+        repoquery_completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="scanpy 1.10.0 pyhd8ed1ab_0\n",
+            stderr="",
+        )
+        install_completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
+
+        def fake_run(command, **kwargs):
+            if command[1:3] == ["repoquery", "search"]:
+                return repoquery_completed
+            if "search" in command:
+                raise AssertionError("conda search should not run after successful mamba repoquery")
+            return install_completed
+
+        with patch("app.services.manager_blueprint_tools.subprocess.run", side_effect=fake_run) as run:
+            result = self.manager.blueprint_tools.install_runtime_dependencies(
+                "test-project",
+                {
+                    "ecosystem": "python",
+                    "runtime": "rnaseq",
+                    "packages": ["scanpy"],
+                },
+            )
+            for _ in range(40):
+                status = self.manager.blueprint_tools.get_runtime_dependency_install_status("test-project", result["job_id"])
+                if status["status"] in {"succeeded", "failed"}:
+                    break
+                time.sleep(0.01)
+
+        self.assertEqual("succeeded", status["status"])
+        self.assertEqual(["repoquery", "search", "scanpy"], run.call_args_list[0].args[0][1:])
 
     def test_r_source_dependency_install_marks_stderr_failure_even_with_zero_exit(self) -> None:
         settings = get_settings()
@@ -2038,6 +2135,7 @@ class ManagerFlowTest(unittest.TestCase):
 
         self.assertEqual("failed", status["status"])
         self.assertFalse(status["ok"])
+        self.assertEqual("dependency_install_compilation_failed", status["error_code"])
 
     def test_manager_dependency_install_rejects_system_runtime(self) -> None:
         with self.assertRaises(ManagerPlanningError):
@@ -2045,6 +2143,71 @@ class ManagerFlowTest(unittest.TestCase):
                 "test-project",
                 {"ecosystem": "python", "runtime": "__system__", "packages": ["scanpy"]},
             )
+
+    def test_manager_dependency_install_payload_forbids_extra_fields(self) -> None:
+        with self.assertRaises(ManagerPlanningError):
+            self.manager.blueprint_tools.install_runtime_dependencies(
+                "test-project",
+                {
+                    "ecosystem": "python",
+                    "runtime": "rnaseq",
+                    "packages": ["scanpy"],
+                    "unexpected": True,
+                },
+            )
+
+    def test_conda_resolution_failure_returns_structured_fallback(self) -> None:
+        settings = get_settings()
+        conda_base = Path(self.tmpdir) / "conda"
+        conda_bin = conda_base / "bin" / "conda"
+        python_bin = conda_base / "envs" / "rnaseq" / "bin" / "python"
+        conda_bin.parent.mkdir(parents=True)
+        python_bin.parent.mkdir(parents=True)
+        conda_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        python_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        settings.executor_conda_base = conda_base
+
+        search_completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({}),
+            stderr="",
+        )
+
+        with patch("app.services.manager_blueprint_tools.subprocess.run", return_value=search_completed):
+            result = self.manager.blueprint_tools.install_runtime_dependencies(
+                "test-project",
+                {
+                    "ecosystem": "python",
+                    "runtime": "rnaseq",
+                    "packages": ["unknownpkg"],
+                },
+            )
+            for _ in range(40):
+                status = self.manager.blueprint_tools.get_runtime_dependency_install_status("test-project", result["job_id"])
+                if status["status"] in {"succeeded", "failed"}:
+                    break
+                time.sleep(0.01)
+
+        self.assertEqual("failed", status["status"])
+        self.assertFalse(status["ok"])
+        self.assertEqual("package_not_found_in_conda_channels", status["error_code"])
+        self.assertEqual(["pip"], status["result"]["fallback_available"])
+
+    def test_source_install_request_is_rejected_without_background_job(self) -> None:
+        result = self.manager.blueprint_tools.install_runtime_dependencies(
+            "test-project",
+            {
+                "ecosystem": "r",
+                "runtime": "R_env",
+                "packages": ["owner/repo"],
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["background"])
+        self.assertEqual("github_source_install_not_supported", result["error_code"])
+        self.assertEqual("owner/repo", result["requested_package"])
 
     def test_manager_can_write_and_filter_project_memory(self) -> None:
         preference = self.manager.blueprint_tools.write_project_memory(
