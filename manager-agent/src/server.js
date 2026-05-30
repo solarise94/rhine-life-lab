@@ -1552,12 +1552,9 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "start_card_run",
       label: "Start card run",
-      description: "Start executing a specific card as background work. Use after the card plan and runtime policy are ready. If successful, report the run_id and stop the turn; do not poll card status while waiting. If can_start is false, inspect block_reasons and fix the blocker before retrying.",
+      description: "Start executing a specific card as background work. Use after the card plan and runtime policy are ready; set runtime bindings with configure_card_execution before starting. If successful, report the run_id and stop the turn; do not poll card status while waiting. If can_start is false, inspect block_reasons and fix the blocker before retrying.",
       parameters: Type.Object({
         card_id: Type.String(),
-        worker_type: Type.Optional(Type.String()),
-        python_runtime: Type.Optional(Type.String()),
-        r_runtime: Type.Optional(Type.String()),
       }),
       execute: async (toolCallId, params, signal) => {
         try {
@@ -1584,7 +1581,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "stop_card_run",
       label: "Stop card run",
-      description: "Stop an active run by run_id, or by card_id if the card currently has one active run.",
+      description: "Stop an active run. Prefer run_id when known; use card_id only when the exact run_id is unknown. If both are provided, they must refer to the same run/card.",
       parameters: Type.Object({
         run_id: Type.Optional(Type.String()),
         card_id: Type.Optional(Type.String()),
@@ -1615,12 +1612,9 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "rerun_card",
       label: "Rerun card",
-      description: "Start a fresh background rerun for a card after a previous run finished or failed. If successful, report the run_id and stop the turn; do not poll card status while waiting. rerun_card reuses the card's saved inputs[].asset_id values; when repairing stale/outdated dependency chains, inspect dependency attention and update_card inputs to current asset ids before rerunning.",
+      description: "Start a fresh background rerun for a card after a previous run finished or failed. Set runtime bindings with configure_card_execution before rerunning. If successful, report the run_id and stop the turn; do not poll card status while waiting. rerun_card reuses the card's saved inputs[].asset_id values; when repairing stale/outdated dependency chains, inspect dependency attention and update_card inputs to current asset ids before rerunning.",
       parameters: Type.Object({
         card_id: Type.String(),
-        worker_type: Type.Optional(Type.String()),
-        python_runtime: Type.Optional(Type.String()),
-        r_runtime: Type.Optional(Type.String()),
       }),
       execute: async (toolCallId, params, signal) => {
         try {
@@ -1647,7 +1641,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "review_card_run",
       label: "Review card run",
-      description: "Accept or reject the latest run for a card, or a specific run_id when you need to finalize a reviewed result.",
+      description: "Accept or reject the latest run for a card, or a specific run_id when you need to finalize a reviewed result. Prefer run_id when known; if both run_id and card_id are provided, they must refer to the same run/card.",
       parameters: Type.Object({
         run_id: Type.Optional(Type.String()),
         card_id: Type.Optional(Type.String()),

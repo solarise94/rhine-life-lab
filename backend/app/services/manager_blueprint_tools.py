@@ -78,20 +78,22 @@ class ConfigureCardExecutionPayload(BaseModel):
 
 
 class StartCardRunPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     card_id: str
-    worker_type: str | None = None
-    profile_id: str | None = None
-    python_runtime: str | None = None
-    r_runtime: str | None = None
 
 
 class StopCardRunPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     run_id: str | None = None
     card_id: str | None = None
     reason: str | None = None
 
 
 class ReviewCardRunPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     run_id: str | None = None
     card_id: str | None = None
     accept: bool = True
@@ -885,10 +887,6 @@ class ManagerBlueprintTools:
             response = self.worker_service.start_run(
                 project_id,
                 request.card_id,
-                worker_type=request.worker_type,
-                profile_id=request.profile_id,
-                python_runtime=request.python_runtime,
-                r_runtime=request.r_runtime,
             )
             return {
                 "ok": True,
@@ -919,6 +917,7 @@ class ManagerBlueprintTools:
         if self.worker_service is None:
             raise ManagerPlanningError("worker service is unavailable for stop_card_run.")
         request = StopCardRunPayload.model_validate(payload)
+        self._validate_run_card_selector(project_id, run_id=request.run_id, card_id=request.card_id, action="stop_card_run")
         run_id = request.run_id or self._active_run_id_for_card(project_id, request.card_id)
         if not run_id:
             return {
@@ -940,10 +939,6 @@ class ManagerBlueprintTools:
             response = self.worker_service.rerun_card(
                 project_id,
                 request.card_id,
-                worker_type=request.worker_type,
-                profile_id=request.profile_id,
-                python_runtime=request.python_runtime,
-                r_runtime=request.r_runtime,
             )
             return {
                 "ok": True,
@@ -962,6 +957,7 @@ class ManagerBlueprintTools:
         if self.worker_service is None:
             raise ManagerPlanningError("worker service is unavailable for review_card_run.")
         request = ReviewCardRunPayload.model_validate(payload)
+        self._validate_run_card_selector(project_id, run_id=request.run_id, card_id=request.card_id, action="review_card_run")
         run_id = request.run_id or self._latest_run_id_for_card(project_id, request.card_id)
         if not run_id:
             raise ManagerPlanningError("review_card_run requires run_id or a card with linked runs.")
@@ -1635,6 +1631,16 @@ class ManagerBlueprintTools:
             return card.linked_runs[-1]
         run_ids = [run.run_id for run in snapshot["graph"].runs if run.card_id == card_id]
         return run_ids[-1] if run_ids else None
+
+    def _validate_run_card_selector(self, project_id: str, *, run_id: str | None, card_id: str | None, action: str) -> None:
+        if not run_id or not card_id:
+            return
+        graph = self.project_service.graph_store(project_id).load_graph()
+        run = next((item for item in graph.runs if item.run_id == run_id), None)
+        if run is None:
+            raise ManagerPlanningError(f"{action} run not found: {run_id}")
+        if run.card_id != card_id:
+            raise ManagerPlanningError(f"{action} selector mismatch: run {run_id} belongs to card {run.card_id}, not {card_id}.")
 
     def _run_reviewer_passed(self, project_id: str, run_id: str | None) -> bool:
         if not run_id:

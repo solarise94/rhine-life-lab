@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from fastapi import HTTPException
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from app.core.config import Settings, get_settings
 from app.models.cards import Card
@@ -2092,7 +2092,6 @@ class ManagerFlowTest(unittest.TestCase):
             "test-project",
             {
                 "card_id": created["card_id"],
-                "worker_type": "pi",
             },
         )
 
@@ -2104,6 +2103,42 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue(result["wait_for_wake"])
         self.assertIn("run_id", result)
         self._wait_for_run("test-project", result["run_id"])
+
+    def test_manager_run_control_rejects_runtime_overrides(self) -> None:
+        manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
+        with self.assertRaises(ValidationError):
+            manager_with_worker.blueprint_tools.start_card_run(
+                "test-project",
+                {
+                    "card_id": "card_enrichment_group",
+                    "python_runtime": "omicverse",
+                },
+            )
+        with self.assertRaises(ValidationError):
+            manager_with_worker.blueprint_tools.rerun_card(
+                "test-project",
+                {
+                    "card_id": "card_enrichment_group",
+                    "worker_type": "pi",
+                },
+            )
+
+    def test_run_control_rejects_mismatched_run_and_card_selectors(self) -> None:
+        manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
+        run = self.worker.start_run("test-project", "card_enrichment_group")
+        try:
+            with self.assertRaisesRegex(ManagerPlanningError, "selector mismatch"):
+                manager_with_worker.blueprint_tools.stop_card_run(
+                    "test-project",
+                    {"run_id": run["run_id"], "card_id": "card_immune_module"},
+                )
+            with self.assertRaisesRegex(ManagerPlanningError, "selector mismatch"):
+                manager_with_worker.blueprint_tools.review_card_run(
+                    "test-project",
+                    {"run_id": run["run_id"], "card_id": "card_immune_module", "accept": True},
+                )
+        finally:
+            self._wait_for_run("test-project", run["run_id"])
 
     def test_manager_can_cleanup_rejected_run_history(self) -> None:
         manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
