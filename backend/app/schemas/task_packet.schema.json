@@ -261,7 +261,7 @@
     "ExecutorToolPolicy": {
       "properties": {
         "network": {
-          "default": "prompt",
+          "default": "allow",
           "title": "Network",
           "type": "string"
         },

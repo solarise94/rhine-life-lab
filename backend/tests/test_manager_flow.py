@@ -1770,12 +1770,12 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertNotIn("executor_context", context["op_contracts"]["create_card"]["optional_fields"])
         self.assertNotIn("executor_context", context["op_contracts"]["update_card"]["optional_fields"])
 
-    def test_create_card_persists_soft_script_preference_instruction(self) -> None:
+    def test_configure_card_execution_can_set_runtime_bindings(self) -> None:
         created = self.manager.blueprint_tools.create_card(
             "test-project",
             {
-                "title": "Soft script preference",
-                "summary": "Exercise executor context persistence.",
+                "title": "Runtime binding target",
+                "summary": "Exercise runtime binding persistence.",
                 "step": 1,
             },
         )
@@ -1783,15 +1783,13 @@ class ManagerFlowTest(unittest.TestCase):
             "test-project",
             {
                 "card_id": created["card_id"],
-                "instruction_blocks": [
-                    "Soft script preference: prefer R scripts when practical; use Python if it is more reliable."
-                ],
+                "runtime_bindings": {"conda_env": "rnaseq", "r_env": "bioconductor"},
             },
         )
 
-        instruction_blocks = result["cards"][0]["executor_context"]["instruction_blocks"]
-        self.assertEqual(1, len(instruction_blocks))
-        self.assertIn("prefer R scripts", instruction_blocks[0])
+        runtime_bindings = result["cards"][0]["executor_context"]["runtime_bindings"]
+        self.assertEqual("rnaseq", runtime_bindings["conda_env"])
+        self.assertEqual("bioconductor", runtime_bindings["r_env"])
 
     def test_instruction_only_executor_context_keeps_agent_worker_permissions(self) -> None:
         store = self.project_service.graph_store("test-project")
@@ -1824,21 +1822,21 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertEqual("allow", packet.executor_context.tool_policy.network)
         self.assertFalse(packet.executor_context.tool_policy.rscript)
 
-    def test_manager_can_configure_card_execution_policy(self) -> None:
+    def test_manager_can_configure_card_execution_runtime_and_attachments(self) -> None:
         result = self.manager.blueprint_tools.configure_card_execution(
             "test-project",
             {
                 "card_ids": ["card_enrichment_group"],
-                "tool_policy": {"network": "allow", "rscript": True},
+                "skills": ["deseq2"],
+                "mcp_servers": ["omicverse"],
                 "runtime_bindings": {"r_env": "bioconductor"},
-                "instruction_blocks": ["Use Rscript for enrichment if Python packages are insufficient."],
             },
         )
 
         self.assertEqual(["card_enrichment_group"], result["updated_card_ids"])
         card = next(item for item in self.project_service.graph_store("test-project").load_cards() if item.card_id == "card_enrichment_group")
-        self.assertEqual("allow", card.executor_context.tool_policy.network)
-        self.assertTrue(card.executor_context.tool_policy.rscript)
+        self.assertEqual(["deseq2"], card.executor_context.skills)
+        self.assertEqual(["omicverse"], card.executor_context.mcp_servers)
         self.assertEqual("bioconductor", card.executor_context.runtime_bindings.r_env)
 
     def test_configure_card_execution_keeps_backend_card_id_compatibility(self) -> None:
@@ -1846,27 +1844,13 @@ class ManagerFlowTest(unittest.TestCase):
             "test-project",
             {
                 "card_id": "card_enrichment_group",
-                "instruction_blocks": ["Use Rscript when practical."],
+                "runtime_bindings": {"r_env": "bioconductor"},
             },
         )
 
         self.assertEqual(["card_enrichment_group"], result["updated_card_ids"])
         card = next(item for item in self.project_service.graph_store("test-project").load_cards() if item.card_id == "card_enrichment_group")
-        self.assertIn("Use Rscript when practical.", card.executor_context.instruction_blocks)
-
-    def test_configure_card_execution_accepts_boolean_like_network_policy(self) -> None:
-        result = self.manager.blueprint_tools.configure_card_execution(
-            "test-project",
-            {
-                "card_ids": ["card_enrichment_group"],
-                "tool_policy": {"network": "true", "rscript": True},
-            },
-        )
-
-        self.assertEqual(["card_enrichment_group"], result["updated_card_ids"])
-        card = next(item for item in self.project_service.graph_store("test-project").load_cards() if item.card_id == "card_enrichment_group")
-        self.assertEqual("allow", card.executor_context.tool_policy.network)
-        self.assertTrue(card.executor_context.tool_policy.rscript)
+        self.assertEqual("bioconductor", card.executor_context.runtime_bindings.r_env)
 
     def test_configure_card_execution_invalid_payload_is_planning_error(self) -> None:
         with self.assertRaises(ManagerPlanningError):
@@ -1874,7 +1858,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "test-project",
                 {
                     "card_ids": ["card_enrichment_group"],
-                    "tool_policy": {"network": "sometimes"},
+                    "runtime_bindings": {"working_dir": "."},
                 },
             )
 
@@ -1895,7 +1879,7 @@ class ManagerFlowTest(unittest.TestCase):
                     "test-project",
                     {
                         "card_ids": ["card_enrichment_group"],
-                        "instruction_blocks": ["Use the newer runtime."],
+                        "runtime_bindings": {"r_env": "bioconductor"},
                     },
                 )
         finally:
@@ -2126,7 +2110,7 @@ class ManagerFlowTest(unittest.TestCase):
             "test-project",
             {
                 "card_id": created["card_id"],
-                "instruction_blocks": ["Prefer reusable scripts."],
+                "skills": ["reusable-script-runner"],
             },
         )
         store = self.project_service.graph_store("test-project")
@@ -2592,7 +2576,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "instruction_blocks": ["Use curated R scripts when possible."],
                 "references": [{"type": "file", "path": "configs/params.yaml"}],
                 "tool_policy": {"network": "allow", "python": True, "rscript": True, "shell": True, "git_write": False},
-                "runtime_bindings": {"conda_env": "rnaseq", "working_dir": "."},
+                "runtime_bindings": {"conda_env": "rnaseq"},
             }
         )
         store.save_cards(cards)
@@ -2602,6 +2586,7 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertEqual("bioinfo_r_worker", packet.executor_context.executor_profile)
         self.assertEqual(["deseq2", "gsea"], packet.executor_context.skills)
         self.assertEqual("stdout_bp_event", packet.manager_reporting_contract.transport)
+        self.assertEqual("{run_dir}", packet.executor_context.runtime_bindings.working_dir)
         self._wait_for_run("test-project", run["run_id"])
 
     def test_command_adapter_writes_contract_files_and_env(self) -> None:
@@ -2639,12 +2624,14 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue((run_dir / "library" / "skill_bindings.json").exists())
         self.assertTrue((run_dir / "library" / "mcp_bindings.json").exists())
         self.assertTrue((run_dir / "library" / "mcp.json").exists())
+        self.assertEqual(run_dir, spec.cwd)
         self.assertIn("BLUEPRINT_EXECUTOR_BRIEF", spec.environment)
         self.assertIn("BLUEPRINT_EXECUTOR_PROMPT", spec.environment)
         self.assertIn("BLUEPRINT_ADAPTER_CONTRACT", spec.environment)
         self.assertIn("BLUEPRINT_DEPENDENCY_REPORT_TOOL", spec.environment)
         self.assertIn("BLUEPRINT_PI_SKILL_PATHS", spec.environment)
         self.assertIn("BLUEPRINT_ALLOWED_PATHS", spec.environment)
+        self.assertEqual(str(run_dir), spec.environment["BLUEPRINT_RUNTIME_WORKING_DIR"])
         self.assertTrue(any(request.target == "scripts/generated/" for request in spec.permission_requests))
         self.assertTrue((run_dir / "report_dependency_issue.py").exists())
 

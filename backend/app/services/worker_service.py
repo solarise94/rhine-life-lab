@@ -960,17 +960,31 @@ class WorkerService:
         transcript_path = self.project_service.project_path(project_id) / "runs" / run_id / "transcript.md"
 
         try:
+            cwd.mkdir(parents=True, exist_ok=True)
             before_snapshot = self.manifest_service.capture_filesystem_snapshot(project_id)
-            process = subprocess.Popen(
-                command,
-                cwd=cwd,
-                env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                start_new_session=True,
-            )
+            try:
+                process = subprocess.Popen(
+                    command,
+                    cwd=cwd,
+                    env=environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    start_new_session=True,
+                )
+            except FileNotFoundError:
+                cwd.mkdir(parents=True, exist_ok=True)
+                process = subprocess.Popen(
+                    command,
+                    cwd=cwd,
+                    env=environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    start_new_session=True,
+                )
             self._processes[run_id] = process
             if self._run_status(project_id, run_id) == "cancelled":
                 self._terminate_process_group(run_id, process)
@@ -1764,7 +1778,6 @@ class WorkerService:
             runtime_env["BLUEPRINT_PYTHON_RUNTIME"] = python_runtime
         if r_runtime:
             runtime_env["BLUEPRINT_R_RUNTIME"] = r_runtime
-        network_policy = "allow" if worker_type in {"opencode", "codex", "pi", "claude_code"} else "prompt"
         return ExecutorContext(
             executor_profile=f"{worker_type}_worker",
             executor_profile_id=profile_id,
@@ -1776,11 +1789,11 @@ class WorkerService:
             references=[
                 ExecutorReference(type="file", path="configs/params.yaml", description="Project-level runtime parameters."),
             ],
-            tool_policy=ExecutorToolPolicy(network=network_policy, python=True, rscript=worker_type in {"pi", "opencode"}),
+            tool_policy=ExecutorToolPolicy(network="allow", python=True, rscript=True, shell=True, git_write=False),
             runtime_bindings=RuntimeBindings(
                 conda_env=conda_env,
                 r_env=r_env,
-                working_dir=".",
+                working_dir="{run_dir}",
                 env=runtime_env,
             ),
         )
@@ -1820,8 +1833,6 @@ class WorkerService:
                 context.runtime_bindings.r_env = override.runtime_bindings.r_env
             if "container_image" in runtime_fields:
                 context.runtime_bindings.container_image = override.runtime_bindings.container_image
-            if "working_dir" in runtime_fields:
-                context.runtime_bindings.working_dir = override.runtime_bindings.working_dir
             if "env" in runtime_fields:
                 context.runtime_bindings.env.update(override.runtime_bindings.env)
         if "script_asset_requirements" in override.model_fields_set:

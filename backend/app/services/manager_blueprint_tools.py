@@ -32,37 +32,11 @@ from app.workers.command_worker import CommandTemplateWorkerAdapter
 from app.services.worker_service import WorkerService
 
 
-class ToolPolicyPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    network: str | None = Field(default=None, pattern="^(allow|deny|prompt)$")
-    python: bool | None = None
-    rscript: bool | None = None
-    shell: bool | None = None
-    git_write: bool | None = None
-
-    @field_validator("network", mode="before")
-    @classmethod
-    def normalize_network_policy(cls, value: object) -> object:
-        if value is None:
-            return None
-        if isinstance(value, bool):
-            return "allow" if value else "deny"
-        text = str(value).strip().lower()
-        if text == "true":
-            return "allow"
-        if text == "false":
-            return "deny"
-        return text
-
-
 class RuntimeBindingsPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     conda_env: str | None = None
     r_env: str | None = None
-    working_dir: str | None = None
-    env: dict[str, str] = Field(default_factory=dict)
 
 
 class ConfigureCardExecutionPayload(BaseModel):
@@ -72,9 +46,7 @@ class ConfigureCardExecutionPayload(BaseModel):
     card_ids: list[str] = Field(default_factory=list)
     skills: list[str] | None = None
     mcp_servers: list[str] | None = None
-    tool_policy: ToolPolicyPayload | None = None
     runtime_bindings: RuntimeBindingsPayload | None = None
-    instruction_blocks: list[str] | None = None
 
 
 class StartCardRunPayload(BaseModel):
@@ -640,9 +612,7 @@ class ManagerBlueprintTools:
                 card_ids = [card_id]
         if not card_ids:
             raise ManagerPlanningError("configure_card_execution requires card_id or card_ids.")
-        tool_policy = request.tool_policy.model_dump(exclude_none=True) if request.tool_policy else {}
         runtime_bindings = request.runtime_bindings.model_dump(exclude_none=True) if request.runtime_bindings else {}
-        instruction_blocks = request.instruction_blocks
         with self.project_service.lock_for(project_id):
             store = self.project_service.graph_store(project_id)
             graph = store.load_graph()
@@ -672,32 +642,10 @@ class ManagerBlueprintTools:
                     context.skills = [str(item).strip() for item in request.skills if str(item).strip()]
                 if request.mcp_servers is not None:
                     context.mcp_servers = [str(item).strip() for item in request.mcp_servers if str(item).strip()]
-                if "network" in tool_policy:
-                    context.tool_policy.network = str(tool_policy["network"])
-                if "python" in tool_policy:
-                    context.tool_policy.python = bool(tool_policy["python"])
-                if "rscript" in tool_policy:
-                    context.tool_policy.rscript = bool(tool_policy["rscript"])
-                if "shell" in tool_policy:
-                    context.tool_policy.shell = bool(tool_policy["shell"])
-                if "git_write" in tool_policy:
-                    context.tool_policy.git_write = bool(tool_policy["git_write"])
                 if "conda_env" in runtime_bindings:
                     context.runtime_bindings.conda_env = runtime_bindings.get("conda_env")
                 if "r_env" in runtime_bindings:
                     context.runtime_bindings.r_env = runtime_bindings.get("r_env")
-                if "working_dir" in runtime_bindings and runtime_bindings.get("working_dir"):
-                    context.runtime_bindings.working_dir = str(runtime_bindings["working_dir"])
-                env = runtime_bindings.get("env")
-                if isinstance(env, dict):
-                    context.runtime_bindings.env.update({str(key): str(value) for key, value in env.items() if value is not None})
-                if instruction_blocks is not None:
-                    existing_blocks = list(context.instruction_blocks)
-                    for block in instruction_blocks:
-                        block_text = str(block).strip()
-                        if block_text and block_text not in existing_blocks:
-                            existing_blocks.append(block_text)
-                    context.instruction_blocks = existing_blocks
                 card.executor_context = context
                 updated_cards.append(card)
                 self._audit_card_tool(project_id, "configure_card_execution", card.card_id, payload)
@@ -1281,16 +1229,18 @@ class ManagerBlueprintTools:
                 )
             )
         context.script_asset_bindings = bindings
-        tool_policy = context.tool_policy.model_dump(exclude_none=True)
-        runtime_bindings = context.runtime_bindings.model_dump(exclude_none=True)
+        runtime_bindings: dict[str, str | None] = {}
+        if context.runtime_bindings.conda_env is not None:
+            runtime_bindings["conda_env"] = context.runtime_bindings.conda_env
+        if context.runtime_bindings.r_env is not None:
+            runtime_bindings["r_env"] = context.runtime_bindings.r_env
         payload = {
             "card_id": card_id,
             "skills": list(context.skills),
             "mcp_servers": list(context.mcp_servers),
-            "tool_policy": tool_policy,
-            "runtime_bindings": runtime_bindings,
-            "instruction_blocks": list(context.instruction_blocks),
         }
+        if runtime_bindings:
+            payload["runtime_bindings"] = runtime_bindings
         self.configure_card_execution(project_id, payload)
         with self.project_service.lock_for(project_id):
             store = self.project_service.graph_store(project_id)

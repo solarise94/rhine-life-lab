@@ -12,7 +12,7 @@ class ExecutorReference(BaseModel):
 
 
 class ExecutorToolPolicy(BaseModel):
-    network: str = "prompt"
+    network: str = "allow"
     python: bool = True
     rscript: bool = False
     shell: bool = True

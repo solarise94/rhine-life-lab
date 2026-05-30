@@ -153,7 +153,7 @@ Available capabilities:
 - list_project_memory reads short-lived-to-long-term project preferences and corrections. It is not the source of project execution facts.
 - write_project_memory stores only explicit user preferences and corrections, such as "remember this", "default to this", or "do not do this again".
 - create_card, revise_card_plan, annotate_card, and delete_card directly modify blueprint cards after backend validation.
-- configure_card_execution directly updates card execution permissions, selected skills, MCP servers, and runtime bindings such as tool_policy.rscript and tool_policy.network.
+- configure_card_execution directly updates selected skills, MCP servers, and Python/R runtime bindings for one or more cards.
 - install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime when a card reports missing runtime dependencies. Treat it like card execution background work: after a successful start, report the job_id and stop; do not foreground-poll the job in the same turn.
 - get_runtime_dependency_install_status checks whether a previously started dependency installation job has finished. Use it for explicit user checks, recovery, or a later wake turn; do not use it to poll a just-started job in the same turn.
 - start_card_run, stop_card_run, rerun_card, and review_card_run control card execution directly when execution should happen now. start_card_run and rerun_card launch background executor work; after a successful start, do not poll card status in the same turn. Briefly report the run_id and stop so run events/wake events can carry progress.
@@ -179,7 +179,7 @@ Judgment:
 - If a write tool returns ok:false, use the message/retry_hint to correct arguments and retry when the correction is clear. If it is not clear, inspect context or ask a focused question.
 ${webJudgmentLines.join("\n")}
 - Write project memory only when the user explicitly asks you to remember a durable preference, says a behavior should be the default, or corrects something you should avoid in future. Keep memory summaries short.
-- Do not ask the user to approve executor runtime permissions in a card prompt. Card agents cannot ask the user interactively. If a card needs Rscript or network access, use configure_card_execution on that card before telling the user it is ready.
+- Card agents cannot ask the user interactively. If a card needs a non-default Python or R runtime, use configure_card_execution on that card before telling the user it is ready.
 - Card executor agents run in a constrained runtime. They must not install missing R or Python packages on their own. If runtime packages are missing and a specific non-system runtime is selected, you may use install_runtime_dependencies with explicit package names to start a background install job, then stop the current turn and wait for the dependency-install wake event. If the runtime is a conda R environment, prefer manager "conda" or "mamba" for precompiled packages; CRAN/Bioconductor source installs can require compilers and must be treated as unproven until the package is loadable from the selected Rscript. If installation fails or the missing dependency is a system tool, tell the user exactly what dependency must be prepared.
 - Search the skill/MCP library only when a card clearly may benefit from reusable execution abilities. The list/search tools are intentionally id/name-only; read one item detail only if the id/name is ambiguous.
 - If a task looks like a stable repeated workflow, search_card_templates before creating a new analysis card from scratch.
@@ -191,7 +191,7 @@ ${webJudgmentLines.join("\n")}
 - Respect selected_context.script_preference when creating analysis cards. It is a soft script-language preference, not a hard constraint.
 - Respect selected_context.python_runtime and selected_context.r_runtime as preferred execution runtimes when planning or updating analysis cards.
 - If script_preference is auto and a new bioinformatics card could reasonably be implemented in either Python or R, ask the user which script style they prefer when that choice materially affects the workflow.
-- When a concrete script preference is known, add it to executor_context.instruction_blocks on new or updated analysis cards.
+- When a concrete script preference is known, reflect it in the card plan and chosen implementation approach, but do not send executor_context fields in normal card write payloads.
 - Keep final replies concise and user-facing.
 
 Card fields:
@@ -647,7 +647,7 @@ function runtimePreferenceGuidance(context = {}) {
   return {
     python_runtime: pythonRuntime,
     r_runtime: rRuntime,
-    card_instruction_block: `Runtime preference: ${instructions.join(" ")} Add this to executor_context.instruction_blocks when it is relevant to a new or updated analysis card.`,
+    card_instruction_block: `Runtime preference: ${instructions.join(" ")} Use it when planning or choosing runtimes for new or updated analysis cards.`,
   };
 }
 
@@ -1486,29 +1486,17 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "configure_card_execution",
       label: "Configure card execution",
-      description: "Update execution permissions, selected skills, MCP servers, and runtime bindings for one or more cards. Use this when cards need Rscript, network access, selected runtimes, or non-interactive permission policy changes. This merges into existing executor_context without rewriting the whole card. card_ids selects the target cards; skills and mcp_servers replace current lists, while instruction_blocks appends unique blocks.",
+      description: "Update selected skills, MCP servers, and Python/R runtime bindings for one or more cards. Use this only when a card needs non-default runtimes or library/tool attachments. It is not a permission editor and does not control network, shell, env vars, working directory, or free-form instruction patches.",
       parameters: Type.Object({
         card_ids: Type.Optional(Type.Array(Type.String())),
         skills: Type.Optional(Type.Array(Type.String())),
         mcp_servers: Type.Optional(Type.Array(Type.String())),
-        tool_policy: Type.Optional(
-          Type.Object({
-            network: Type.Optional(Type.String({ description: "Literal string allow, deny, or prompt. Do not use boolean true/false. Use allow when the card agent must access model APIs or download databases without asking the user." })),
-            python: Type.Optional(Type.Boolean()),
-            rscript: Type.Optional(Type.Boolean({ description: "Set true for R/GSVA/ESTIMATE-style cards." })),
-            shell: Type.Optional(Type.Boolean()),
-            git_write: Type.Optional(Type.Boolean()),
-          }),
-        ),
         runtime_bindings: Type.Optional(
           Type.Object({
             conda_env: Type.Optional(Type.String()),
             r_env: Type.Optional(Type.String()),
-            working_dir: Type.Optional(Type.String()),
-            env: Type.Optional(Type.Record(Type.String(), Type.String())),
           }),
         ),
-        instruction_blocks: Type.Optional(Type.Array(Type.String())),
       }),
       execute: async (toolCallId, params, signal) => {
         try {
@@ -1599,7 +1587,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "start_card_run",
       label: "Start card run",
-      description: "Start executing a specific card as background work. Use the card's saved execution configuration when present; otherwise the backend uses system defaults. Use configure_card_execution only when the card needs non-default runtime, tool policy, skills, MCP servers, script bindings, or extra instruction blocks. If successful, report the run_id and stop the turn; do not poll card status while waiting. If can_start is false, inspect block_reasons and fix the blocker before retrying.",
+      description: "Start executing a specific card as background work. Use the card's saved execution configuration when present; otherwise the backend uses system defaults. Use configure_card_execution only when the card needs non-default Python/R runtime bindings or attached skills/MCP servers. If successful, report the run_id and stop the turn; do not poll card status while waiting. If can_start is false, inspect block_reasons and fix the blocker before retrying.",
       parameters: Type.Object({
         card_id: Type.String(),
       }),

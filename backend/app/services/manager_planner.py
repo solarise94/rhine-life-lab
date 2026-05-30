@@ -67,7 +67,7 @@ You must follow the patch contract strictly:
 - Respect `selected_context.script_preference` when creating analysis cards. Treat it as a soft user preference, not a hard constraint.
 - Respect `selected_context.python_runtime` and `selected_context.r_runtime` as preferred execution runtimes when planning or updating analysis cards.
 - If `script_preference` is `auto` and a new bioinformatics card could reasonably be implemented in either Python or R, ask the user for a preference before creating cards when that choice materially affects the workflow.
-- When a concrete preference is known, add it to each new or updated analysis card through `executor_context.instruction_blocks`, e.g. "Soft script preference: prefer R scripts when practical; use Python if it is more reliable for this task."
+- When a concrete preference is known, reflect it in the card plan and chosen implementation approach, but do not send `executor_context` fields in normal card write payloads.
 
 Before you return the tool call, do an internal self-check:
 1. Verify every op uses the correct target object type.
@@ -540,8 +540,8 @@ class DeepSeekManagerPlanner:
             "python_runtime": python_runtime,
             "r_runtime": r_runtime,
             "card_instruction_block": (
-                f"Runtime preference: {' '.join(instructions)} Add this to executor_context.instruction_blocks "
-                "when it is relevant to a new or updated analysis card."
+                f"Runtime preference: {' '.join(instructions)} Use it when planning or choosing runtimes "
+                "for new or updated analysis cards."
                 if instructions
                 else None
             ),

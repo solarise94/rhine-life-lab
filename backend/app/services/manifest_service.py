@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from pydantic import ValidationError
 
 from app.models.runs import ExecutorValidationReport, Manifest, ManifestReviewContext, TaskPacket
@@ -117,7 +119,15 @@ class ManifestService:
         *,
         sandboxed: bool = False,
     ) -> tuple[bool, list[str], list[dict[str, str]]]:
-        packet = self.load_task_packet(project_id, run_id)
+        try:
+            packet = self.load_task_packet(project_id, run_id)
+        except (ValidationError, json.JSONDecodeError) as exc:
+            violations = [f"Task packet unavailable for filesystem audit: {exc}"]
+            atomic_write_json(
+                self.project_service.project_path(project_id) / "runs" / run_id / "filesystem_audit.json",
+                {"changes": [], "violations": violations},
+            )
+            return False, violations, []
         after_snapshot = self.capture_filesystem_snapshot(project_id)
         allowed_prefixes = tuple(packet.allowed_paths)
         changes: list[dict[str, str]] = []

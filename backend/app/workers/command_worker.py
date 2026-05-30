@@ -78,6 +78,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
     ) -> WorkerLaunchSpec:
         if not self.is_configured(settings):
             raise RuntimeError(f"Worker adapter {self.name} is not configured.")
+        run_dir.mkdir(parents=True, exist_ok=True)
         self._validate_executor_policy(packet)
         library_paths = self._write_library_bindings(packet=packet, run_dir=run_dir)
         contract_paths = self._write_contract_files(packet=packet, run_dir=run_dir, library_paths=library_paths)
@@ -118,6 +119,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         r_extra_env = self._apply_r_runtime(r_env, settings=settings, base_path=python_extra_env.get("PATH"))
         extra_env = {**python_extra_env, **r_extra_env}
         adapter_extra_env = self.extra_environment(packet=packet, settings=settings)
+        effective_working_dir = str(run_dir)
         environment = {
             **os.environ,
             **runtime_env,
@@ -154,7 +156,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "BLUEPRINT_EXECUTOR_MCP_BINDINGS": str(library_paths["mcp_bindings_path"]),
             "BLUEPRINT_EXECUTOR_MCP_CONFIG": str(library_paths["mcp_config_path"]),
             "BLUEPRINT_PI_SKILL_PATHS": json.dumps(library_paths["skill_paths"]),
-            "BLUEPRINT_RUNTIME_WORKING_DIR": packet.executor_context.runtime_bindings.working_dir if packet.executor_context else ".",
+            "BLUEPRINT_RUNTIME_WORKING_DIR": effective_working_dir,
             "BLUEPRINT_MANAGER_REPORT_STDOUT_PREFIX": (
                 packet.manager_reporting_contract.stdout_prefix if packet.manager_reporting_contract else "BP_EVENT "
             ),
@@ -176,7 +178,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             )
         return WorkerLaunchSpec(
             command=command,
-            cwd=project_root,
+            cwd=run_dir,
             environment=environment,
             permission_requests=self._build_permission_requests(packet),
             sandboxed=sandboxed,
@@ -352,7 +354,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
                 str(script_run_dir),
                 str(script_run_dir),
                 "--chdir",
-                str(project_root),
+                str(run_dir),
             ]
         )
         conda_base = Path(getattr(settings, "executor_conda_base", default_conda_base()))
