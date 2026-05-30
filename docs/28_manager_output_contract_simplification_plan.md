@@ -1,5 +1,13 @@
 # Manager Output Contract Simplification Plan
 
+> Status note: this document records the output-contract simplification work.
+> The later tool-surface decisions in
+> `docs/29_manager_run_control_selector_contract.md` supersede this document
+> wherever it refers to a broad `update_card` tool. The current target split is:
+> `revise_card_plan` for execution-relevant `step` / `inputs` / `outputs`
+> changes, and `annotate_card` for display-only `title` / `summary` /
+> note changes.
+
 ## Context
 
 The OAA-2 KEGG/GO enrichment run exposed a contract-design problem:
@@ -169,15 +177,15 @@ The Manager card-writing tools should expose a narrow, semantic input surface. F
 | --- | --- | --- | --- |
 | `card_id` | create: no; update: required selector | Stable card identity. | System generates it, for example from timestamp plus a short slug. Manager should not provide it when creating a card. |
 | `card_type` | no | Card kind. | System sets `module`. Do not expose this in Manager card-writing tools unless additional card types become real product concepts. |
-| `title` | yes | Human-readable card title. | No automation except trimming. |
+| `title` | `annotate_card` only | Human-readable card title. | Display-only edit; must not trigger rerun or planned reset. |
 | `status` | no | Workflow state. | Create defaults to `planned`. Running/review/rejection/acceptance/stale/cancelled transitions are owned by dedicated tools or system state changes, not card-writing payloads. |
-| `step` | yes | Timeline/order grouping. | Manager chooses based on workflow order. UI sorts by it. |
-| `summary` | yes | What this card will do or has done. | No automation except trimming. |
+| `step` | `revise_card_plan` only | Timeline/order grouping. | Execution-relevant edit; reset card to `planned` when changed outside transient execution states. |
+| `summary` | `annotate_card` only | What this card will do or has done. | Display-only edit; must not trigger rerun or planned reset. |
 | `why` | no | Deprecated rationale field. | Remove from Manager write surface because it overlaps with `summary`. Existing stored values can remain read-only until migrated away. |
-| `inputs` | selected, not free-form | Declared asset dependencies. | Manager should choose from selectable assets returned by asset search/detail/ATTENTION, not invent arbitrary input refs. Selectable assets include materialized valid assets and planned upstream outputs. |
-| `outputs` | yes, narrowed | Declared semantic outputs. | Backend derives runtime formats and `path_hint`. |
+| `inputs` | `revise_card_plan` only | Declared asset dependencies. | Manager should choose from selectable assets returned by asset search/detail/ATTENTION, not invent arbitrary input refs. Selectable assets include materialized valid assets and planned upstream outputs. Changing inputs resets the card to `planned`. |
+| `outputs` | `revise_card_plan` only | Declared semantic outputs. | Backend derives runtime formats and `path_hint`. Changing outputs resets the card to `planned`. |
 | `key_findings` | no | Short conclusions from completed work. | Populate from executor/reviewer/result-summary flow after execution. Do not expose in Manager card-writing tools. |
-| `manager_review` | not in initial planning | Manager's assessment after review, repair, or manual confirmation. | Expose only in review/repair flows. Do not show it in initial card planning tools. |
+| `manager_review` | `annotate_card` only | Display note / assessment text. | Must not finalize a run, change assets, or change card status. Review finalization remains owned by reviewer/run review paths. |
 | `next_actions` | no | Deprecated follow-up text field. | Remove from Manager write surface; use normal chat response or future task-specific structures instead. |
 | `linked_modules` | no | Deprecated module grouping reference. | Remove from Manager write surface. If UI/template compatibility still needs it, maintain it outside normal card-writing tools. |
 | `linked_runs` | no | Run history references. | System-maintained read-only field. Do not expose in Manager write tools. |
@@ -214,7 +222,7 @@ Preferred create/update shape:
 
 Input repair rule:
 
-- If ATTENTION says `input_asset_outdated`, update `inputs[].asset_id` first, then rerun.
+- If ATTENTION says `input_asset_outdated`, revise `inputs[].asset_id` first, then start the card normally.
 - If the intended replacement is ambiguous, report ATTENTION instead of guessing.
 
 ### Output Object
@@ -276,7 +284,7 @@ const CreateCardInput = Type.Object({
 });
 ```
 
-Final manager-facing update shape:
+Superseded broad update shape:
 
 ```ts
 const UpdateCardInput = Type.Object({
@@ -289,7 +297,25 @@ const UpdateCardInput = Type.Object({
 });
 ```
 
-For updates, `card_id` is a selector. `title` remains editable for legitimate wording fixes, but `card_id` itself remains stable and system-owned.
+Current target split:
+
+```ts
+const ReviseCardPlanInput = Type.Object({
+  card_id: Type.String(),
+  step: Type.Optional(Type.Number()),
+  inputs: Type.Optional(Type.Array(ManagerCardInput)),
+  outputs: Type.Optional(Type.Array(ManagerCardOutput)),
+});
+
+const AnnotateCardInput = Type.Object({
+  card_id: Type.String(),
+  title: Type.Optional(Type.String()),
+  summary: Type.Optional(Type.String()),
+  note: Type.Optional(Type.String()),
+});
+```
+
+For plan revision, `card_id` is a selector. Display wording fixes belong to `annotate_card`, not the execution-plan revision tool.
 
 `create_card.outputs` and `update_card.outputs` should not be `Record<string, any>`. They should be explicit arrays of output objects:
 

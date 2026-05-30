@@ -86,20 +86,19 @@ class StartCardRunPayload(BaseModel):
 class StopCardRunPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    run_id: str | None = None
-    card_id: str | None = None
+    card_id: str
     reason: str | None = None
 
 
 class ReviewCardRunPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    run_id: str | None = None
-    card_id: str | None = None
-    accept: bool = True
+    card_id: str
 
 
 class CleanupRunHistoryPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     run_id: str | None = None
     card_id: str | None = None
     statuses: list[str] = Field(default_factory=list)
@@ -196,11 +195,17 @@ class CreateCardPayload(BaseModel):
 class UpdateCardPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     card_id: str
-    title: str | None = None
-    summary: str | None = None
     step: int | None = None
     inputs: list[ManagerCardInputPayload] | None = None
     outputs: list[ManagerCardOutputPayload] | None = None
+
+
+class AnnotateCardPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    card_id: str
+    title: str | None = None
+    summary: str | None = None
+    manager_review: str | None = None
 
 
 class CardWriteValidationError(ManagerPlanningError):
@@ -391,8 +396,8 @@ class ManagerBlueprintTools:
         if any(issue.get("kind") == "input_asset_outdated" and issue.get("current_asset_id") for issue in result.get("dependency_attention", [])):
             result["repair_guidance"] = (
                 "input_asset_outdated means the downstream card still saves an old inputs[].asset_id. "
-                "Before rerun_card, use update_card to replace that input asset_id with current_asset_id; "
-                "otherwise the new run will keep using the old asset."
+                "Use revise_card_plan to replace that input asset_id with current_asset_id, then use start_card_run; "
+                "do not use rerun_card for dependency repair."
             )
         return {"project_id": project_id, **result}
 
@@ -467,7 +472,7 @@ class ManagerBlueprintTools:
         try:
             request = UpdateCardPayload.model_validate(payload)
         except ValidationError as exc:
-            raise CardWriteValidationError(self._payload_validation_error_response("update", payload, exc)) from exc
+            raise CardWriteValidationError(self._payload_validation_error_response("revise_card_plan", payload, exc)) from exc
         card_id = str(request.card_id or "").strip()
         snapshot = self.project_service.get_project_snapshot(project_id)
         existing = next((item for item in snapshot["cards"] if item.card_id == card_id), None)
@@ -476,7 +481,7 @@ class ManagerBlueprintTools:
                 {
                     "ok": False,
                     "error_type": "card_write_validation_failed",
-                    "action": "update",
+                    "action": "revise_card_plan",
                     "errors": [
                         {
                             "code": "update_card_not_found",
@@ -489,13 +494,26 @@ class ManagerBlueprintTools:
                     ],
                 }
             )
-        updated = self._normalize_update_card_payload(snapshot, existing, request)
-        updated, errors = self.asset_timeline_service.validate_card(snapshot, updated, replacing_card_id=card_id)
-        errors = self._append_output_role_errors(updated, errors)
-        if errors:
-            raise CardWriteValidationError(self._card_write_error_response("update", card_id, errors))
+        if request.step is None and request.inputs is None and request.outputs is None:
+            raise CardWriteValidationError(
+                {
+                    "ok": False,
+                    "error_type": "card_write_validation_failed",
+                    "action": "revise_card_plan",
+                    "errors": [
+                        {
+                            "code": "no_plan_fields_provided",
+                            "field": None,
+                            "card_id": card_id,
+                            "message": "revise_card_plan requires at least one of step, inputs, or outputs.",
+                            "blocking": True,
+                        }
+                    ],
+                }
+            )
         with self.project_service.lock_for(project_id):
             store = self.project_service.graph_store(project_id)
+            graph = store.load_graph()
             cards = store.load_cards()
             index = next((idx for idx, item in enumerate(cards) if item.card_id == card_id), None)
             if index is None:
@@ -503,7 +521,7 @@ class ManagerBlueprintTools:
                     {
                         "ok": False,
                         "error_type": "card_write_validation_failed",
-                        "action": "update",
+                        "action": "revise_card_plan",
                         "errors": [
                             {
                                 "code": "update_card_not_found",
@@ -516,38 +534,99 @@ class ManagerBlueprintTools:
                     }
                 )
             previous = cards[index]
+            locked_snapshot = {**snapshot, "cards": cards, "graph": graph}
+            updated = self._normalize_update_card_payload(locked_snapshot, previous, request)
+            updated, errors = self.asset_timeline_service.validate_card(locked_snapshot, updated, replacing_card_id=card_id)
+            errors = self._append_output_role_errors(updated, errors)
+            if errors:
+                raise CardWriteValidationError(self._card_write_error_response("revise_card_plan", card_id, errors))
+            updated = self._apply_plan_revision_status(previous, updated)
             cards[index] = updated
-            graph = store.load_graph()
             self._sync_module_links(graph, updated, previous_card=previous)
-            # Guard: accepted cards must always have consistent output bindings.
-            if updated.status == "accepted":
-                try:
-                    WorkerService._assert_acceptance_graph_consistent(updated, graph, previous.linked_runs[-1] if previous.linked_runs else "")
-                except AssertionError as exc:
-                    raise CardWriteValidationError(
-                        {
-                            "ok": False,
-                            "error_type": "card_write_validation_failed",
-                            "action": "update",
-                            "errors": [
-                                {
-                                    "code": "accepted_card_consistency_failed",
-                                    "field": "status",
-                                    "card_id": card_id,
-                                    "message": f"accepted card 图一致性检查失败：{exc}",
-                                    "blocking": True,
-                                    "repair": {"tool": "review_card_run"},
-                                }
-                            ],
-                        }
-                    ) from exc
             ModuleGroupStateService.sync_linked_module_status_from_card(updated, graph.modules)
             ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
             store.save_graph(graph)
             store.save_cards(cards)
-            self._audit_card_tool(project_id, "update_card", card_id, payload)
+            self._audit_card_tool(project_id, "revise_card_plan", card_id, payload)
         hint = self.dependency_attention_service.mutation_hint(self.project_service.get_project_snapshot(project_id), updated.card_id)
         return {"ok": True, "card": updated.model_dump(), "card_id": updated.card_id, **hint}
+
+    def annotate_card(self, project_id: str, payload: dict) -> dict:
+        try:
+            request = AnnotateCardPayload.model_validate(payload)
+        except ValidationError as exc:
+            raise CardWriteValidationError(self._payload_validation_error_response("annotate", payload, exc)) from exc
+        card_id = str(request.card_id or "").strip()
+        if request.title is None and request.summary is None and request.manager_review is None:
+            raise CardWriteValidationError(
+                {
+                    "ok": False,
+                    "error_type": "card_write_validation_failed",
+                    "action": "annotate",
+                    "errors": [
+                        {
+                            "code": "no_annotation_fields_provided",
+                            "field": None,
+                            "card_id": card_id,
+                            "message": "annotate_card requires at least one of title, summary, or manager_review.",
+                            "blocking": True,
+                        }
+                    ],
+                }
+            )
+        snapshot = self.project_service.get_project_snapshot(project_id)
+        existing = next((item for item in snapshot["cards"] if item.card_id == card_id), None)
+        if not existing:
+            raise CardWriteValidationError(
+                {
+                    "ok": False,
+                    "error_type": "card_write_validation_failed",
+                    "action": "annotate",
+                    "errors": [
+                        {
+                            "code": "update_card_not_found",
+                            "field": "card_id",
+                            "card_id": card_id,
+                            "message": f"Card not found: {card_id}",
+                            "blocking": True,
+                            "repair": {"tool": "find_cards", "query": card_id},
+                        }
+                    ],
+                }
+            )
+        with self.project_service.lock_for(project_id):
+            store = self.project_service.graph_store(project_id)
+            cards = store.load_cards()
+            index = next((idx for idx, item in enumerate(cards) if item.card_id == card_id), None)
+            if index is None:
+                raise CardWriteValidationError(
+                    {
+                        "ok": False,
+                        "error_type": "card_write_validation_failed",
+                        "action": "annotate",
+                        "errors": [
+                            {
+                                "code": "update_card_not_found",
+                                "field": "card_id",
+                                "card_id": card_id,
+                                "message": f"Card not found: {card_id}",
+                                "blocking": True,
+                            }
+                        ],
+                    }
+                )
+            previous = cards[index]
+            updated = previous.model_copy(
+                update={
+                    "title": request.title if request.title is not None else previous.title,
+                    "summary": request.summary if request.summary is not None else previous.summary,
+                    "manager_review": request.manager_review if request.manager_review is not None else previous.manager_review,
+                }
+            )
+            cards[index] = updated
+            store.save_cards(cards)
+            self._audit_card_tool(project_id, "annotate_card", card_id, payload)
+        return {"ok": True, "card": updated.model_dump(), "card_id": updated.card_id}
 
     def configure_card_execution(self, project_id: str, payload: dict) -> dict:
         try:
@@ -566,11 +645,25 @@ class ManagerBlueprintTools:
         instruction_blocks = request.instruction_blocks
         with self.project_service.lock_for(project_id):
             store = self.project_service.graph_store(project_id)
+            graph = store.load_graph()
             cards = store.load_cards()
             updated_cards: list[Card] = []
             missing = [card_id for card_id in card_ids if not any(card.card_id == card_id for card in cards)]
             if missing:
                 raise ManagerPlanningError(f"Card not found: {', '.join(missing)}")
+            active_card_ids = sorted(
+                {
+                    run.card_id
+                    for run in graph.runs
+                    if run.card_id in card_ids and run.status in WorkerService._active_run_statuses()
+                }
+            )
+            if active_card_ids:
+                raise ManagerPlanningError(
+                    "configure_card_execution cannot modify cards with active runs: "
+                    + ", ".join(active_card_ids)
+                    + ". Wait for the run to finish or stop it first."
+                )
             for card in cards:
                 if card.card_id not in card_ids:
                     continue
@@ -917,24 +1010,47 @@ class ManagerBlueprintTools:
         if self.worker_service is None:
             raise ManagerPlanningError("worker service is unavailable for stop_card_run.")
         request = StopCardRunPayload.model_validate(payload)
-        self._validate_run_card_selector(project_id, run_id=request.run_id, card_id=request.card_id, action="stop_card_run")
-        run_id = request.run_id or self._active_run_id_for_card(project_id, request.card_id)
-        if not run_id:
+        run_ids = self._active_run_ids_for_card(project_id, request.card_id)
+        if not run_ids:
             return {
                 "ok": False,
                 "stopped": False,
                 "message": "No active run found for the requested card.",
+                "stopped_run_ids": [],
             }
-        try:
-            response = self.worker_service.cancel_run(project_id, run_id, reason=request.reason)
-        except HTTPException as exc:
-            raise ManagerPlanningError(str(exc.detail)) from exc
-        return {"ok": True, "stopped": True, **response}
+        stopped_run_ids: list[str] = []
+        failed_results: list[dict[str, Any]] = []
+        for run_id in run_ids:
+            try:
+                self.worker_service.cancel_run(project_id, run_id, reason=request.reason)
+                stopped_run_ids.append(run_id)
+            except HTTPException as exc:
+                failed_results.append({"run_id": run_id, "detail": str(exc.detail)})
+        if not stopped_run_ids:
+            raise ManagerPlanningError(
+                "Failed to stop active runs for card "
+                + request.card_id
+                + (f": {failed_results[0]['detail']}" if failed_results else ".")
+            )
+        message = (
+            f"Stopped {len(stopped_run_ids)} active run(s) for card {request.card_id}."
+            if len(stopped_run_ids) > 1
+            else f"Stopped active run {stopped_run_ids[0]} for card {request.card_id}."
+        )
+        return {
+            "ok": True,
+            "stopped": True,
+            "card_id": request.card_id,
+            "stopped_run_ids": stopped_run_ids,
+            "failed_results": failed_results,
+            "message": message,
+        }
 
     def rerun_card(self, project_id: str, payload: dict) -> dict:
         if self.worker_service is None:
             raise ManagerPlanningError("worker service is unavailable for rerun_card.")
         request = StartCardRunPayload.model_validate(payload)
+        self._assert_rerun_inputs_retryable(project_id, request.card_id)
         try:
             response = self.worker_service.rerun_card(
                 project_id,
@@ -957,15 +1073,41 @@ class ManagerBlueprintTools:
         if self.worker_service is None:
             raise ManagerPlanningError("worker service is unavailable for review_card_run.")
         request = ReviewCardRunPayload.model_validate(payload)
-        self._validate_run_card_selector(project_id, run_id=request.run_id, card_id=request.card_id, action="review_card_run")
-        run_id = request.run_id or self._latest_run_id_for_card(project_id, request.card_id)
+        run_id = self._latest_run_id_for_card(project_id, request.card_id)
         if not run_id:
-            raise ManagerPlanningError("review_card_run requires run_id or a card with linked runs.")
+            raise ManagerPlanningError("review_card_run requires a card with linked runs.")
+        run = next(
+            (item for item in self.project_service.graph_store(project_id).load_graph().runs if item.run_id == run_id),
+            None,
+        )
+        if run is None:
+            raise ManagerPlanningError(f"review_card_run run not found: {run_id}")
+        if run.status in {"reviewed", "cancelled"}:
+            raise ManagerPlanningError(f"review_card_run cannot finalize run {run_id} from status {run.status}.")
         try:
-            response = self.worker_service.review_run(project_id, run_id, accept=request.accept)
+            response = self.worker_service.review_run(project_id, run_id, accept=True)
         except Exception as exc:
             raise ManagerPlanningError(str(exc)) from exc
-        return {"ok": True, **response}
+        accepted = bool(response.get("accepted"))
+        failure_reason = response.get("failure_reason")
+        if accepted:
+            message = "Run review accepted."
+        elif failure_reason == "mapping_ambiguous":
+            message = "Run review did not accept the result because output mapping is ambiguous."
+        elif failure_reason == "consistency_failed":
+            message = "Run review did not accept the result because graph consistency checks failed."
+        else:
+            message = "Run review did not accept the result."
+        return {
+            "ok": True,
+            "review_completed": True,
+            "card_id": request.card_id,
+            "run_id": run_id,
+            "accepted": accepted,
+            "failure_reason": failure_reason,
+            "failure_details": response.get("failure_details", []),
+            "message": message,
+        }
 
     def cleanup_run_history(self, project_id: str, payload: dict) -> dict:
         if self.worker_service is None:
@@ -1290,10 +1432,11 @@ class ManagerBlueprintTools:
     def _normalize_update_card_payload(self, snapshot: dict[str, Any], existing: Card, request: UpdateCardPayload) -> Card:
         update_payload: dict[str, Any] = {
             "card_id": existing.card_id,
-            "title": request.title if request.title is not None else existing.title,
             "status": existing.status,
             "step": request.step if request.step is not None else existing.step,
-            "summary": request.summary if request.summary is not None else existing.summary,
+            "title": existing.title,
+            "summary": existing.summary,
+            "manager_review": existing.manager_review,
             "inputs": (
                 [self._normalized_input_ref(snapshot, item.asset_id) for item in request.inputs]
                 if request.inputs is not None
@@ -1318,6 +1461,19 @@ class ManagerBlueprintTools:
         else:
             update_payload["outputs"] = existing.outputs
         return self._normalize_card_payload(update_payload, allow_missing_card_id=True)
+
+    @staticmethod
+    def _apply_plan_revision_status(previous: Card, updated: Card) -> Card:
+        if updated.status == "planned":
+            updated.progress_note = None
+            return updated
+        if updated.status in {"running", "reviewing"}:
+            return updated
+        updated.status = "planned"
+        updated.progress_note = None
+        if previous.status != "planned" and not str(updated.manager_review or "").strip():
+            updated.manager_review = f"Card plan revised from previous status {previous.status}; awaiting a new run."
+        return updated
 
     @staticmethod
     def _generated_card_id(title: str) -> str:
@@ -1611,16 +1767,15 @@ class ManagerBlueprintTools:
         text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
         return text[-limit:]
 
-    def _active_run_id_for_card(self, project_id: str, card_id: str | None) -> str | None:
+    def _active_run_ids_for_card(self, project_id: str, card_id: str | None) -> list[str]:
         if not card_id:
-            return None
+            return []
         graph = self.project_service.graph_store(project_id).load_graph()
-        active = [
+        return [
             run.run_id
             for run in graph.runs
-            if run.card_id == card_id and run.status in {"queued", "needs_approval", "running", "reviewing"}
+            if run.card_id == card_id and run.status in WorkerService._active_run_statuses()
         ]
-        return active[-1] if active else None
 
     def _latest_run_id_for_card(self, project_id: str, card_id: str | None) -> str | None:
         if not card_id:
@@ -1641,6 +1796,31 @@ class ManagerBlueprintTools:
             raise ManagerPlanningError(f"{action} run not found: {run_id}")
         if run.card_id != card_id:
             raise ManagerPlanningError(f"{action} selector mismatch: run {run_id} belongs to card {run.card_id}, not {card_id}.")
+
+    def _assert_rerun_inputs_retryable(self, project_id: str, card_id: str) -> None:
+        snapshot = self.project_service.get_project_snapshot(project_id)
+        issues = self.dependency_attention_service.issues_for_card(snapshot, card_id)
+        blocking_kinds = {
+            "input_asset_missing",
+            "input_asset_not_valid",
+            "input_asset_outdated",
+            "input_producer_card_inactive",
+            "input_producer_output_removed",
+            "asset_lineage_invalid",
+        }
+        blocking = [issue for issue in issues if issue.get("kind") in blocking_kinds]
+        if not blocking:
+            return
+        first = blocking[0]
+        current_asset = first.get("current_asset_id")
+        guidance = ""
+        if current_asset:
+            guidance = f" Repair inputs first by selecting current asset {current_asset}."
+        raise ManagerPlanningError(
+            "rerun_card requires retryable current inputs. "
+            + str(first.get("message") or "Dependency attention blocks rerun.")
+            + guidance
+        )
 
     def _run_reviewer_passed(self, project_id: str, run_id: str | None) -> bool:
         if not run_id:

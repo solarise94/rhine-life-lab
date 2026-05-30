@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 _MUTATING_TOOL_NAMES = {
     "create_card",
-    "update_card",
+    "revise_card_plan",
+    "annotate_card",
     "configure_card_execution",
     "delete_card",
     "set_tool_policy",
@@ -87,7 +88,7 @@ def _emit_tool_project_event(
     card = response.get("card") if isinstance(response, dict) else None
     card_id = card.get("card_id") if isinstance(card, dict) else response.get("card_id") if isinstance(response, dict) else None
     status = card.get("status") if isinstance(card, dict) else response.get("status") if isinstance(response, dict) else None
-    if card_id is None and reason in {"card_created", "card_updated", "card_deleted", "card_execution_configured", "card_template_instantiated"}:
+    if card_id is None and reason in {"card_created", "card_updated", "card_annotated", "card_deleted", "card_execution_configured", "card_template_instantiated"}:
         logger.warning("Project event for %s has no card_id: project_id=%s response_keys=%s", reason, project_id, list(response.keys()) if isinstance(response, dict) else None)
     try:
         project_event_service.emit(project_id, reason=reason, card_id=card_id, status=status)
@@ -217,7 +218,7 @@ def get_card_detail(
 
 
 @router.patch("/cards/{card_id}")
-def update_card(
+def revise_card_plan(
     project_id: str,
     card_id: str,
     payload: dict,
@@ -228,12 +229,37 @@ def update_card(
     project_event_service: ProjectEventService = Depends(get_project_event_service),
 ) -> dict:
     _verify_internal_token(authorization)
-    _guard_mutation(project_id, "update_card", x_blueprint_session_id, manager_auto_service)
+    _guard_mutation(project_id, "revise_card_plan", x_blueprint_session_id, manager_auto_service)
     try:
         body = dict(payload)
         body["card_id"] = card_id
         response = manager_service.blueprint_tools.update_card(project_id, body)
         _emit_tool_project_event(project_id, project_event_service, reason="card_updated", response=response)
+        return response
+    except CardWriteValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.payload) from exc
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/cards/{card_id}/annotate")
+def annotate_card(
+    project_id: str,
+    card_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+    project_event_service: ProjectEventService = Depends(get_project_event_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    _guard_mutation(project_id, "annotate_card", x_blueprint_session_id, manager_auto_service)
+    try:
+        body = dict(payload)
+        body["card_id"] = card_id
+        response = manager_service.blueprint_tools.annotate_card(project_id, body)
+        _emit_tool_project_event(project_id, project_event_service, reason="card_annotated", response=response)
         return response
     except CardWriteValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.payload) from exc

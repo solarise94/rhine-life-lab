@@ -628,13 +628,11 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertEqual(["card_attention_downstream"], inspect["repair_execution_order"])
         self.assertIn("input_asset_outdated", {issue["kind"] for issue in inspect["dependency_attention"]})
 
-        updated = self.manager.blueprint_tools.update_card(
+        updated = self.manager.blueprint_tools.annotate_card(
             "test-project",
             {"card_id": "card_attention_source", "summary": "Updated source card"},
         )
-        self.assertTrue(updated["dependency_attention_check_recommended"])
-        self.assertEqual(["card_attention_downstream"], updated["repair_execution_order_hint"])
-        self.assertNotIn("dependency_attention", updated)
+        self.assertEqual("Updated source card", updated["card"]["summary"])
 
     def test_review_replaces_planned_output_asset_ids_with_materialized_assets(self) -> None:
         card = Card.model_validate(
@@ -1283,7 +1281,7 @@ class ManagerFlowTest(unittest.TestCase):
         )
         card_id = created["card_id"]
         filtered_counts_asset_id = created["card"]["outputs"][0]["asset_id"]
-        result = self.manager.blueprint_tools.update_card(
+        result = self.manager.blueprint_tools.annotate_card(
             "test-project",
             {
                 "card_id": card_id,
@@ -1350,16 +1348,16 @@ class ManagerFlowTest(unittest.TestCase):
                 "outputs": [{"role": "result", "artifact_class": "table"}],
             },
         )
+        self.assertEqual("planned", result["card"]["status"])
         self.assertEqual("asset_result", result["card"]["outputs"][0]["asset_id"])
-        self.assertEqual("valid", result["card"]["outputs"][0]["status"])
 
-        # Verify the card was NOT modified.
+        # Verify the card now awaits a new run and still preserves the planned asset binding.
         snapshot = self.project_service.get_project_snapshot("test-project")
         card = next(c for c in snapshot["cards"] if c.card_id == "card_accepted_guard")
+        self.assertEqual("planned", card.status)
         self.assertEqual(card.outputs[0].asset_id, "asset_result")
 
-    def test_update_card_allows_non_output_edit_on_accepted_card_when_graph_consistent(self) -> None:
-        # Non-destructive edits on an accepted card should still be allowed.
+    def test_annotate_card_allows_non_execution_edit_on_accepted_card(self) -> None:
         store = self.project_service.graph_store("test-project")
         cards = store.load_cards()
         graph = store.load_graph()
@@ -1396,11 +1394,94 @@ class ManagerFlowTest(unittest.TestCase):
         store.save_cards(cards)
         store.save_graph(graph)
 
+        result = self.manager.blueprint_tools.annotate_card("test-project", {"card_id": "card_accepted_edit", "summary": "new summary"})
+        self.assertEqual(result["card"]["summary"], "new summary")
+        self.assertEqual("accepted", result["card"]["status"])
+
+    def test_annotate_card_merges_against_latest_locked_card_state(self) -> None:
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        cards.append(
+            Card.model_validate(
+                {
+                    "card_id": "card_annotate_merge",
+                    "card_type": "module",
+                    "title": "Original title",
+                    "status": "planned",
+                    "step": 1,
+                    "summary": "Original summary",
+                }
+            )
+        )
+        store.save_cards(cards)
+
+        with self.project_service.lock_for("test-project"):
+            locked_cards = store.load_cards()
+            index = next(idx for idx, item in enumerate(locked_cards) if item.card_id == "card_annotate_merge")
+            locked_cards[index] = locked_cards[index].model_copy(update={"title": "Fresh title"})
+            store.save_cards(locked_cards)
+
+        result = self.manager.blueprint_tools.annotate_card(
+            "test-project",
+            {"card_id": "card_annotate_merge", "summary": "New summary"},
+        )
+        self.assertEqual("Fresh title", result["card"]["title"])
+        self.assertEqual("New summary", result["card"]["summary"])
+
+    def test_revise_card_plan_preserves_existing_manager_review(self) -> None:
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        graph = store.load_graph()
+        cards.append(
+            Card.model_validate(
+                {
+                    "card_id": "card_preserve_review",
+                    "card_type": "module",
+                    "title": "Preserve review",
+                    "status": "accepted",
+                    "step": 1,
+                    "summary": "s",
+                    "manager_review": "Keep this note.",
+                    "outputs": [output_contract("result", role="result", asset_id="asset_preserve_review", status="valid")],
+                    "linked_assets": ["asset_preserve_review"],
+                    "linked_runs": ["run_preserve_review"],
+                }
+            )
+        )
+        graph.assets.append(
+            Asset(
+                asset_id="asset_preserve_review",
+                asset_type="table",
+                title="Result",
+                status="valid",
+                created_by_run="run_preserve_review",
+                path="results/preserve.tsv",
+                summary="s",
+                metadata={"role": "result"},
+            )
+        )
+        graph.runs.append(
+            RunRecord(
+                run_id="run_preserve_review",
+                card_id="card_preserve_review",
+                status="reviewed",
+                title="preserve",
+                summary="s",
+                started_at="2026-05-28T00:00:00Z",
+            )
+        )
+        store.save_cards(cards)
+        store.save_graph(graph)
+
         result = self.manager.blueprint_tools.update_card(
             "test-project",
-            {"card_id": "card_accepted_edit", "summary": "new summary"},
+            {
+                "card_id": "card_preserve_review",
+                "outputs": [{"role": "result", "artifact_class": "table", "description": "updated"}],
+            },
         )
-        self.assertEqual(result["card"]["summary"], "new summary")
+        self.assertEqual("planned", result["card"]["status"])
+        self.assertEqual("Keep this note.", result["card"]["manager_review"])
 
     def test_delete_card_marks_card_cancelled(self) -> None:
         result = self.manager.blueprint_tools.delete_card(
@@ -1806,6 +1887,20 @@ class ManagerFlowTest(unittest.TestCase):
                 },
             )
 
+    def test_configure_card_execution_rejects_cards_with_active_runs(self) -> None:
+        run = self.worker.start_run("test-project", "card_enrichment_group")
+        try:
+            with self.assertRaisesRegex(ManagerPlanningError, "active runs"):
+                self.manager.blueprint_tools.configure_card_execution(
+                    "test-project",
+                    {
+                        "card_ids": ["card_enrichment_group"],
+                        "instruction_blocks": ["Use the newer runtime."],
+                    },
+                )
+        finally:
+            self._wait_for_run("test-project", run["run_id"])
+
     def test_manager_can_start_background_python_dependency_install(self) -> None:
         settings = get_settings()
         conda_base = Path(self.tmpdir) / "conda"
@@ -2123,22 +2218,226 @@ class ManagerFlowTest(unittest.TestCase):
                 },
             )
 
-    def test_run_control_rejects_mismatched_run_and_card_selectors(self) -> None:
+    def test_stop_card_run_stops_active_run_by_card_id(self) -> None:
         manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
         run = self.worker.start_run("test-project", "card_enrichment_group")
-        try:
-            with self.assertRaisesRegex(ManagerPlanningError, "selector mismatch"):
-                manager_with_worker.blueprint_tools.stop_card_run(
-                    "test-project",
-                    {"run_id": run["run_id"], "card_id": "card_immune_module"},
-                )
-            with self.assertRaisesRegex(ManagerPlanningError, "selector mismatch"):
-                manager_with_worker.blueprint_tools.review_card_run(
-                    "test-project",
-                    {"run_id": run["run_id"], "card_id": "card_immune_module", "accept": True},
-                )
-        finally:
-            self._wait_for_run("test-project", run["run_id"])
+        result = manager_with_worker.blueprint_tools.stop_card_run(
+            "test-project",
+            {"card_id": "card_enrichment_group"},
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["stopped"])
+        self.assertIn(run["run_id"], result["stopped_run_ids"])
+        graph = self.project_service.graph_store("test-project").load_graph()
+        stopped = next(item for item in graph.runs if item.run_id == run["run_id"])
+        self.assertEqual("cancelled", stopped.status)
+
+    def test_stop_card_run_stops_all_active_runs_for_card(self) -> None:
+        manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
+        store = self.project_service.graph_store("test-project")
+        graph = store.load_graph()
+        graph.runs.extend(
+            [
+                RunRecord(run_id="run_multi_stop_1", card_id="card_enrichment_group", status="queued", title="r1", summary="s", started_at="2026-05-30T00:00:00Z"),
+                RunRecord(run_id="run_multi_stop_2", card_id="card_enrichment_group", status="running", title="r2", summary="s", started_at="2026-05-30T00:01:00Z"),
+            ]
+        )
+        store.save_graph(graph)
+        result = manager_with_worker.blueprint_tools.stop_card_run(
+            "test-project",
+            {"card_id": "card_enrichment_group"},
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual({"run_multi_stop_1", "run_multi_stop_2"}, set(result["stopped_run_ids"]))
+        graph_after = self.project_service.graph_store("test-project").load_graph()
+        statuses = {run.run_id: run.status for run in graph_after.runs if run.run_id in {"run_multi_stop_1", "run_multi_stop_2"}}
+        self.assertEqual({"run_multi_stop_1": "cancelled", "run_multi_stop_2": "cancelled"}, statuses)
+
+    def test_review_card_run_rejects_already_finalized_latest_run(self) -> None:
+        manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
+        store = self.project_service.graph_store("test-project")
+        graph = store.load_graph()
+        graph.runs.append(
+            RunRecord(
+                run_id="run_review_already_finalized",
+                card_id="card_enrichment_group",
+                status="reviewed",
+                title="finalized",
+                summary="done",
+                started_at="2026-05-30T00:00:00Z",
+            )
+        )
+        store.save_graph(graph)
+        with self.assertRaisesRegex(ManagerPlanningError, "cannot finalize run"):
+            manager_with_worker.blueprint_tools.review_card_run(
+                "test-project",
+                {"card_id": "card_enrichment_group"},
+            )
+
+    def test_review_card_run_success_response_shape(self) -> None:
+        manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
+        run_id = "run_manager_review_success"
+        run_dir = self.project_service.project_path("test-project") / "runs" / run_id
+        result_dir = self.project_service.project_path("test-project") / "results" / "card_manager_review_success" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        result_dir.mkdir(parents=True, exist_ok=True)
+        (result_dir / "result.tsv").write_text("gene\tvalue\nA\t1\n", encoding="utf-8")
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        graph = store.load_graph()
+        cards.append(
+            Card.model_validate(
+                {
+                    "card_id": "card_manager_review_success",
+                    "card_type": "module",
+                    "title": "Review success card",
+                    "status": "needs_review",
+                    "step": 2,
+                    "summary": "Simple card for review success path.",
+                    "outputs": [output_contract("result table", role="result_table", asset_id="planned_result_table")],
+                    "linked_runs": [run_id],
+                }
+            )
+        )
+        graph.runs.append(
+            RunRecord(
+                run_id=run_id,
+                card_id="card_manager_review_success",
+                status="success",
+                title="Review success card run",
+                summary="ready for review",
+                started_at="2026-05-30T00:00:00Z",
+            )
+        )
+        store.save_cards(cards)
+        store.save_graph(graph)
+        packet = TaskPacket.model_validate(
+            {
+                "task_id": run_id,
+                "project_id": "test-project",
+                "card_id": "card_manager_review_success",
+                "card_title": "Review success card",
+                "card_status": "needs_review",
+                "goal": "test",
+                "input_assets": [],
+                "card_inputs": [],
+                "card_outputs": [],
+                "expected_outputs": [
+                    expected_output_spec(
+                        "result_table",
+                        f"results/card_manager_review_success/{run_id}/result.tsv",
+                        asset_id="planned_result_table",
+                    )
+                ],
+                "allowed_paths": [
+                    f"runs/{run_id}/",
+                    f"results/card_manager_review_success/{run_id}/",
+                    "scripts/generated/",
+                ],
+                "readonly_paths": [],
+                "forbidden_paths": [],
+                "execution_policy": {},
+                "constraints": [],
+                "worker_instructions": "",
+                "run_context": {
+                    "run_id": run_id,
+                    "worker_type": "pi",
+                    "project_root": str(self.project_service.project_path("test-project")),
+                    "run_dir": f"runs/{run_id}",
+                    "result_dir": f"results/card_manager_review_success/{run_id}",
+                },
+                "executor_context": {},
+                "manager_reporting_contract": {},
+            }
+        )
+        manifest = Manifest.model_validate(
+            {
+                "run_id": run_id,
+                "status": "success",
+                "summary": "test",
+                "created_assets": [
+                    {
+                        "path": f"results/card_manager_review_success/{run_id}/result.tsv",
+                        "role": "result_table",
+                        "artifact_class": "table",
+                        "format": "tsv",
+                        "asset_id": "planned_result_table",
+                    }
+                ],
+                "code_artifacts": [],
+                "key_findings": ["ok"],
+                "validation_evidence": {},
+            }
+        )
+        atomic_write_json(run_dir / "task_packet.json", packet.model_dump())
+        atomic_write_json(run_dir / "manifest.json", manifest.model_dump())
+        result = manager_with_worker.blueprint_tools.review_card_run(
+            "test-project",
+            {"card_id": "card_manager_review_success"},
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["review_completed"])
+        self.assertEqual("card_manager_review_success", result["card_id"])
+        self.assertEqual(run_id, result["run_id"])
+        self.assertTrue(result["accepted"])
+        self.assertIsNone(result["failure_reason"])
+
+    def test_rerun_card_rejects_outdated_inputs(self) -> None:
+        manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        graph = store.load_graph()
+        cards.append(
+            Card.model_validate(
+                {
+                    "card_id": "card_rerun_outdated",
+                    "card_type": "module",
+                    "title": "Rerun outdated",
+                    "status": "failed",
+                    "step": 2,
+                    "summary": "s",
+                    "inputs": [{"label": "counts", "asset_id": "asset_old_counts_rerun"}],
+                    "outputs": [output_contract("result", role="result", asset_id="asset_rerun_result")],
+                }
+            )
+        )
+        cards.append(
+            Card.model_validate(
+                {
+                    "card_id": "card_rerun_upstream",
+                    "card_type": "module",
+                    "title": "Upstream",
+                    "status": "accepted",
+                    "step": 1,
+                    "summary": "s",
+                    "outputs": [output_contract("counts", role="filtered_counts", asset_id="asset_new_counts_rerun")],
+                }
+            )
+        )
+        graph.runs.extend(
+            [
+                RunRecord(run_id="run_rerun_old", card_id="card_rerun_upstream", status="reviewed", title="old", summary="s", started_at="2026-05-29T00:00:00Z"),
+                RunRecord(run_id="run_rerun_new", card_id="card_rerun_upstream", status="reviewed", title="new", summary="s", started_at="2026-05-29T00:01:00Z"),
+            ]
+        )
+        graph.assets.extend(
+            [
+                Asset(asset_id="asset_old_counts_rerun", asset_type="table", title="Old", status="valid", created_by_run="run_rerun_old", path="results/old.tsv", summary="s", metadata={"role": "filtered_counts"}),
+                Asset(asset_id="asset_new_counts_rerun", asset_type="table", title="New", status="valid", created_by_run="run_rerun_new", path="results/new.tsv", summary="s", metadata={"role": "filtered_counts"}),
+                Asset(asset_id="asset_rerun_result", asset_type="table", title="Result", status="candidate", created_by_run="run_rerun_result", path="results/result.tsv", summary="s", metadata={"role": "result"}),
+            ]
+        )
+        store.save_cards(cards)
+        store.save_graph(graph)
+        with self.assertRaisesRegex(ManagerPlanningError, "rerun_card requires retryable current inputs"):
+            manager_with_worker.blueprint_tools.rerun_card("test-project", {"card_id": "card_rerun_outdated"})
+
+    def test_annotate_card_rejects_plan_fields(self) -> None:
+        with self.assertRaises(CardWriteValidationError):
+            self.manager.blueprint_tools.annotate_card(
+                "test-project",
+                {"card_id": "card_enrichment_group", "step": 3},
+            )
 
     def test_manager_can_cleanup_rejected_run_history(self) -> None:
         manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
@@ -3680,6 +3979,29 @@ manifest = {
         audit_log = graph.metadata.get("card_tool_audit")
         self.assertEqual("create_card", audit_log[-1]["action"])
         self.assertTrue(audit_log[-1]["card_id"].startswith("card_audited_"))
+
+    def test_revise_card_plan_audit_uses_new_tool_name(self) -> None:
+        self.manager.blueprint_tools.set_tool_policy("test-project", {"audit_card_tools": True})
+        created = self.manager.blueprint_tools.create_card(
+            "test-project",
+            {
+                "title": "Audit revise target",
+                "summary": "s",
+                "step": 1,
+                "inputs": [{"asset_id": "count_matrix_v1"}],
+                "outputs": [{"role": "result", "artifact_class": "table"}],
+            },
+        )
+        self.manager.blueprint_tools.update_card(
+            "test-project",
+            {
+                "card_id": created["card_id"],
+                "step": 2,
+            },
+        )
+        graph = self.project_service.graph_store("test-project").load_graph()
+        audit_log = graph.metadata.get("card_tool_audit")
+        self.assertEqual("revise_card_plan", audit_log[-1]["action"])
 
     def test_validator_rejects_missing_ids_for_status_and_summary_ops(self) -> None:
         patch = GraphPatch.model_validate(

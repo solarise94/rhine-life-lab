@@ -143,7 +143,7 @@ Core model:
 
 Available capabilities:
 - inspect_project_summary reads a compact project summary with card ids/titles/status/steps, active runs, blockers, and asset counts.
-- inspect_dependency_attention reads derived dependency ATTENTION diagnostics. Use it after update_card/delete_card returns dependency_attention_check_recommended, or when summary/detail reports dependency_attention.
+- inspect_dependency_attention reads derived dependency ATTENTION diagnostics. Use it after revise_card_plan/delete_card returns dependency_attention_check_recommended, or when summary/detail reports dependency_attention.
 - find_cards searches cards by query, status, step, or asset_id.
 - find_assets searches materialized and planned assets by role, artifact_class, format, producer card, status, or query.
 - get_card_detail reads one card body, executor_context, inputs, outputs, and recent runs.
@@ -152,7 +152,7 @@ Available capabilities:
 - list_data_assets reads the full data asset timeline. Use it only when compact inspect/find/detail tools are insufficient.
 - list_project_memory reads short-lived-to-long-term project preferences and corrections. It is not the source of project execution facts.
 - write_project_memory stores only explicit user preferences and corrections, such as "remember this", "default to this", or "do not do this again".
-- create_card, update_card, and delete_card directly modify blueprint cards after backend validation.
+- create_card, revise_card_plan, annotate_card, and delete_card directly modify blueprint cards after backend validation.
 - configure_card_execution directly updates card execution permissions, selected skills, MCP servers, and runtime bindings such as tool_policy.rscript and tool_policy.network.
 - install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime when a card reports missing runtime dependencies. Treat it like card execution background work: after a successful start, report the job_id and stop; do not foreground-poll the job in the same turn.
 - get_runtime_dependency_install_status checks whether a previously started dependency installation job has finished. Use it for explicit user checks, recovery, or a later wake turn; do not use it to poll a just-started job in the same turn.
@@ -175,7 +175,7 @@ Judgment:
 - For blueprint/card changes, use find_cards/get_card_detail for existing cards and find_assets for inputs. Use card write tools directly once you have enough context. Do not describe a change as complete unless a write tool succeeded.
 - After start_card_run or rerun_card returns background/async_boundary/do_not_poll, do not call get_card_detail, find_assets, inspect_project_summary, or cleanup tools just to wait for that run. End the turn with the run_id unless the tool returned ok:false or pending approvals.
 - After install_runtime_dependencies returns background/job_id, do not call get_runtime_dependency_install_status, inspect_project_summary, get_card_detail, find_assets, or cleanup tools just to wait for that job. End the turn with the job_id and wait for project-state events or runtime dependency wake events.
-- Dependency ATTENTION is derived, not a persisted card status. Do not treat linked_assets as current dependency truth; use card.inputs, card.outputs, and asset.depends_on. If update_card or delete_card returns dependency_attention_check_recommended, call inspect_dependency_attention before deciding whether to continue. For input_asset_outdated issues, the old asset_id is still saved in the downstream card's inputs; if current_asset_id is clear and preserves the workflow, call update_card to replace that input asset_id first, then rerun_card in upstream-first order. If you rerun without updating inputs, the executor will reuse the old asset. If the intent is ambiguous, report the ATTENTION to the user.
+- Dependency ATTENTION is derived, not a persisted card status. Do not treat linked_assets as current dependency truth; use card.inputs, card.outputs, and asset.depends_on. If revise_card_plan or delete_card returns dependency_attention_check_recommended, call inspect_dependency_attention before deciding whether to continue. For input_asset_outdated issues, the old asset_id is still saved in the downstream card's inputs; if current_asset_id is clear and preserves the workflow, call revise_card_plan to replace that input asset_id first, then start_card_run in upstream-first order. Do not use rerun_card for dependency repair. If the intent is ambiguous, report the ATTENTION to the user.
 - If a write tool returns ok:false, use the message/retry_hint to correct arguments and retry when the correction is clear. If it is not clear, inspect context or ask a focused question.
 ${webJudgmentLines.join("\n")}
 - Write project memory only when the user explicitly asks you to remember a durable preference, says a behavior should be the default, or corrects something you should avoid in future. Keep memory summaries short.
@@ -196,12 +196,13 @@ ${webJudgmentLines.join("\n")}
 
 Card fields:
 - create_card requires title, summary, and usually outputs.
-- update_card requires exact card_id; it is a selector, not a replacement identity field.
+- revise_card_plan requires exact card_id; it is a selector, not a replacement identity field.
+- annotate_card requires exact card_id and is for title/summary/note changes only.
 - step is optional and controls timeline grouping.
 - Inputs are selected asset ids, shaped like { asset_id }. Use exact asset ids from find_assets or planned upstream outputs from card detail.
 - Outputs are explicit semantic contracts shaped like { role, artifact_class, description? }.
 - Do not send card_id on create. The backend generates it.
-- Do not send card_type, why, key_findings, manager_review, next_actions, linked_modules, linked_runs, linked_assets, progress_note, executor_context, accepted_formats, preferred_format, output label, output asset_id, or output status.
+- Do not send card_type, why, key_findings, next_actions, linked_modules, linked_runs, linked_assets, progress_note, executor_context, accepted_formats, preferred_format, output label, output asset_id, output status, or output filenames/paths.
 - Card status is not part of normal create/update payloads. New cards start as planned; later status transitions come from runs, review, delete_card, or system-derived stale state.`;
 }
 
@@ -250,9 +251,13 @@ const TOOL_STATUS_LABELS = {
     active: "正在创建卡片",
     done: "已创建卡片",
   },
-  update_card: {
+  revise_card_plan: {
     active: "正在更新卡片",
     done: "已更新卡片",
+  },
+  annotate_card: {
+    active: "正在更新说明",
+    done: "已更新说明",
   },
   configure_card_execution: {
     active: "正在配置卡片权限",
@@ -478,12 +483,12 @@ function compactToolTextPayload(toolName, payload) {
       affected_downstream: Array.isArray(payload.affected_downstream) ? payload.affected_downstream.slice(0, 12) : [],
       repair_execution_order: payload.repair_execution_order,
       manager_repair_guidance: hasOutdatedInput
-        ? "For input_asset_outdated, update the affected downstream card inputs[].asset_id from asset_id to current_asset_id before rerun_card. rerun_card reuses the card's saved inputs and will otherwise keep using the old asset."
+        ? "For input_asset_outdated, use revise_card_plan to replace the affected downstream input asset_id from asset_id to current_asset_id before start_card_run. Do not use rerun_card for dependency repair."
         : undefined,
       truncated: payload.truncated,
     };
   }
-  if (["create_card", "update_card", "delete_card", "configure_card_execution"].includes(toolName)) {
+  if (["create_card", "revise_card_plan", "annotate_card", "delete_card", "configure_card_execution"].includes(toolName)) {
     return {
       ok: payload.ok ?? true,
       card_id: payload.card_id ?? payload.card?.card_id,
@@ -593,7 +598,7 @@ function retryHintForToolError(message) {
     return "Call find_assets to find the correct asset_id, or create an upstream card output first.";
   }
   if (/duplicate card_id/i.test(message)) {
-    return "Use update_card for the existing card, or choose a new card_id for genuinely new work.";
+    return "Use revise_card_plan or annotate_card for the existing card, or choose a new card_id for genuinely new work.";
   }
   if (/duplicate planned output/i.test(message)) {
     return "Reuse the existing planned asset_id as an input, or choose a distinct output asset_id.";
@@ -770,14 +775,25 @@ function summarizeToolPayload(toolName, payload) {
       message: truncateText(payload.message, 180),
     };
   }
-  if (toolName === "stop_card_run" || toolName === "review_card_run") {
+  if (toolName === "stop_card_run") {
+    return {
+      ok: payload.ok,
+      card_id: payload.card_id,
+      stopped: payload.stopped,
+      stopped_run_ids: compactItems(payload.stopped_run_ids, (item) => item, 6),
+      failed_results: Array.isArray(payload.failed_results) ? payload.failed_results.length : undefined,
+      message: truncateText(payload.message, 180),
+    };
+  }
+  if (toolName === "review_card_run") {
     return {
       ok: payload.ok,
       run_id: payload.run_id,
       card_id: payload.card_id,
-      status: payload.status,
+      review_completed: payload.review_completed,
       accepted: payload.accepted,
-      stopped: payload.stopped,
+      failure_reason: payload.failure_reason,
+      failure_details: Array.isArray(payload.failure_details) ? payload.failure_details.length : undefined,
       message: truncateText(payload.message, 180),
     };
   }
@@ -893,7 +909,7 @@ function summarizeToolPayload(toolName, payload) {
       failed_results: Array.isArray(payload.failed_results) ? payload.failed_results.length : undefined,
     };
   }
-  if (toolName === "create_card" || toolName === "update_card" || toolName === "delete_card") {
+  if (toolName === "create_card" || toolName === "revise_card_plan" || toolName === "annotate_card" || toolName === "delete_card") {
     return {
       card_id: payload.card?.card_id,
       card_status: payload.card?.status,
@@ -1081,7 +1097,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "inspect_dependency_attention",
       label: "Inspect dependency attention",
-      description: "Read derived dependency ATTENTION diagnostics. Call this after update_card/delete_card returns dependency_attention_check_recommended, or when checking stale/missing/outdated upstream asset chains. If it reports input_asset_outdated with current_asset_id, repair by update_card replacing the downstream inputs[].asset_id before rerun_card.",
+      description: "Read derived dependency ATTENTION diagnostics. Call this after revise_card_plan/delete_card returns dependency_attention_check_recommended, or when checking stale/missing/outdated upstream asset chains. If it reports input_asset_outdated with current_asset_id, repair by revise_card_plan replacing the downstream inputs[].asset_id before start_card_run.",
       parameters: Type.Object({
         card_ids: Type.Optional(Type.Array(Type.String())),
         source_card_id: Type.Optional(Type.String()),
@@ -1169,7 +1185,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "get_card_detail",
       label: "Get card detail",
-      description: "Read one card body with inputs, outputs, executor_context, instruction blocks, and recent runs. Use before precise update_card edits.",
+      description: "Read one card body with inputs, outputs, executor_context, instruction blocks, and recent runs. Use before precise revise_card_plan or annotate_card edits.",
       parameters: Type.Object({
         card_id: Type.String(),
       }),
@@ -1359,14 +1375,12 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
       },
     },
     {
-      name: "update_card",
-      label: "Update card",
-      description: "Update an existing blueprint card directly. Use this for modifying title, summary, step, selected input asset ids, or semantic outputs. When repairing dependency ATTENTION/input_asset_outdated, replace the downstream input asset id before rerunning. Validation errors come back as structured repair guidance.",
+      name: "revise_card_plan",
+      label: "Revise card plan",
+      description: "Revise an existing card plan. Use this only for execution-relevant changes: step, selected input asset ids, or semantic outputs. It can reset the card to planned for a new run. When repairing dependency ATTENTION/input_asset_outdated, replace the downstream input asset id here, then use start_card_run. Validation errors come back as structured repair guidance.",
       parameters: Type.Object({
         card_id: Type.String(),
-        title: Type.Optional(Type.String()),
         step: Type.Optional(Type.Number()),
-        summary: Type.Optional(Type.String()),
         inputs: Type.Optional(Type.Array(Type.Object({ asset_id: Type.String() }))),
         outputs: Type.Optional(Type.Array(Type.Object({
           role: Type.String(),
@@ -1385,7 +1399,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
         const { card_id: cardId, ...body } = params;
         try {
           const payload = await callLoggedTool(
-            "update_card",
+            "revise_card_plan",
             toolCallId,
             projectId,
             baseUrl,
@@ -1398,9 +1412,42 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             signal,
           sessionId,
         );
-          return toolTextResult("update_card", { ok: true, ...payload });
+          return toolTextResult("revise_card_plan", { ok: true, ...payload });
         } catch (error) {
-          return toolErrorResult(error, { error_type: "update_card_failed", tool_name: "update_card" });
+          return toolErrorResult(error, { error_type: "revise_card_plan_failed", tool_name: "revise_card_plan" });
+        }
+      },
+    },
+    {
+      name: "annotate_card",
+      label: "Annotate card",
+      description: "Update display-only card text without changing execution semantics. Use this for title, summary, or manager_review/note changes. Do not use this for step, inputs, outputs, or dependency repair.",
+      parameters: Type.Object({
+        card_id: Type.String(),
+        title: Type.Optional(Type.String()),
+        summary: Type.Optional(Type.String()),
+        manager_review: Type.Optional(Type.String()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        const { card_id: cardId, ...body } = params;
+        try {
+          const payload = await callLoggedTool(
+            "annotate_card",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/cards/${cardId}/annotate`,
+            {
+              method: "POST",
+              body,
+            },
+            signal,
+          sessionId,
+        );
+          return toolTextResult("annotate_card", { ok: true, ...payload });
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "annotate_card_failed", tool_name: "annotate_card" });
         }
       },
     },
@@ -1552,7 +1599,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "start_card_run",
       label: "Start card run",
-      description: "Start executing a specific card as background work. Use after the card plan and runtime policy are ready; set runtime bindings with configure_card_execution before starting. If successful, report the run_id and stop the turn; do not poll card status while waiting. If can_start is false, inspect block_reasons and fix the blocker before retrying.",
+      description: "Start executing a specific card as background work. Use the card's saved execution configuration when present; otherwise the backend uses system defaults. Use configure_card_execution only when the card needs non-default runtime, tool policy, skills, MCP servers, script bindings, or extra instruction blocks. If successful, report the run_id and stop the turn; do not poll card status while waiting. If can_start is false, inspect block_reasons and fix the blocker before retrying.",
       parameters: Type.Object({
         card_id: Type.String(),
       }),
@@ -1581,10 +1628,9 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "stop_card_run",
       label: "Stop card run",
-      description: "Stop an active run. Prefer run_id when known; use card_id only when the exact run_id is unknown. If both are provided, they must refer to the same run/card.",
+      description: "Stop the active run or runs for a card. The backend resolves the active runs by card_id and stops all of them if multiple active runs exist unexpectedly.",
       parameters: Type.Object({
-        run_id: Type.Optional(Type.String()),
-        card_id: Type.Optional(Type.String()),
+        card_id: Type.String(),
         reason: Type.Optional(Type.String()),
       }),
       execute: async (toolCallId, params, signal) => {
@@ -1612,7 +1658,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "rerun_card",
       label: "Rerun card",
-      description: "Start a fresh background rerun for a card after a previous run finished or failed. Set runtime bindings with configure_card_execution before rerunning. If successful, report the run_id and stop the turn; do not poll card status while waiting. rerun_card reuses the card's saved inputs[].asset_id values; when repairing stale/outdated dependency chains, inspect dependency attention and update_card inputs to current asset ids before rerunning.",
+      description: "Start a fresh background rerun for a card after a previous run finished or failed. It reuses the card's saved execution configuration when present; otherwise the backend uses system defaults. It also reuses the current saved inputs[].asset_id values. rerun_card is a strict retry, not a dependency repair tool: if inputs are stale or outdated, revise the card plan first and then use start_card_run. If the card is not already planned, rerun_card may reset it to planned before launching the new run.",
       parameters: Type.Object({
         card_id: Type.String(),
       }),
@@ -1641,11 +1687,9 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "review_card_run",
       label: "Review card run",
-      description: "Accept or reject the latest run for a card, or a specific run_id when you need to finalize a reviewed result. Prefer run_id when known; if both run_id and card_id are provided, they must refer to the same run/card.",
+      description: "Finalize the latest run for a card. This is a finalize/accept attempt only; the backend decides the final accepted result based on manifest validation and graph consistency checks. Do not use this to reject runs.",
       parameters: Type.Object({
-        run_id: Type.Optional(Type.String()),
-        card_id: Type.Optional(Type.String()),
-        accept: Type.Optional(Type.Boolean()),
+        card_id: Type.String(),
       }),
       execute: async (toolCallId, params, signal) => {
         try {
@@ -1973,7 +2017,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
   ];
   const mutatingTools = new Set([
     "create_card",
-    "update_card",
+    "revise_card_plan",
+    "annotate_card",
     "delete_card",
     "configure_card_execution",
     "install_runtime_dependencies",
@@ -2548,7 +2593,7 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     instruction:
       (payload.auto_mode?.btw_mode
         ? "This session is in /btw mode. Answer questions, inspect status, explain logs, and use read-only tools only. Do not mutate blueprint or execution state."
-        : "Answer naturally. Decide whether project tools are needed. If you change the blueprint, remember that cards are the blueprint units and use create_card, update_card, delete_card, configure_card_execution, run-control, or template tools directly as needed. After ok:false tool results, correct and retry when the fix is clear.") +
+        : "Answer naturally. Decide whether project tools are needed. If you change the blueprint, remember that cards are the blueprint units and use create_card, revise_card_plan, annotate_card, delete_card, configure_card_execution, run-control, or template tools directly as needed. After ok:false tool results, correct and retry when the fix is clear.") +
       (payload.auto_mode?.enabled && !payload.auto_mode?.btw_mode
         ? " Auto mode is enabled. Keep the project moving, prefer safe routine fixes, and treat pending directives as higher-priority steering."
         : ""),

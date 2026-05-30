@@ -705,7 +705,12 @@ class WorkerService:
         )
         stage_label = "reviewed" if final_accepted or result.get("failure_reason") == "explicit_reject" else "needs_review"
         self._commit_run_stage(project_id, run_id, stage_label)
-        return {"run_id": run_id, "accepted": final_accepted}
+        return {
+            "run_id": run_id,
+            "accepted": final_accepted,
+            "failure_reason": result.get("failure_reason"),
+            "failure_details": result.get("failure_details", []),
+        }
 
     def _cleanup_execution_files_for_runs(self, project_id: str, run_ids: list[str]) -> None:
         if not run_ids:
