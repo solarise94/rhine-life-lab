@@ -323,6 +323,18 @@
           "title": "Run Id",
           "type": "string"
         },
+        "task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task Id"
+        },
         "card_id": {
           "title": "Card Id",
           "type": "string"

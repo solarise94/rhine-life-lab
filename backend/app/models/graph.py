@@ -59,6 +59,7 @@ class Claim(BaseModel):
 
 class RunRecord(BaseModel):
     run_id: str
+    task_id: str | None = None
     card_id: str
     module_id: str | None = None
     status: RunStatus

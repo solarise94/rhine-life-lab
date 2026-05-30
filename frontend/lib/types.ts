@@ -285,7 +285,7 @@ export interface ManagerAutoState {
   enabled: boolean;
   mode: "continuous" | "once";
   owner_session_id?: string | null;
-  state: "idle" | "running" | "thinking" | "stopped";
+  state: "active" | "idle" | "running" | "thinking" | "blocked" | "completed" | "cancelled" | "stopped";
   started_at?: string | null;
   last_wake_id?: string | null;
   chain_count: number;

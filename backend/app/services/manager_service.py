@@ -12,6 +12,7 @@ from app.models.chat import ChatAction, ChatRequest, ChatResponse
 from app.models.patches import GraphPatch, Proposal
 from app.core.config import get_settings
 from app.services.app_config_service import AppConfigService
+from app.services.background_workboard_service import BackgroundWorkboardService
 from app.services.chat_stream_events import iter_sse_payloads
 from app.services.manager_blueprint_tools import ManagerBlueprintTools
 from app.services.manager_intent import ManagerIntentRouter
@@ -41,6 +42,7 @@ class ManagerService:
         runtime_dependency_job_service: RuntimeDependencyJobService | None = None,
         library_registry_service: LibraryRegistryService | None = None,
         manager_auto_service: ManagerAutoService | None = None,
+        background_workboard_service: BackgroundWorkboardService | None = None,
     ) -> None:
         self.project_service = project_service
         self._uses_default_planner = planner is None
@@ -55,6 +57,7 @@ class ManagerService:
             worker_service=worker_service,
             runtime_dependency_job_service=runtime_dependency_job_service,
             library_registry_service=library_registry_service,
+            background_workboard_service=background_workboard_service,
         )
 
     def chat(self, project_id: str, request: ChatRequest) -> ChatResponse:
@@ -215,6 +218,8 @@ class ManagerService:
             "btw_mode": view.btw_mode,
             "state": view.state.state,
             "mode": view.state.mode,
+            "view_workboard": view.state.view_workboard,
+            "consume_workboard": view.state.consume_workboard,
             "pending_directives": [item.model_dump() for item in view.state.pending_directives if item.status == "pending"],
         }
 

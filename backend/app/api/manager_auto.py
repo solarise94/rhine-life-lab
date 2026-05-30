@@ -31,6 +31,11 @@ class AddManagerAutoDirectiveRequest(BaseModel):
     trigger_wake: bool = True
 
 
+class SettleManagerAutoTurnRequest(BaseModel):
+    session_id: str
+    async_boundary: bool = False
+
+
 def _status_payload(state: ManagerAutoState) -> dict:
     return {
         "state": state.model_dump(),
@@ -135,3 +140,17 @@ def list_manager_wake_events(
     return {
         "items": [item.model_dump() for item in manager_wake_service.list_recent(project_id)],
     }
+
+
+@router.post("/turn-settled")
+def settle_manager_auto_turn(
+    project_id: str,
+    request: SettleManagerAutoTurnRequest,
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+) -> dict:
+    state = manager_auto_service.notify_turn_settled(
+        project_id,
+        request.session_id,
+        async_boundary=request.async_boundary,
+    )
+    return _status_payload(state)

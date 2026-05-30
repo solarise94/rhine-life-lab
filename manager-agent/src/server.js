@@ -143,6 +143,7 @@ Core model:
 
 Available capabilities:
 - inspect_project_summary reads a compact project summary with card ids/titles/status/steps, active runs, blockers, and asset counts.
+- get_background_workboard reads the backend-derived background workboard. Use it in auto/background turns instead of reconstructing status from general inspect tools.
 - inspect_dependency_attention reads derived dependency ATTENTION diagnostics. Use it after revise_card_plan/delete_card returns dependency_attention_check_recommended, or when summary/detail reports dependency_attention.
 - find_cards searches cards by query, status, step, or asset_id.
 - find_assets searches materialized and planned assets by role, artifact_class, format, producer card, status, or query.
@@ -156,6 +157,7 @@ Available capabilities:
 - configure_card_execution directly updates selected skills, MCP servers, and Python/R runtime bindings for one or more cards.
 - install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime. Treat it like card execution background work: after a successful start, report the job_id and stop; do not foreground-poll the job in the same turn.
 - get_runtime_dependency_install_status checks whether a previously started dependency installation job has finished. Use it for explicit user checks, recovery, or a later wake turn; do not use it to poll a just-started job in the same turn.
+- promote_workboard_item_to_todo, claim_workboard_item, complete_workboard_item, defer_workboard_item, block_workboard_item_for_user, reopen_workboard_item, and submit_claimed_workboard_items consume backend workboard items. Use them in auto/background turns; do not invent your own todo list.
 - start_card_run, stop_card_run, rerun_card, and review_card_run control card execution directly when execution should happen now. start_card_run and rerun_card launch background executor work; after a successful start, do not poll card status in the same turn. Briefly report the run_id and stop so run events/wake events can carry progress.
 - cleanup_run_history removes old finished run execution files/caches when they are no longer needed; by default it preserves runs that own valid accepted assets.
 - search_card_templates, save_card_template, and instantiate_card_template manage reusable manager-only card templates.
@@ -167,6 +169,7 @@ ${webCapabilityLines.join("\n")}
 
 Judgment:
 - Decide whether current project context is needed. If exact card ids, asset ids, steps, or current blueprint state matter, use inspect_project_summary or find_* first.
+- In auto/background turns, call get_background_workboard first. Consume at most one actionable workboard item or one claimed run batch per turn.
 - For broad workflow additions, use inspect_project_summary and find_assets before choosing steps and asset_ids.
 - For plotting style, report style, recurring user preferences, or previously corrected behavior, read project memory when relevant.
 - Treat the blueprint/cards/assets/runs as the source of project execution facts. Do not write blueprint facts into project memory.
@@ -175,6 +178,7 @@ Judgment:
 - For blueprint/card changes, use find_cards/get_card_detail for existing cards and find_assets for inputs. Use card write tools directly once you have enough context. Do not describe a change as complete unless a write tool succeeded.
 - After start_card_run or rerun_card returns background/async_boundary/do_not_poll, do not call get_card_detail, find_assets, inspect_project_summary, or cleanup tools just to wait for that run. End the turn with the run_id unless the tool returned ok:false or pending approvals.
 - After install_runtime_dependencies returns background/job_id, do not call get_runtime_dependency_install_status, inspect_project_summary, get_card_detail, find_assets, or cleanup tools just to wait for that job. End the turn with the job_id and wait for project-state events or runtime dependency wake events.
+- Do not create free-form todo plans in chat. If auto/background work needs sequencing, use backend workboard tools and item ids.
 - Dependency ATTENTION is derived, not a persisted card status. Do not treat linked_assets as current dependency truth; use card.inputs, card.outputs, and asset.depends_on. If revise_card_plan or delete_card returns dependency_attention_check_recommended, call inspect_dependency_attention before deciding whether to continue. For input_asset_outdated issues, the old asset_id is still saved in the downstream card's inputs; if current_asset_id is clear and preserves the workflow, call revise_card_plan to replace that input asset_id first, then start_card_run in upstream-first order. Do not use rerun_card for dependency repair. If the intent is ambiguous, report the ATTENTION to the user.
 - If a write tool returns ok:false, use the message/retry_hint to correct arguments and retry when the correction is clear. If it is not clear, inspect context or ask a focused question.
 ${webJudgmentLines.join("\n")}
@@ -210,6 +214,10 @@ const TOOL_STATUS_LABELS = {
   inspect_project_summary: {
     active: "正在概览项目",
     done: "已概览项目",
+  },
+  get_background_workboard: {
+    active: "正在读取工作板",
+    done: "已读取工作板",
   },
   inspect_dependency_attention: {
     active: "正在检查依赖风险",
@@ -270,6 +278,34 @@ const TOOL_STATUS_LABELS = {
   get_runtime_dependency_install_status: {
     active: "正在检查环境依赖任务",
     done: "已检查环境依赖任务",
+  },
+  promote_workboard_item_to_todo: {
+    active: "正在加入待办",
+    done: "已加入待办",
+  },
+  claim_workboard_item: {
+    active: "正在领取工作项",
+    done: "已领取工作项",
+  },
+  complete_workboard_item: {
+    active: "正在完成工作项",
+    done: "已完成工作项",
+  },
+  defer_workboard_item: {
+    active: "正在延后工作项",
+    done: "已延后工作项",
+  },
+  block_workboard_item_for_user: {
+    active: "正在标记用户阻塞",
+    done: "已标记用户阻塞",
+  },
+  reopen_workboard_item: {
+    active: "正在重新打开工作项",
+    done: "已重新打开工作项",
+  },
+  submit_claimed_workboard_items: {
+    active: "正在提交后台批次",
+    done: "已提交后台批次",
   },
   start_card_run: {
     active: "正在启动卡片",
@@ -415,6 +451,29 @@ async function callBackend(baseUrl, token, path, options = {}) {
   return payload;
 }
 
+async function notifyAutoTurnSettled(baseUrl, token, projectId, sessionId, asyncBoundary, signal) {
+  if (!projectId || !sessionId) {
+    return null;
+  }
+  try {
+    return await callBackend(baseUrl, token, `/projects/${projectId}/manager-auto/turn-settled`, {
+      method: "POST",
+      body: {
+        session_id: sessionId,
+        async_boundary: Boolean(asyncBoundary),
+      },
+      signal,
+    });
+  } catch (error) {
+    logManagerEvent("auto_turn_settled_error", {
+      project_id: projectId,
+      session_id: sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
 function textResult(text, details = {}, terminate = false) {
   return {
     content: [{ type: "text", text }],
@@ -486,6 +545,102 @@ function compactToolTextPayload(toolName, payload) {
         ? "For input_asset_outdated, use revise_card_plan to replace the affected downstream input asset_id from asset_id to current_asset_id before start_card_run. Do not use rerun_card for dependency repair."
         : undefined,
       truncated: payload.truncated,
+    };
+  }
+  if (toolName === "get_background_workboard") {
+    return {
+      project_id: payload.project_id,
+      revision: payload.revision,
+      counts: payload.counts,
+      running: compactItems(payload.running, (item) => ({
+        item_id: item.item_id,
+        task_id: item.task_id,
+        kind: item.kind,
+        card_id: item.card_id,
+        run_id: item.run_id,
+        job_id: item.job_id,
+        status: item.status,
+      }), 8),
+      todo: compactItems(payload.todo, (item) => ({
+        item_id: item.item_id,
+        kind: item.kind,
+        card_id: item.card_id,
+        source_item_id: item.source_item_id,
+        status: item.status,
+      }), 8),
+      needs_manager: compactItems(payload.needs_manager, (item) => ({
+        item_id: item.item_id,
+        kind: item.kind,
+        card_id: item.card_id,
+        run_id: item.run_id,
+        job_id: item.job_id,
+        recommended_action: item.recommended_action,
+        message: truncateText(item.message, 140),
+      }), 8),
+      completed: compactItems(payload.completed, (item) => ({
+        item_id: item.item_id,
+        kind: item.kind,
+        card_id: item.card_id,
+        run_id: item.run_id,
+        summary: truncateText(item.summary, 140),
+      }), 8),
+      ready_to_start: compactItems(payload.ready_to_start, (item) => ({
+        item_id: item.item_id,
+        card_id: item.card_id,
+        title: item.title,
+        parallel_group: item.payload?.parallel_group,
+      }), 8),
+      blocked_for_user: compactItems(payload.blocked_for_user, (item) => ({
+        item_id: item.item_id,
+        kind: item.kind,
+        message: truncateText(item.message, 140),
+      }), 8),
+      deferred: compactItems(payload.deferred, (item) => ({
+        item_id: item.item_id,
+        kind: item.kind,
+        message: truncateText(item.message, 140),
+      }), 8),
+    };
+  }
+  if (
+    toolName === "promote_workboard_item_to_todo" ||
+    toolName === "claim_workboard_item" ||
+    toolName === "complete_workboard_item" ||
+    toolName === "defer_workboard_item" ||
+    toolName === "block_workboard_item_for_user" ||
+    toolName === "reopen_workboard_item"
+  ) {
+    return {
+      ok: payload.ok,
+      item: payload.item
+        ? {
+            item_id: payload.item.item_id,
+            lane: payload.item.lane,
+            kind: payload.item.kind,
+            status: payload.item.status,
+            card_id: payload.item.card_id,
+            source_item_id: payload.item.source_item_id,
+          }
+        : undefined,
+    };
+  }
+  if (toolName === "submit_claimed_workboard_items") {
+    return {
+      ok: payload.ok,
+      task_id: payload.task_id,
+      run_id: payload.run_id,
+      started_count: payload.started_count,
+      batch: payload.batch,
+      started: compactItems(payload.started, (item) => ({
+        item_id: item.item_id,
+        card_id: item.card_id,
+        run_id: item.run_id,
+        task_id: item.task_id,
+      }), 8),
+      blocked: compactItems(payload.blocked, (item) => item, 8),
+      async_boundary: payload.async_boundary,
+      wait_for_wake: payload.wait_for_wake,
+      message: payload.message,
     };
   }
   if (["create_card", "revise_card_plan", "annotate_card", "delete_card", "configure_card_execution"].includes(toolName)) {
@@ -712,6 +867,17 @@ function summarizeToolPayload(toolName, payload) {
       dependency_attention: payload.counts?.dependency_attention,
     };
   }
+  if (toolName === "get_background_workboard") {
+    return {
+      revision: payload.revision,
+      counts: payload.counts,
+      ready_to_start: Array.isArray(payload.ready_to_start) ? payload.ready_to_start.length : undefined,
+      todo: Array.isArray(payload.todo) ? payload.todo.length : undefined,
+      needs_manager: Array.isArray(payload.needs_manager) ? payload.needs_manager.length : undefined,
+      completed: Array.isArray(payload.completed) ? payload.completed.length : undefined,
+      running: Array.isArray(payload.running) ? payload.running.length : undefined,
+    };
+  }
   if (toolName === "inspect_dependency_attention") {
     return {
       issue_count: payload.issue_count,
@@ -779,6 +945,7 @@ function summarizeToolPayload(toolName, payload) {
   }
   if (toolName === "install_runtime_dependencies" || toolName === "get_runtime_dependency_install_status") {
     return {
+      task_id: payload.task_id,
       job_id: payload.job_id,
       status: payload.status,
       runtime: payload.runtime,
@@ -796,6 +963,7 @@ function summarizeToolPayload(toolName, payload) {
   if (toolName === "start_card_run" || toolName === "rerun_card") {
     return {
       ok: payload.ok,
+      task_id: payload.task_id,
       run_id: payload.run_id,
       card_id: payload.card_id,
       status: payload.status,
@@ -804,6 +972,8 @@ function summarizeToolPayload(toolName, payload) {
       do_not_poll: payload.do_not_poll,
       wait_for_wake: payload.wait_for_wake,
       can_start: payload.can_start,
+      pending_approvals_count: Array.isArray(payload.pending_approvals) ? payload.pending_approvals.length : undefined,
+      rejected_approvals_count: Array.isArray(payload.rejected_approvals) ? payload.rejected_approvals.length : undefined,
       block_reasons: compactItems(payload.block_reasons, (item) => item, 4),
       message: truncateText(payload.message, 180),
     };
@@ -815,6 +985,45 @@ function summarizeToolPayload(toolName, payload) {
       stopped: payload.stopped,
       stopped_run_ids: compactItems(payload.stopped_run_ids, (item) => item, 6),
       failed_results: Array.isArray(payload.failed_results) ? payload.failed_results.length : undefined,
+      message: truncateText(payload.message, 180),
+    };
+  }
+  if (
+    toolName === "promote_workboard_item_to_todo" ||
+    toolName === "claim_workboard_item" ||
+    toolName === "complete_workboard_item" ||
+    toolName === "defer_workboard_item" ||
+    toolName === "block_workboard_item_for_user" ||
+    toolName === "reopen_workboard_item"
+  ) {
+    return {
+      ok: payload.ok,
+      item: payload.item
+        ? {
+            item_id: payload.item.item_id,
+            lane: payload.item.lane,
+            kind: payload.item.kind,
+            status: payload.item.status,
+            card_id: payload.item.card_id,
+            source_item_id: payload.item.source_item_id,
+          }
+        : undefined,
+    };
+  }
+  if (toolName === "submit_claimed_workboard_items") {
+    return {
+      ok: payload.ok,
+      task_id: payload.task_id,
+      run_id: payload.run_id,
+      started_count: payload.started_count,
+      approval_required_count: payload.approval_required_count,
+      rejected_count: payload.rejected_count,
+      background_started_count: payload.background_started_count,
+      batch: payload.batch,
+      started: Array.isArray(payload.started) ? payload.started.length : undefined,
+      blocked: Array.isArray(payload.blocked) ? payload.blocked.length : undefined,
+      async_boundary: payload.async_boundary,
+      wait_for_wake: payload.wait_for_wake,
       message: truncateText(payload.message, 180),
     };
   }
@@ -967,6 +1176,12 @@ function buildToolReport(toolName, details) {
   if (!details || typeof details !== "object") {
     return null;
   }
+  if (toolName === "get_background_workboard") {
+    return {
+      summary: "已读取后台工作板。",
+      details,
+    };
+  }
   if (toolName === "install_runtime_dependencies" && details.background && details.job_id) {
     const runtime = details.runtime || "selected runtime";
     const packageCount = Array.isArray(details.packages) ? details.packages.length : 0;
@@ -1001,6 +1216,34 @@ function buildToolReport(toolName, details) {
       details,
     };
   }
+  if ((toolName === "start_card_run" || toolName === "rerun_card") && details.run_id) {
+    return {
+      summary:
+        details.message ||
+        `运行 ${details.run_id} 需要先处理审批或其他前置条件，本轮继续处理，不进入后台等待。`,
+      details,
+    };
+  }
+  if (toolName === "submit_claimed_workboard_items" && details.background && details.run_id) {
+    const startedCount = Number(details.started_count || 1);
+    const batchLabel = startedCount > 1
+      ? `已从工作板提交后台批次，共 ${startedCount} 个运行，首个运行 ${details.run_id}。`
+      : `已从工作板提交后台运行 ${details.run_id}。`;
+    return {
+      summary:
+        details.message ||
+        `${batchLabel}本轮不要轮询状态，等待事件或 wake 继续。`,
+      details,
+    };
+  }
+  if (toolName === "submit_claimed_workboard_items" && details.started_count) {
+    return {
+      summary:
+        details.message ||
+        `工作板批次已提交 ${details.started_count} 个运行，但仍有审批或前置条件需要当前回合处理。`,
+      details,
+    };
+  }
   if (toolName === "get_runtime_dependency_install_status" && details.job_id) {
     const status = details.status || "unknown";
     const requestedPackage = details.requested_package ? ` 目标包：${details.requested_package}。` : "";
@@ -1026,18 +1269,25 @@ function buildToolReport(toolName, details) {
 }
 
 function isRunAsyncBoundaryPayload(toolName, payload) {
-  if (toolName !== "start_card_run" && toolName !== "rerun_card") {
+  if (toolName !== "start_card_run" && toolName !== "rerun_card" && toolName !== "submit_claimed_workboard_items") {
     return false;
   }
   if (!payload || typeof payload !== "object") {
     return false;
   }
+  if (payload.status === "needs_approval") {
+    return false;
+  }
+  if ((Array.isArray(payload.pending_approvals) && payload.pending_approvals.length) || (Array.isArray(payload.rejected_approvals) && payload.rejected_approvals.length)) {
+    return false;
+  }
+  if (Number(payload.approval_required_count || 0) > 0 || Number(payload.rejected_count || 0) > 0) {
+    return false;
+  }
   if (!payload.ok || !payload.run_id || !payload.async_boundary || !payload.wait_for_wake) {
     return false;
   }
-  const pendingApprovals = Array.isArray(payload.pending_approvals) ? payload.pending_approvals : [];
-  const rejectedApprovals = Array.isArray(payload.rejected_approvals) ? payload.rejected_approvals : [];
-  return pendingApprovals.length === 0 && rejectedApprovals.length === 0;
+  return true;
 }
 
 function isDependencyJobAsyncBoundaryPayload(toolName, payload) {
@@ -1095,12 +1345,16 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     toolName: null,
     runId: null,
     jobId: null,
+    startedCount: 0,
+    batch: false,
   };
   const callLoggedTool = async (toolName, toolCallId, projectId, baseUrl, token, path, options = {}, signal, sessionId = null) => {
     if (asyncBoundary.active && !(toolName === "stop_card_run" && userRequestedInterrupt)) {
-      const backgroundLabel = asyncBoundary.runId
-        ? `Background run ${asyncBoundary.runId}`
-        : `Background dependency job ${asyncBoundary.jobId || ""}`;
+      const backgroundLabel = asyncBoundary.batch
+        ? `Background run batch (${asyncBoundary.startedCount || 0} runs${asyncBoundary.runId ? `, first run ${asyncBoundary.runId}` : ""})`
+        : asyncBoundary.runId
+          ? `Background run ${asyncBoundary.runId}`
+          : `Background dependency job ${asyncBoundary.jobId || ""}`;
       return {
         ok: false,
         error_type: "async_boundary_active",
@@ -1122,11 +1376,15 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
       asyncBoundary.toolName = toolName;
       asyncBoundary.runId = payload.run_id;
       asyncBoundary.jobId = null;
+      asyncBoundary.startedCount = Number(payload.started_count || 1);
+      asyncBoundary.batch = Boolean(payload.batch || (toolName === "submit_claimed_workboard_items" && asyncBoundary.startedCount > 1));
     } else if (isDependencyJobAsyncBoundaryPayload(toolName, payload)) {
       asyncBoundary.active = true;
       asyncBoundary.toolName = toolName;
       asyncBoundary.runId = null;
       asyncBoundary.jobId = payload.job_id;
+      asyncBoundary.startedCount = 0;
+      asyncBoundary.batch = false;
     }
     return payload;
   };
@@ -1149,6 +1407,26 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           sessionId,
         );
         return toolTextResult("inspect_project_summary", payload);
+      },
+    },
+    {
+      name: "get_background_workboard",
+      label: "Get background workboard",
+      description: "Read the backend-derived background workboard. Use this first in auto/background turns instead of reconstructing state from general inspect tools.",
+      parameters: Type.Object({}),
+      execute: async (toolCallId, _params, signal) => {
+        const payload = await callLoggedTool(
+          "get_background_workboard",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/background-workboard`,
+          {},
+          signal,
+          sessionId,
+        );
+        return toolTextResult("get_background_workboard", payload);
       },
     },
     {
@@ -1604,7 +1882,11 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             signal,
           sessionId,
         );
-          return toolTextResult("install_runtime_dependencies", payload);
+          return toolTextResult(
+            "install_runtime_dependencies",
+            payload,
+            isDependencyJobAsyncBoundaryPayload("install_runtime_dependencies", payload),
+          );
         } catch (error) {
           return toolErrorResult(error, { error_type: "install_runtime_dependencies_failed", tool_name: "install_runtime_dependencies" });
         }
@@ -1638,6 +1920,188 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
             error_type: "get_runtime_dependency_install_status_failed",
             tool_name: "get_runtime_dependency_install_status",
           });
+        }
+      },
+    },
+    {
+      name: "promote_workboard_item_to_todo",
+      label: "Promote workboard item",
+      description: "Promote a ready_to_start workboard item into backend-verified todo state. Use item ids from get_background_workboard.",
+      parameters: Type.Object({
+        item_id: Type.String(),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "promote_workboard_item_to_todo",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/background-workboard/promote`,
+            { method: "POST", body: params },
+            signal,
+            sessionId,
+          );
+          return toolTextResult("promote_workboard_item_to_todo", payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "promote_workboard_item_to_todo_failed", tool_name: "promote_workboard_item_to_todo" });
+        }
+      },
+    },
+    {
+      name: "claim_workboard_item",
+      label: "Claim workboard item",
+      description: "Claim one workboard item for the current manager session before consuming it.",
+      parameters: Type.Object({
+        item_id: Type.String(),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "claim_workboard_item",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/background-workboard/claim`,
+            { method: "POST", body: params },
+            signal,
+            sessionId,
+          );
+          return toolTextResult("claim_workboard_item", payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "claim_workboard_item_failed", tool_name: "claim_workboard_item" });
+        }
+      },
+    },
+    {
+      name: "complete_workboard_item",
+      label: "Complete workboard item",
+      description: "Mark one claimed or handled workboard item as done so it does not keep waking auto turns.",
+      parameters: Type.Object({
+        item_id: Type.String(),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "complete_workboard_item",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/background-workboard/complete`,
+            { method: "POST", body: params },
+            signal,
+            sessionId,
+          );
+          return toolTextResult("complete_workboard_item", payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "complete_workboard_item_failed", tool_name: "complete_workboard_item" });
+        }
+      },
+    },
+    {
+      name: "defer_workboard_item",
+      label: "Defer workboard item",
+      description: "Defer a workboard item to a later turn when another action batch should happen first.",
+      parameters: Type.Object({
+        item_id: Type.String(),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "defer_workboard_item",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/background-workboard/defer`,
+            { method: "POST", body: params },
+            signal,
+            sessionId,
+          );
+          return toolTextResult("defer_workboard_item", payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "defer_workboard_item_failed", tool_name: "defer_workboard_item" });
+        }
+      },
+    },
+    {
+      name: "block_workboard_item_for_user",
+      label: "Block workboard item",
+      description: "Mark a workboard item as blocked_for_user when it needs user input or an external change.",
+      parameters: Type.Object({
+        item_id: Type.String(),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "block_workboard_item_for_user",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/background-workboard/block`,
+            { method: "POST", body: params },
+            signal,
+            sessionId,
+          );
+          return toolTextResult("block_workboard_item_for_user", payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "block_workboard_item_for_user_failed", tool_name: "block_workboard_item_for_user" });
+        }
+      },
+    },
+    {
+      name: "reopen_workboard_item",
+      label: "Reopen workboard item",
+      description: "Reopen a deferred or blocked workboard item after inputs or state changed.",
+      parameters: Type.Object({
+        item_id: Type.String(),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "reopen_workboard_item",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/background-workboard/reopen`,
+            { method: "POST", body: params },
+            signal,
+            sessionId,
+          );
+          return toolTextResult("reopen_workboard_item", payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "reopen_workboard_item_failed", tool_name: "reopen_workboard_item" });
+        }
+      },
+    },
+    {
+      name: "submit_claimed_workboard_items",
+      label: "Submit claimed workboard items",
+      description: "Submit claimed todo workboard items as one backend-owned background run batch. If any start succeeds, stop the turn and wait for events/wake.",
+      parameters: Type.Object({
+        todo_item_ids: Type.Array(Type.String()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "submit_claimed_workboard_items",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/background-workboard/submit-claimed`,
+            { method: "POST", body: params },
+            signal,
+            sessionId,
+          );
+          return toolTextResult("submit_claimed_workboard_items", payload, isRunAsyncBoundaryPayload("submit_claimed_workboard_items", payload));
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "submit_claimed_workboard_items_failed", tool_name: "submit_claimed_workboard_items" });
         }
       },
     },
@@ -2067,6 +2531,13 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     "delete_card",
     "configure_card_execution",
     "install_runtime_dependencies",
+    "promote_workboard_item_to_todo",
+    "claim_workboard_item",
+    "complete_workboard_item",
+    "defer_workboard_item",
+    "block_workboard_item_for_user",
+    "reopen_workboard_item",
+    "submit_claimed_workboard_items",
     "start_card_run",
     "stop_card_run",
     "rerun_card",
@@ -2132,7 +2603,12 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
       },
     );
   }
-  return visibleTools;
+  return {
+    tools: visibleTools,
+    getTurnControl: () => ({
+      async_boundary: { ...asyncBoundary },
+    }),
+  };
 }
 
 function extractText(message) {
@@ -2490,12 +2966,13 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     });
     initialMessages = compaction.contextMessages;
   }
+  const toolControl = createTools(payload, runtimeConfig);
   const agent = new Agent({
     initialState: {
       systemPrompt: buildSystemPrompt(runtimeConfig),
       model,
       thinkingLevel: mapThinkingLevel(payload.thinking_effort, model),
-      tools: createTools(payload, runtimeConfig),
+      tools: toolControl.tools,
       messages: initialMessages,
     },
     getApiKey: () => runtimeConfig.apiKey,
@@ -2713,6 +3190,7 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
   }
   const thinking = collectThinking(thinkingBlocks) || undefined;
   const text = streamedText.trim() || extractText(finalAssistantMessage).trim();
+  const turnControl = toolControl.getTurnControl();
   const stopReason = finalAssistantMessage?.stopReason;
   if (stopReason === "error" || stopReason === "aborted") {
     logManagerEvent("run_error", {
@@ -2734,6 +3212,16 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
       event_count: events.length,
     });
     throw new Error("Manager agent returned an empty response.");
+  }
+  if (payload.auto_mode?.enabled && payload.session_id && !payload.auto_mode?.btw_mode) {
+    await notifyAutoTurnSettled(
+      payload.backend_api_base_url,
+      payload.internal_tool_token,
+      payload.project_id,
+      payload.session_id,
+      Boolean(turnControl.async_boundary?.active),
+      externalAbortSignal,
+    );
   }
   logManagerEvent("run_done", {
     run_id: runId,

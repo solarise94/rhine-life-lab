@@ -25,6 +25,8 @@ from app.models.patches import GraphPatch, ValidationResult
 from app.models.runs import CreatedAsset, ExecutorValidationReport, ExpectedOutput, Manifest, TaskPacket
 from app.services.chat_session_service import ChatSessionService
 from app.services.chat_job_service import ChatJobService
+from app.services.background_task_service import BackgroundTaskService
+from app.services.background_workboard_service import BackgroundWorkboardService
 from app.services.executor_reviewer_worker import ExecutorReviewerWorker
 from app.services.executor_validation_service import ExecutorValidationService
 from app.services.flow_service import FlowService
@@ -306,11 +308,17 @@ class ManagerFlowTest(unittest.TestCase):
             seed_demo=True,
         )
         self.project_service.git_service = lambda _project_id: StubGitService()
-        self.runtime_dependency_job_service = RuntimeDependencyJobService(self.project_service)
+        self.background_task_service = BackgroundTaskService(self.project_service)
+        self.background_workboard_service = BackgroundWorkboardService(self.project_service, self.background_task_service)
+        self.runtime_dependency_job_service = RuntimeDependencyJobService(
+            self.project_service,
+            background_task_service=self.background_task_service,
+        )
         self.manager = ManagerService(
             self.project_service,
             planner=AnswerOnlyPlanner(),
             runtime_dependency_job_service=self.runtime_dependency_job_service,
+            background_workboard_service=self.background_workboard_service,
         )
         self.validator = PatchValidator(self.project_service)
         self.apply = PatchApplyService(self.project_service, self.validator)
@@ -319,7 +327,12 @@ class ManagerFlowTest(unittest.TestCase):
         self.result_asset_service = ResultAssetService(self.project_service)
         self.project_file_service = ProjectFileService(self.project_service)
         self.chat_session_service = ChatSessionService(self.project_service)
-        self.worker = WorkerService(self.project_service, self.manifest_service, self.runtime_approval_service)
+        self.worker = WorkerService(
+            self.project_service,
+            self.manifest_service,
+            self.runtime_approval_service,
+            background_task_service=self.background_task_service,
+        )
         self.worker.executor_validation_service.reviewer_worker.review = _stub_reviewer_pass
         self.flow_service = FlowService(self.project_service)
 
@@ -1931,6 +1944,7 @@ class ManagerFlowTest(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["background"])
+        self.assertTrue(str(result["task_id"]).startswith("bgtask_"))
         self.assertIn(result["status"], {"queued", "running", "succeeded"})
         self.assertEqual(["scanpy"], result["packages"])
         self.assertEqual("succeeded", status["status"])
@@ -1945,6 +1959,7 @@ class ManagerFlowTest(unittest.TestCase):
         persisted_path = Path(self.tmpdir) / "test-project" / "chat" / "runtime_dependency_jobs.json"
         persisted = json.loads(persisted_path.read_text(encoding="utf-8"))
         self.assertEqual(result["job_id"], persisted[0]["job_id"])
+        self.assertEqual(result["task_id"], persisted[0]["task_id"])
         self.assertEqual("succeeded", persisted[0]["status"])
 
     def test_manager_can_start_background_r_dependency_install(self) -> None:
@@ -2340,11 +2355,208 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["can_start"])
         self.assertTrue(result["background"])
+        self.assertTrue(str(result["task_id"]).startswith("bgtask_"))
         self.assertTrue(result["async_boundary"])
         self.assertTrue(result["do_not_poll"])
         self.assertTrue(result["wait_for_wake"])
         self.assertIn("run_id", result)
         self._wait_for_run("test-project", result["run_id"])
+
+    def test_background_workboard_can_submit_claimed_ready_item(self) -> None:
+        manager_with_worker = ManagerService(
+            self.project_service,
+            planner=AnswerOnlyPlanner(),
+            worker_service=self.worker,
+            background_workboard_service=self.background_workboard_service,
+        )
+        created = manager_with_worker.blueprint_tools.create_card(
+            "test-project",
+            {
+                "title": "Workboard Ready Card",
+                "step": 2,
+                "summary": "Simple ready card for workboard submission.",
+                "inputs": [],
+                "outputs": [{"role": "ready_result", "artifact_class": "table"}],
+            },
+        )
+
+        board = manager_with_worker.blueprint_tools.get_background_workboard("test-project", "sess_workboard")
+        ready_item = next(item for item in board["ready_to_start"] if item["card_id"] == created["card_id"])
+        promoted = manager_with_worker.blueprint_tools.promote_workboard_item_to_todo(
+            "test-project",
+            {"item_id": ready_item["item_id"]},
+            "sess_workboard",
+        )
+        claimed = manager_with_worker.blueprint_tools.claim_workboard_item(
+            "test-project",
+            {"item_id": promoted["item"]["item_id"]},
+            "sess_workboard",
+        )
+        result = manager_with_worker.blueprint_tools.submit_claimed_workboard_items(
+            "test-project",
+            {"todo_item_ids": [claimed["item"]["item_id"]]},
+            "sess_workboard",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["background"])
+        self.assertTrue(result["async_boundary"])
+        self.assertEqual(1, result["started_count"])
+        self.assertFalse(result["batch"])
+        self.assertEqual(created["card_id"], result["started"][0]["card_id"])
+        self.assertTrue(str(result["task_id"]).startswith("bgtask_"))
+        self._wait_for_run("test-project", result["run_id"])
+
+    def test_background_workboard_rejects_todo_mutation_from_other_session(self) -> None:
+        manager_with_worker = ManagerService(
+            self.project_service,
+            planner=AnswerOnlyPlanner(),
+            worker_service=self.worker,
+            background_workboard_service=self.background_workboard_service,
+        )
+        created = manager_with_worker.blueprint_tools.create_card(
+            "test-project",
+            {
+                "title": "Claimed Todo Card",
+                "step": 2,
+                "summary": "Claim ownership should be enforced.",
+                "inputs": [],
+                "outputs": [{"role": "claimed_result", "artifact_class": "table"}],
+            },
+        )
+
+        board = manager_with_worker.blueprint_tools.get_background_workboard("test-project", "sess_owner")
+        ready_item = next(item for item in board["ready_to_start"] if item["card_id"] == created["card_id"])
+        promoted = manager_with_worker.blueprint_tools.promote_workboard_item_to_todo(
+            "test-project",
+            {"item_id": ready_item["item_id"]},
+            "sess_owner",
+        )
+        manager_with_worker.blueprint_tools.claim_workboard_item(
+            "test-project",
+            {"item_id": promoted["item"]["item_id"]},
+            "sess_owner",
+        )
+
+        with self.assertRaises(HTTPException) as exc:
+            manager_with_worker.blueprint_tools.defer_workboard_item(
+                "test-project",
+                {"item_id": promoted["item"]["item_id"]},
+                "sess_other",
+            )
+        self.assertEqual(409, exc.exception.status_code)
+
+    def test_start_card_run_with_pending_approval_does_not_enter_async_boundary(self) -> None:
+        manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
+        approval_response = {
+            "task_id": "bgtask_needs_approval",
+            "run_id": "run_needs_approval",
+            "card_id": "card_enrichment_group",
+            "worker_type": "needs_approval_stub",
+            "status": "needs_approval",
+            "latest_event": {},
+            "pending_approvals": [{"request_id": "perm_1", "target": "api.example.test"}],
+        }
+        with patch.object(self.worker, "start_run", return_value=approval_response):
+            result = manager_with_worker.blueprint_tools.start_card_run(
+                "test-project",
+                {"card_id": "card_enrichment_group"},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["can_start"])
+        self.assertFalse(result["background"])
+        self.assertFalse(result["async_boundary"])
+        self.assertFalse(result["do_not_poll"])
+        self.assertFalse(result["wait_for_wake"])
+        self.assertEqual("needs_approval", result["status"])
+        self.assertEqual(1, len(result["pending_approvals"]))
+
+    def test_workboard_submit_with_pending_approval_does_not_enter_async_boundary(self) -> None:
+        manager_with_worker = ManagerService(
+            self.project_service,
+            planner=AnswerOnlyPlanner(),
+            worker_service=self.worker,
+            background_workboard_service=self.background_workboard_service,
+        )
+        created = manager_with_worker.blueprint_tools.create_card(
+            "test-project",
+            {
+                "title": "Approval Gated Workboard Card",
+                "step": 2,
+                "summary": "Workboard submission should stay in-turn when approval is needed.",
+                "inputs": [],
+                "outputs": [{"role": "approval_result", "artifact_class": "table"}],
+            },
+        )
+
+        board = manager_with_worker.blueprint_tools.get_background_workboard("test-project", "sess_workboard")
+        ready_item = next(item for item in board["ready_to_start"] if item["card_id"] == created["card_id"])
+        promoted = manager_with_worker.blueprint_tools.promote_workboard_item_to_todo(
+            "test-project",
+            {"item_id": ready_item["item_id"]},
+            "sess_workboard",
+        )
+        claimed = manager_with_worker.blueprint_tools.claim_workboard_item(
+            "test-project",
+            {"item_id": promoted["item"]["item_id"]},
+            "sess_workboard",
+        )
+        approval_response = {
+            "task_id": "bgtask_needs_approval",
+            "run_id": "run_needs_approval",
+            "card_id": created["card_id"],
+            "worker_type": "needs_approval_stub",
+            "status": "needs_approval",
+            "latest_event": {},
+            "pending_approvals": [{"request_id": "perm_1", "target": "api.example.test"}],
+        }
+        with patch.object(self.worker, "start_run", return_value=approval_response):
+            result = manager_with_worker.blueprint_tools.submit_claimed_workboard_items(
+                "test-project",
+                {"todo_item_ids": [claimed["item"]["item_id"]]},
+                "sess_workboard",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["background"])
+        self.assertFalse(result["async_boundary"])
+        self.assertFalse(result["do_not_poll"])
+        self.assertFalse(result["wait_for_wake"])
+        self.assertEqual(1, result["approval_required_count"])
+        self.assertEqual(0, result["background_started_count"])
+
+    def test_background_workboard_tracks_completed_run_and_consumes_once(self) -> None:
+        manager_with_worker = ManagerService(
+            self.project_service,
+            planner=AnswerOnlyPlanner(),
+            worker_service=self.worker,
+            background_workboard_service=self.background_workboard_service,
+        )
+        created = manager_with_worker.blueprint_tools.create_card(
+            "test-project",
+            {
+                "title": "Workboard Completed Card",
+                "step": 2,
+                "summary": "Simple card for completed workboard item.",
+                "inputs": [],
+                "outputs": [{"role": "completed_result", "artifact_class": "table"}],
+            },
+        )
+        run = self.worker.start_run("test-project", created["card_id"])
+        self._wait_for_run("test-project", run["run_id"])
+
+        board = manager_with_worker.blueprint_tools.get_background_workboard("test-project", "sess_complete")
+        completed = next(item for item in board["completed"] if item["run_id"] == run["run_id"])
+        self.assertEqual(run["task_id"], completed["task_id"])
+
+        manager_with_worker.blueprint_tools.complete_workboard_item(
+            "test-project",
+            {"item_id": completed["item_id"]},
+            "sess_complete",
+        )
+        refreshed = manager_with_worker.blueprint_tools.get_background_workboard("test-project", "sess_complete")
+        self.assertFalse(any(item["run_id"] == run["run_id"] for item in refreshed["completed"]))
 
     def test_manager_run_control_rejects_runtime_overrides(self) -> None:
         manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)

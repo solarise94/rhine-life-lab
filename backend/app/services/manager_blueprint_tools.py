@@ -20,6 +20,7 @@ from app.models.runs import Manifest
 from app.services.app_config_service import AppConfigService
 from app.services.asset_timeline_service import AssetTimelineService
 from app.services.artifact_format_service import DEFAULT_CLASS_FORMAT, FORMAT_TO_CLASS
+from app.services.background_workboard_service import BackgroundWorkboardService
 from app.services.dependency_attention_service import DependencyAttentionService
 from app.services.library_registry_service import LibraryRegistryService
 from app.services.manager_planner import ManagerPlanningError
@@ -84,6 +85,18 @@ class CleanupRunHistoryPayload(BaseModel):
     include_valid_assets: bool = False
     dry_run: bool = False
     reason: str | None = None
+
+
+class WorkboardItemPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str
+
+
+class WorkboardSubmitPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    todo_item_ids: list[str] = Field(default_factory=list)
 
 
 class SearchCardTemplatesPayload(BaseModel):
@@ -207,6 +220,7 @@ class ManagerBlueprintTools:
         worker_service: WorkerService | None = None,
         runtime_dependency_job_service: RuntimeDependencyJobService | None = None,
         library_registry_service: LibraryRegistryService | None = None,
+        background_workboard_service: BackgroundWorkboardService | None = None,
     ) -> None:
         self.project_service = project_service
         self.worker_service = worker_service
@@ -219,6 +233,7 @@ class ManagerBlueprintTools:
         self.result_asset_service = ResultAssetService(project_service)
         self.asset_timeline_service = AssetTimelineService()
         self.dependency_attention_service = DependencyAttentionService()
+        self.background_workboard_service = background_workboard_service
 
     def get_project_context(self, project_id: str) -> dict:
         snapshot = self.project_service.get_project_snapshot(project_id)
@@ -295,6 +310,151 @@ class ManagerBlueprintTools:
                 "cycle_card_ids": timeline["cycle_card_ids"],
                 "duplicate_output_assets": timeline["duplicate_output_assets"],
             },
+        }
+
+    def get_background_workboard(self, project_id: str, session_id: str | None = None) -> dict:
+        if self.background_workboard_service is None:
+            raise ManagerPlanningError("background workboard service is unavailable.")
+        view = self.background_workboard_service.get_workboard(project_id, session_id=session_id)
+        return view.model_dump()
+
+    def promote_workboard_item_to_todo(self, project_id: str, payload: dict, session_id: str | None) -> dict:
+        if self.background_workboard_service is None:
+            raise ManagerPlanningError("background workboard service is unavailable.")
+        request = WorkboardItemPayload.model_validate(payload)
+        item = self.background_workboard_service.promote_workboard_item_to_todo(project_id, request.item_id, session_id or "")
+        return {"ok": True, "item": item.model_dump()}
+
+    def claim_workboard_item(self, project_id: str, payload: dict, session_id: str | None) -> dict:
+        if self.background_workboard_service is None:
+            raise ManagerPlanningError("background workboard service is unavailable.")
+        request = WorkboardItemPayload.model_validate(payload)
+        item = self.background_workboard_service.claim_workboard_item(project_id, request.item_id, session_id or "")
+        return {"ok": True, "item": item.model_dump()}
+
+    def complete_workboard_item(self, project_id: str, payload: dict, session_id: str | None) -> dict:
+        if self.background_workboard_service is None:
+            raise ManagerPlanningError("background workboard service is unavailable.")
+        request = WorkboardItemPayload.model_validate(payload)
+        item = self.background_workboard_service.complete_workboard_item(project_id, request.item_id, session_id or "")
+        return {"ok": True, "item": item.model_dump()}
+
+    def defer_workboard_item(self, project_id: str, payload: dict, session_id: str | None) -> dict:
+        if self.background_workboard_service is None:
+            raise ManagerPlanningError("background workboard service is unavailable.")
+        request = WorkboardItemPayload.model_validate(payload)
+        item = self.background_workboard_service.defer_workboard_item(project_id, request.item_id, session_id or "")
+        return {"ok": True, "item": item.model_dump()}
+
+    def block_workboard_item_for_user(self, project_id: str, payload: dict, session_id: str | None) -> dict:
+        if self.background_workboard_service is None:
+            raise ManagerPlanningError("background workboard service is unavailable.")
+        request = WorkboardItemPayload.model_validate(payload)
+        item = self.background_workboard_service.block_workboard_item_for_user(project_id, request.item_id, session_id or "")
+        return {"ok": True, "item": item.model_dump()}
+
+    def reopen_workboard_item(self, project_id: str, payload: dict) -> dict:
+        if self.background_workboard_service is None:
+            raise ManagerPlanningError("background workboard service is unavailable.")
+        request = WorkboardItemPayload.model_validate(payload)
+        item = self.background_workboard_service.reopen_workboard_item(project_id, request.item_id)
+        return {"ok": True, "item": item.model_dump()}
+
+    def submit_claimed_workboard_items(self, project_id: str, payload: dict, session_id: str | None) -> dict:
+        if self.background_workboard_service is None or self.worker_service is None:
+            raise ManagerPlanningError("workboard run submission is unavailable.")
+        request = WorkboardSubmitPayload.model_validate(payload)
+        result = self.background_workboard_service.submit_claimed_workboard_items(
+            project_id,
+            request.todo_item_ids,
+            session_id=session_id or "",
+            start_callback=lambda inner_project_id, card_id: self.worker_service.start_run(inner_project_id, card_id),
+        )
+        approval_required_count = sum(
+            1
+            for item in result["started"]
+            if self._run_start_requires_manager_action(item)
+        )
+        rejected_count = sum(
+            1
+            for item in result["started"]
+            if item.get("rejected_approvals") or item.get("status") == "cancelled"
+        )
+        background_started_count = sum(
+            1
+            for item in result["started"]
+            if not self._run_start_requires_manager_action(item)
+        )
+        result["approval_required_count"] = approval_required_count
+        result["rejected_count"] = rejected_count
+        result["background_started_count"] = background_started_count
+        result["background"] = background_started_count > 0
+        result["async_boundary"] = bool(background_started_count > 0 and approval_required_count == 0 and rejected_count == 0)
+        result["do_not_poll"] = result["async_boundary"]
+        result["wait_for_wake"] = result["async_boundary"]
+        if result["started"]:
+            first = result["started"][0]
+            result["task_id"] = first.get("task_id")
+            result["run_id"] = first.get("run_id")
+            result["started_count"] = len(result["started"])
+            result["batch"] = len(result["started"]) > 1
+            if approval_required_count > 0:
+                result["message"] = (
+                    f"Submitted claimed workboard items, but {approval_required_count} run(s) still need approval. "
+                    "Handle approvals in this turn; do not treat this batch as a background wait."
+                )
+            elif rejected_count > 0 and background_started_count == 0:
+                result["message"] = "Claimed workboard items did not start because launch approvals were rejected."
+            else:
+                result["message"] = "Started claimed workboard run batch in the background. Do not poll in this turn."
+        else:
+            result["started_count"] = 0
+            result["batch"] = False
+            result["message"] = "No claimed workboard items could be started."
+        return result
+
+    @staticmethod
+    def _run_start_requires_manager_action(response: dict[str, Any]) -> bool:
+        return bool(
+            response.get("status") == "needs_approval"
+            or response.get("pending_approvals")
+            or response.get("rejected_approvals")
+        )
+
+    def _manager_run_start_payload(self, response: dict[str, Any], *, rerun: bool = False) -> dict[str, Any]:
+        requires_manager_action = self._run_start_requires_manager_action(response)
+        rejected = bool(response.get("rejected_approvals"))
+        if requires_manager_action:
+            message = (
+                "Rerun was created but requires approval before execution. Resolve the approval in this turn."
+                if not rejected and rerun
+                else "Run was created but requires approval before execution. Resolve the approval in this turn."
+                if not rejected
+                else "Run could not start because launch approval was rejected before execution."
+            )
+            return {
+                "ok": not rejected,
+                "can_start": False,
+                "background": False,
+                "async_boundary": False,
+                "do_not_poll": False,
+                "wait_for_wake": False,
+                "message": message,
+                **response,
+            }
+        return {
+            "ok": True,
+            "can_start": True,
+            "background": True,
+            "async_boundary": True,
+            "do_not_poll": True,
+            "wait_for_wake": True,
+            "message": (
+                "Rerun started in the background. Do not poll card status in this turn; wait for run events or a wake event."
+                if rerun
+                else "Run started in the background. Do not poll card status in this turn; wait for run events or a wake event."
+            ),
+            **response,
         }
 
     def find_cards(self, project_id: str, payload: dict) -> dict:
@@ -800,6 +960,7 @@ class ManagerBlueprintTools:
             "async_boundary": True,
             "do_not_poll": True,
             "wait_for_wake": True,
+            "task_id": job.task_id,
             "job_id": job.job_id,
             "status": job.status,
             "ecosystem": request_payload["ecosystem"],
@@ -826,6 +987,7 @@ class ManagerBlueprintTools:
                 pass
         result = job.result or {}
         payload = {
+            "task_id": job.task_id,
             "job_id": job.job_id,
             "status": job.status,
             "created_at": job.created_at,
@@ -973,16 +1135,7 @@ class ManagerBlueprintTools:
                 project_id,
                 request.card_id,
             )
-            return {
-                "ok": True,
-                "can_start": True,
-                "background": True,
-                "async_boundary": True,
-                "do_not_poll": True,
-                "wait_for_wake": True,
-                "message": "Run started in the background. Do not poll card status in this turn; wait for run events or a wake event.",
-                **response,
-            }
+            return self._manager_run_start_payload(response, rerun=False)
         except HTTPException as exc:
             if exc.status_code == 409:
                 detail = exc.detail
@@ -1048,16 +1201,7 @@ class ManagerBlueprintTools:
                 project_id,
                 request.card_id,
             )
-            return {
-                "ok": True,
-                "can_start": True,
-                "background": True,
-                "async_boundary": True,
-                "do_not_poll": True,
-                "wait_for_wake": True,
-                "message": "Rerun started in the background. Do not poll card status in this turn; wait for run events or a wake event.",
-                **response,
-            }
+            return self._manager_run_start_payload(response, rerun=True)
         except HTTPException as exc:
             raise ManagerPlanningError(str(exc.detail)) from exc
 

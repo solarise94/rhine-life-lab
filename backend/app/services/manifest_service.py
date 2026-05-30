@@ -12,6 +12,10 @@ from app.services.utils import atomic_write_json, read_json, resolve_within, sha
 
 class ManifestService:
     BACKEND_MANAGED_AUDIT_PATHS = {
+        "chat/background_tasks.json",
+        "chat/background_workboard_state.json",
+        "chat/manager_wake_events.jsonl",
+        "chat/runtime_dependency_jobs.json",
         "chat/sessions.json",
         "graph/assets.json",
         "graph/cards.json",

@@ -8,6 +8,9 @@ from fastapi import HTTPException
 
 from app.models.cards import Card
 from app.models.manager_auto import ManagerAutoChainLimitBasis, ManagerAutoDirective, ManagerAutoState
+from app.models.manager_auto import ManagerWakeEvent
+from app.services.background_workboard_service import BackgroundWorkboardService
+from app.services.manager_wake_service import ManagerWakeService
 from app.services.project_event_service import ProjectEventService
 from app.services.project_service import ProjectService
 from app.services.utils import utc_now
@@ -24,9 +27,17 @@ class ManagerAutoView:
 
 
 class ManagerAutoService:
-    def __init__(self, project_service: ProjectService, project_event_service: ProjectEventService | None = None) -> None:
+    def __init__(
+        self,
+        project_service: ProjectService,
+        project_event_service: ProjectEventService | None = None,
+        background_workboard_service: BackgroundWorkboardService | None = None,
+        manager_wake_service: ManagerWakeService | None = None,
+    ) -> None:
         self.project_service = project_service
         self.project_event_service = project_event_service
+        self.background_workboard_service = background_workboard_service
+        self.manager_wake_service = manager_wake_service
 
     def get_state(self, project_id: str) -> ManagerAutoState:
         graph = self.project_service.graph_store(project_id).load_graph()
@@ -60,6 +71,9 @@ class ManagerAutoService:
             next_state.mode = "once" if mode == "once" else "continuous"
             next_state.owner_session_id = session_id
             next_state.state = "idle"
+            next_state.view_workboard = True
+            next_state.consume_workboard = True
+            next_state.last_signaled_board_revision = None
             next_state.started_at = next_state.started_at or now
             next_state.stopped_at = None
             next_state.stop_reason = None
@@ -86,7 +100,7 @@ class ManagerAutoService:
                 raise HTTPException(status_code=409, detail="Only the auto owner session may stop auto mode.")
             next_state = state.model_copy(deep=True)
             next_state.enabled = False
-            next_state.state = "stopped"
+            next_state.state = "cancelled" if reason == "user_stop" else "stopped"
             next_state.active_run_id = None
             next_state.active_job_id = None
             next_state.stopped_at = utc_now()
@@ -162,6 +176,14 @@ class ManagerAutoService:
             return False
         return state.state == "idle" and not state.active_run_id and not state.active_job_id
 
+    def notify_turn_settled(self, project_id: str, session_id: str | None, *, async_boundary: bool = False) -> ManagerAutoState:
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id is required to settle an auto turn.")
+        view = self.get_view(project_id, session_id)
+        if not view.is_owner:
+            raise HTTPException(status_code=409, detail="Only the auto owner session may settle an auto turn.")
+        return self.evaluate_workboard_and_maybe_signal(project_id, session_id, from_turn_settlement=async_boundary)
+
     def pending_directives(self, project_id: str) -> list[ManagerAutoDirective]:
         state = self.get_state(project_id)
         return [item.model_copy(deep=True) for item in state.pending_directives if item.status == "pending"]
@@ -229,3 +251,64 @@ class ManagerAutoService:
     @staticmethod
     def _max_chain_count(executable_card_count: int) -> int:
         return max(10, min(80, executable_card_count * 3))
+
+    def evaluate_workboard_and_maybe_signal(
+        self,
+        project_id: str,
+        session_id: str,
+        *,
+        from_turn_settlement: bool = False,
+    ) -> ManagerAutoState:
+        if self.background_workboard_service is None:
+            return self.get_state(project_id)
+        snapshot = self.background_workboard_service.signal_snapshot(project_id, session_id=session_id)
+        signal: ManagerWakeEvent | None = None
+        lock = self.project_service.lock_for(project_id)
+        with lock:
+            store = self.project_service.graph_store(project_id)
+            graph = store.load_graph()
+            state = ManagerAutoState.model_validate(graph.metadata.get("manager_auto") or {})
+            if not state.enabled or state.owner_session_id != session_id:
+                return state
+            if state.state in {"running", "thinking"} and not from_turn_settlement:
+                return state
+            if snapshot["has_actionable"]:
+                next_state_value = "active"
+            elif snapshot["has_running"]:
+                next_state_value = "idle"
+            elif snapshot["has_blocked_for_user"]:
+                next_state_value = "blocked"
+            else:
+                next_state_value = "completed"
+            state.state = next_state_value  # type: ignore[assignment]
+            if (
+                snapshot["has_actionable"]
+                and self.manager_wake_service is not None
+                and state.consume_workboard
+                and next_state_value not in {"running", "thinking"}
+                and state.last_signaled_board_revision != snapshot["revision"]
+            ):
+                signal = ManagerWakeEvent(
+                    wake_id=f"wake_workboard_{uuid4().hex[:12]}",
+                    project_id=project_id,
+                    kind="workboard_actionable",
+                    source_type="workboard",
+                    source_id=f"workboard:{snapshot['revision']}",
+                    severity="info",
+                    message="Background workboard has actionable items.",
+                    payload_summary={
+                        "counts": snapshot["counts"],
+                        "revision": snapshot["revision"],
+                        "from_turn_settlement": from_turn_settlement,
+                    },
+                    idempotency_key=f"workboard:{project_id}:{snapshot['revision']}",
+                    created_at=utc_now(),
+                )
+                state.last_wake_id = signal.wake_id
+                state.last_signaled_board_revision = snapshot["revision"]
+            graph.metadata["manager_auto"] = state.model_dump()
+            store.save_graph(graph)
+        if signal is not None:
+            self.manager_wake_service.enqueue(signal)
+        self._emit_auto_event(project_id, state)
+        return state

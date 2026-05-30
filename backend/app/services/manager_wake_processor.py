@@ -114,6 +114,16 @@ class ManagerWakeProcessor:
                 active_run_id=None if clear_active_run else (wake_event.run_id or auto_state.active_run_id),
                 active_job_id=None if clear_active_job else (wake_event.job_id or auto_state.active_job_id),
             )
+            workboard_service = self.manager_auto_service.background_workboard_service
+            workboard_snapshot = (
+                workboard_service.signal_snapshot(project_id, session_id=owner_session_id)
+                if workboard_service is not None
+                else {"counts": {}, "has_actionable": False}
+            )
+            if wake_event.kind == "workboard_actionable" and not workboard_snapshot.get("has_actionable"):
+                self.manager_auto_service.evaluate_workboard_and_maybe_signal(project_id, owner_session_id)
+                self.manager_wake_service.mark_done(project_id, wake_event.wake_id)
+                return
             self.chat_session_service.append_messages(
                 project_id,
                 owner_session_id,
@@ -122,7 +132,7 @@ class ManagerWakeProcessor:
             )
             pending_directives = self.manager_auto_service.pending_directives(project_id)
             request = ChatRequest(
-                message=self._wake_prompt(wake_event, pending_directives),
+                message=self._wake_prompt(wake_event, pending_directives, workboard_snapshot.get("counts") or {}),
                 session_id=owner_session_id,
                 thinking_effort="medium",
                 messages=[],
@@ -141,9 +151,8 @@ class ManagerWakeProcessor:
                     status="consumed",
                     note=f"Handled with wake {wake_event.wake_id}",
                 )
-            latest_state = self.manager_auto_service.get_state(project_id)
-            next_state_value = "running" if latest_state.active_run_id or latest_state.active_job_id else "idle"
-            self.manager_auto_service.set_runtime_state(project_id, state_value=next_state_value, increment_chain=True)
+            self.manager_auto_service.set_runtime_state(project_id, increment_chain=True)
+            latest_state = self.manager_auto_service.evaluate_workboard_and_maybe_signal(project_id, owner_session_id, from_turn_settlement=True)
             if auto_state.mode == "once":
                 self.manager_auto_service.stop(project_id, owner_session_id, reason="auto_once_complete", message="Auto once 已完成，已退出 auto 模式。")
                 self.chat_session_service.append_messages(
@@ -217,13 +226,15 @@ class ManagerWakeProcessor:
         )
 
     @staticmethod
-    def _wake_prompt(event: ManagerWakeEvent, directives: list[object]) -> str:
+    def _wake_prompt(event: ManagerWakeEvent, directives: list[object], workboard_counts: dict[str, object]) -> str:
         directive_text = "\n".join(f"- {getattr(item, 'text', '')}" for item in directives if getattr(item, "text", None))
         lines = [
-            "Auto mode wake event received.",
+            "Auto mode background signal received.",
             f"kind: {event.kind}",
             f"message: {event.message}",
         ]
+        if workboard_counts:
+            lines.append(f"workboard_counts: {workboard_counts}")
         if event.card_id:
             lines.append(f"card_id: {event.card_id}")
         if event.run_id:
@@ -232,7 +243,8 @@ class ManagerWakeProcessor:
             lines.append(f"job_id: {event.job_id}")
         if directive_text:
             lines.extend(["pending_directives:", directive_text])
-        lines.append("Please inspect the relevant project state, decide the next safe action, and keep the project moving.")
+        lines.append("Call get_background_workboard first. Consume at most one actionable workboard item or one claimed run batch in this turn.")
+        lines.append("If you start background work, stop after reporting ids and let async-boundary yield the turn.")
         return "\n".join(lines)
 
     def _lock_for(self, project_id: str) -> Lock:

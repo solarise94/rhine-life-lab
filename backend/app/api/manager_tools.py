@@ -23,6 +23,13 @@ _MUTATING_TOOL_NAMES = {
     "delete_card",
     "set_tool_policy",
     "install_runtime_dependencies",
+    "promote_workboard_item_to_todo",
+    "claim_workboard_item",
+    "complete_workboard_item",
+    "defer_workboard_item",
+    "block_workboard_item_for_user",
+    "reopen_workboard_item",
+    "submit_claimed_workboard_items",
     "start_card_run",
     "stop_card_run",
     "rerun_card",
@@ -120,6 +127,20 @@ def inspect_project_summary(
     _verify_internal_token(authorization)
     try:
         return manager_service.blueprint_tools.inspect_project_summary(project_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/background-workboard")
+def get_background_workboard(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.get_background_workboard(project_id, x_blueprint_session_id)
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -485,6 +506,133 @@ def get_runtime_dependency_install_status(
     _verify_internal_token(authorization)
     try:
         return manager_service.blueprint_tools.get_runtime_dependency_install_status(project_id, job_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/background-workboard/promote")
+def promote_workboard_item_to_todo(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    _guard_mutation(project_id, "promote_workboard_item_to_todo", x_blueprint_session_id, manager_auto_service)
+    try:
+        return manager_service.blueprint_tools.promote_workboard_item_to_todo(project_id, payload, x_blueprint_session_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/background-workboard/claim")
+def claim_workboard_item(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    _guard_mutation(project_id, "claim_workboard_item", x_blueprint_session_id, manager_auto_service)
+    try:
+        return manager_service.blueprint_tools.claim_workboard_item(project_id, payload, x_blueprint_session_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/background-workboard/complete")
+def complete_workboard_item(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    _guard_mutation(project_id, "complete_workboard_item", x_blueprint_session_id, manager_auto_service)
+    try:
+        return manager_service.blueprint_tools.complete_workboard_item(project_id, payload, x_blueprint_session_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/background-workboard/defer")
+def defer_workboard_item(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    _guard_mutation(project_id, "defer_workboard_item", x_blueprint_session_id, manager_auto_service)
+    try:
+        return manager_service.blueprint_tools.defer_workboard_item(project_id, payload, x_blueprint_session_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/background-workboard/block")
+def block_workboard_item_for_user(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    _guard_mutation(project_id, "block_workboard_item_for_user", x_blueprint_session_id, manager_auto_service)
+    try:
+        return manager_service.blueprint_tools.block_workboard_item_for_user(project_id, payload, x_blueprint_session_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/background-workboard/reopen")
+def reopen_workboard_item(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    _guard_mutation(project_id, "reopen_workboard_item", x_blueprint_session_id, manager_auto_service)
+    try:
+        return manager_service.blueprint_tools.reopen_workboard_item(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/background-workboard/submit-claimed")
+def submit_claimed_workboard_items(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    _guard_mutation(project_id, "submit_claimed_workboard_items", x_blueprint_session_id, manager_auto_service)
+    try:
+        response = manager_service.blueprint_tools.submit_claimed_workboard_items(project_id, payload, x_blueprint_session_id)
+        if response.get("run_id"):
+            _mark_auto_running(
+                project_id,
+                x_blueprint_session_id,
+                manager_auto_service,
+                active_run_id=str(response.get("run_id")),
+            )
+        return response
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

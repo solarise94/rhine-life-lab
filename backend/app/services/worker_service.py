@@ -42,6 +42,7 @@ from app.models.runs import (
 )
 from app.services.app_config_service import AppConfigService
 from app.services.artifact_format_service import default_format_for_artifact_class
+from app.services.background_task_service import BackgroundTaskService
 from app.services.flow_service import FlowService
 from app.services.executor_validation_service import ExecutorValidationService
 from app.services.library_registry_service import LibraryRegistryService
@@ -136,12 +137,14 @@ class WorkerService:
         library_registry_service: LibraryRegistryService | None = None,
         manager_wake_service: ManagerWakeService | None = None,
         project_event_service: ProjectEventService | None = None,
+        background_task_service: BackgroundTaskService | None = None,
     ) -> None:
         self.project_service = project_service
         self.manifest_service = manifest_service
         self.runtime_approval_service = runtime_approval_service
         self.manager_wake_service = manager_wake_service
         self.project_event_service = project_event_service
+        self.background_task_service = background_task_service or BackgroundTaskService(project_service)
         self.library_registry_service = library_registry_service or LibraryRegistryService(
             project_service,
             AppConfigService(project_service.settings),
@@ -275,6 +278,12 @@ class WorkerService:
                 )
 
             run_id = self._new_run_id(graph.runs)
+            task = self.background_task_service.create_task(
+                project_id,
+                task_type="card_run",
+                affected={"card_ids": [card_id], "run_ids": [run_id]},
+                adapter={"kind": "worker_service"},
+            )
             run_dir = self.project_service.project_path(project_id) / "runs" / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
             packet = self._task_packet(
@@ -323,6 +332,7 @@ class WorkerService:
             graph.runs.append(
                 RunRecord(
                     run_id=run_id,
+                    task_id=task.task_id,
                     card_id=card_id,
                     module_id=card.linked_modules[0] if card.linked_modules else None,
                     status=initial_status,
@@ -332,6 +342,15 @@ class WorkerService:
                     finished_at=utc_now() if rejected else None,
                     worker_type=resolved_worker_type,
                 )
+            )
+            self.background_task_service.update_task(
+                project_id,
+                task.task_id,
+                status="cancelled" if rejected else "waiting" if unresolved else "queued",
+                started_at=utc_now(),
+                finished_at=utc_now() if rejected else None,
+                error="Launch approval rejected before execution." if rejected else None,
+                result={"message": summary},
             )
             card.status = "planned" if rejected else "running"
             card.progress_note = "执行器已创建，等待运行。" if not rejected else "启动前权限校验失败。"
@@ -368,6 +387,7 @@ class WorkerService:
                 )
 
         response = {
+            "task_id": task.task_id,
             "run_id": run_id,
             "card_id": card_id,
             "worker_type": resolved_worker_type,
@@ -379,8 +399,9 @@ class WorkerService:
             reason="run_created",
             card_id=card_id,
             run_id=run_id,
+            task_id=task.task_id,
             status=initial_status,
-            payload={"card_status": "planned" if rejected else "running"},
+            payload={"card_status": "planned" if rejected else "running", "task_id": task.task_id},
         )
         if unresolved:
             response["pending_approvals"] = unresolved
@@ -526,7 +547,8 @@ class WorkerService:
         # delete run/results directories while the thread is still using them.
         self._append_event(project_id, run_id, run.card_id, event_type="run_cancelled", message=message)
         self._commit_run_stage(project_id, run_id, "cancelled")
-        self._emit_project_event(project_id, reason="run_cancelled", card_id=run.card_id, run_id=run_id, status="cancelled")
+        self._update_background_task_for_run(project_id, run_id, run.task_id, "cancelled", message)
+        self._emit_project_event(project_id, reason="run_cancelled", card_id=run.card_id, run_id=run_id, task_id=run.task_id, status="cancelled", payload={"task_id": run.task_id})
         self._enqueue_wake_event(
             project_id,
             kind="card_run_cancelled",
@@ -599,7 +621,7 @@ class WorkerService:
         self._threads.pop(run_id, None)
         self._processes.pop(run_id, None)
         self._commit_run_stage(project_id, run_id, "cleanup")
-        self._emit_project_event(project_id, reason="run_cleanup", card_id=run.card_id, run_id=run_id, status=run.status)
+        self._emit_project_event(project_id, reason="run_cleanup", card_id=run.card_id, run_id=run_id, task_id=run.task_id, status=run.status, payload={"task_id": run.task_id})
         return {"run_id": run_id, "cleanup_status": "completed", "archived_at": run.archived_at}
 
     def reset_card_run_state(self, project_id: str, card_id: str) -> dict:
@@ -925,13 +947,15 @@ class WorkerService:
             run.summary = brief.get("final_report", {}).get("summary") or review_context.summary
             store.save_graph(graph)
             store.save_cards(cards)
+            self._update_background_task_for_run(project_id, run_id, run.task_id, run.status, run.summary)
             self._emit_project_event(
                 project_id,
                 reason="run_review_finalized",
                 card_id=card.card_id,
                 run_id=run_id,
+                task_id=run.task_id,
                 status=run.status,
-                payload={"card_status": card.status, "accepted": final_accept, "failure_reason": failure_reason},
+                payload={"card_status": card.status, "accepted": final_accept, "failure_reason": failure_reason, "task_id": run.task_id},
             )
             return {
                 "run_id": run_id,
@@ -1433,13 +1457,15 @@ class WorkerService:
             store.save_runs(runs)
             store.save_modules(modules)
             store.save_cards(cards)
+        self._update_background_task_for_run(project_id, run_id, run.task_id, status, summary)
         self._emit_project_event(
             project_id,
             reason="run_status_changed",
             card_id=card_id,
             run_id=run_id,
+            task_id=run.task_id,
             status=status,
-            payload={"card_status": card_status or card.status},
+            payload={"card_status": card_status or card.status, "task_id": run.task_id},
         )
 
     def _append_event(
@@ -1972,8 +1998,9 @@ class WorkerService:
             reason="run_attention_changed",
             card_id=card_id,
             run_id=run_id,
+            task_id=run.task_id,
             status=run.status,
-            payload={"needs_manager_attention": True, "message": message},
+            payload={"needs_manager_attention": True, "message": message, "task_id": run.task_id},
         )
 
     @staticmethod
@@ -2003,6 +2030,44 @@ class WorkerService:
         lock = self.project_service.lock_for(project_id)
         with lock:
             return self.project_service.graph_store(project_id).get_run_status(run_id)
+
+    def _update_background_task_for_run(self, project_id: str, run_id: str, task_id: str | None, run_status: str, summary: str) -> None:
+        resolved_task_id = task_id
+        if resolved_task_id is None:
+            task = self.background_task_service.find_by_run_id(project_id, run_id)
+            resolved_task_id = task.task_id if task is not None else None
+        if not resolved_task_id:
+            logger.debug("Background task missing for run status update project=%s run=%s status=%s", project_id, run_id, run_status)
+            return
+        mapped_status = self._background_task_status_for_run_status(run_status)
+        updates: dict[str, Any] = {
+            "status": mapped_status,
+            "result": {"message": summary, "run_status": run_status},
+        }
+        now = utc_now()
+        if mapped_status in {"launching", "running"}:
+            updates["started_at"] = now
+        if mapped_status in {"succeeded", "failed", "cancelled", "interrupted"}:
+            updates["finished_at"] = now
+        if mapped_status == "failed":
+            updates["error"] = summary
+        self.background_task_service.update_task(project_id, resolved_task_id, **updates)
+
+    @staticmethod
+    def _background_task_status_for_run_status(run_status: str) -> str:
+        if run_status == "queued":
+            return "queued"
+        if run_status == "launching":
+            return "launching"
+        if run_status in {"running", "reviewing", "needs_approval"}:
+            return "running"
+        if run_status in {"success", "reviewed"}:
+            return "succeeded"
+        if run_status == "failed":
+            return "failed"
+        if run_status == "cancelled":
+            return "cancelled"
+        return "interrupted"
 
     @staticmethod
     def _validate_acceptance_graph_consistent(
@@ -2495,6 +2560,7 @@ class WorkerService:
         reason: str,
         card_id: str | None = None,
         run_id: str | None = None,
+        task_id: str | None = None,
         status: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> None:
@@ -2506,6 +2572,7 @@ class WorkerService:
                 reason=reason,
                 card_id=card_id,
                 run_id=run_id,
+                task_id=task_id,
                 status=status,
                 payload=payload,
             )

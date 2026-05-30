@@ -2,6 +2,8 @@ from functools import lru_cache
 
 from app.services.chat_session_service import ChatSessionService
 from app.services.app_config_service import AppConfigService
+from app.services.background_task_service import BackgroundTaskService
+from app.services.background_workboard_service import BackgroundWorkboardService
 from app.services.diagnostic_bundle_service import DiagnosticBundleService
 from app.services.manager_service import ManagerService
 from app.services.chat_job_service import ChatJobService
@@ -48,6 +50,7 @@ def get_manager_service() -> ManagerService:
         runtime_dependency_job_service=get_runtime_dependency_job_service(),
         library_registry_service=get_library_registry_service(),
         manager_auto_service=get_manager_auto_service(),
+        background_workboard_service=get_background_workboard_service(),
     )
 
 
@@ -62,6 +65,7 @@ def get_runtime_dependency_job_service() -> RuntimeDependencyJobService:
         get_project_service(),
         manager_wake_service=get_manager_wake_service(),
         project_event_service=get_project_event_service(),
+        background_task_service=get_background_task_service(),
     )
 
 
@@ -89,6 +93,7 @@ def get_worker_service() -> WorkerService:
         get_library_registry_service(),
         get_manager_wake_service(),
         project_event_service=get_project_event_service(),
+        background_task_service=get_background_task_service(),
     )
 
 
@@ -132,7 +137,22 @@ def get_library_registry_service() -> LibraryRegistryService:
 
 @lru_cache
 def get_manager_auto_service() -> ManagerAutoService:
-    return ManagerAutoService(get_project_service(), get_project_event_service())
+    return ManagerAutoService(
+        get_project_service(),
+        get_project_event_service(),
+        get_background_workboard_service(),
+        get_manager_wake_service(),
+    )
+
+
+@lru_cache
+def get_background_task_service() -> BackgroundTaskService:
+    return BackgroundTaskService(get_project_service())
+
+
+@lru_cache
+def get_background_workboard_service() -> BackgroundWorkboardService:
+    return BackgroundWorkboardService(get_project_service(), get_background_task_service())
 
 
 @lru_cache

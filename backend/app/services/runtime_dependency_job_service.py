@@ -8,6 +8,7 @@ import traceback
 from typing import Any
 from uuid import uuid4
 
+from app.services.background_task_service import BackgroundTaskService
 from app.models.manager_auto import ManagerWakeEvent, ManagerWakeSource
 from app.services.manager_wake_service import ManagerWakeService
 from app.services.project_event_service import ProjectEventService
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 class RuntimeDependencyJob:
     job_id: str
     project_id: str
+    task_id: str
     payload: dict[str, Any]
     status: JobStatus = "queued"
     result: dict[str, Any] | None = None
@@ -40,6 +42,7 @@ class RuntimeDependencyJobService:
         max_workers: int = 2,
         manager_wake_service: ManagerWakeService | None = None,
         project_event_service: ProjectEventService | None = None,
+        background_task_service: BackgroundTaskService | None = None,
     ) -> None:
         self.project_service = project_service
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="runtime-deps")
@@ -48,12 +51,25 @@ class RuntimeDependencyJobService:
         self.runtime_locks: dict[tuple[str, str], Lock] = {}
         self.manager_wake_service = manager_wake_service
         self.project_event_service = project_event_service
+        self.background_task_service = background_task_service or BackgroundTaskService(project_service)
 
     def submit(self, project_id: str, payload: dict[str, Any], handler) -> RuntimeDependencyJob:
+        task = self.background_task_service.create_task(
+            project_id,
+            task_type="runtime_dependency_install",
+            affected={"job_ids": [], "card_ids": [payload.get("source", {}).get("card_id")] if isinstance(payload.get("source"), dict) and payload.get("source", {}).get("card_id") else []},
+            adapter={"kind": "dependency_installer"},
+        )
         job = RuntimeDependencyJob(
             job_id=f"depjob_{uuid4().hex}",
             project_id=project_id,
+            task_id=task.task_id,
             payload=payload,
+        )
+        self.background_task_service.update_task(
+            project_id,
+            task.task_id,
+            affected={"job_ids": [job.job_id], "card_ids": task.affected.card_ids},
         )
         with self.lock:
             self._load_project_jobs_locked(project_id)
@@ -91,6 +107,7 @@ class RuntimeDependencyJobService:
             job = self.jobs[job_id]
             job.status = "running"
             job.started_at = utc_now()
+            self.background_task_service.update_task(job.project_id, job.task_id, status="running", started_at=job.started_at)
             self._persist_project_jobs_locked(job.project_id)
             self._emit_project_event(job)
             runtime = str(job.payload.get("runtime") or "").strip()
@@ -105,6 +122,13 @@ class RuntimeDependencyJobService:
                 job.status = "failed"
                 job.error = "".join(traceback.format_exception(exc))
                 job.finished_at = utc_now()
+                self.background_task_service.update_task(
+                    job.project_id,
+                    job.task_id,
+                    status="failed",
+                    finished_at=job.finished_at,
+                    error=job.error,
+                )
                 self._persist_project_jobs_locked(job.project_id)
                 self._emit_project_event(job)
                 self._emit_wake_event(job, ok=False, message=job.error or "Dependency installation failed.")
@@ -114,6 +138,14 @@ class RuntimeDependencyJobService:
             job.result = result
             job.error = None if result.get("ok") else str(result.get("message") or "Dependency installation failed.")
             job.finished_at = utc_now()
+            self.background_task_service.update_task(
+                job.project_id,
+                job.task_id,
+                status=job.status,
+                finished_at=job.finished_at,
+                result=result,
+                error=job.error,
+            )
             self._persist_project_jobs_locked(job.project_id)
             self._emit_project_event(job)
             self._emit_wake_event(job, ok=bool(result.get("ok")), message=job.error or str(result.get("message") or "Dependency installation completed."))
@@ -130,8 +162,10 @@ class RuntimeDependencyJobService:
                 card_id=source.get("card_id"),
                 run_id=source.get("run_id"),
                 job_id=job.job_id,
+                task_id=job.task_id,
                 status=job.status,
                 payload={
+                    "task_id": job.task_id,
                     "job_status": job.status,
                     "runtime": job.payload.get("runtime"),
                     "packages": job.payload.get("packages"),
@@ -166,6 +200,7 @@ class RuntimeDependencyJobService:
                     project_id=str(item.get("project_id") or project_id),
                     payload=dict(item.get("payload") or {}),
                     status=str(item.get("status") or "failed"),
+                    task_id=str(item.get("task_id") or f"bgtask_{job_id}"),
                     result=dict(item["result"]) if isinstance(item.get("result"), dict) else None,
                     error=str(item["error"]) if item.get("error") is not None else None,
                     created_at=str(item.get("created_at") or now),
@@ -174,11 +209,18 @@ class RuntimeDependencyJobService:
                 )
             except (KeyError, TypeError, ValueError):
                 continue
-            if job.status in {"queued", "running"}:
+            if job.status in {"queued", "running", "waiting", "launching"}:
                 job.status = "failed"
                 job.error = "Runtime dependency job was interrupted by backend restart."
                 job.finished_at = job.finished_at or now
                 changed = True
+                self.background_task_service.update_task(
+                    job.project_id,
+                    job.task_id,
+                    status="interrupted",
+                    finished_at=job.finished_at,
+                    error=job.error,
+                )
             self.jobs[job.job_id] = job
         if changed:
             self._persist_project_jobs_locked(project_id)
@@ -196,6 +238,7 @@ class RuntimeDependencyJobService:
                 {
                     "job_id": job.job_id,
                     "project_id": job.project_id,
+                    "task_id": job.task_id,
                     "payload": job.payload,
                     "status": job.status,
                     "result": job.result,

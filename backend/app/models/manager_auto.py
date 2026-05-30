@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 
 ManagerAutoMode = Literal["continuous", "once"]
-ManagerAutoStateValue = Literal["idle", "running", "thinking", "stopped"]
+ManagerAutoStateValue = Literal["active", "idle", "running", "thinking", "blocked", "completed", "cancelled", "stopped"]
 ManagerAutoStopReason = str
 ManagerAutoDirectiveStatus = Literal["pending", "consumed", "superseded", "rejected"]
 ManagerWakeStatus = Literal["queued", "running", "done", "failed", "skipped"]
@@ -39,6 +39,9 @@ class ManagerAutoState(BaseModel):
     chain_limit_basis: ManagerAutoChainLimitBasis = Field(default_factory=ManagerAutoChainLimitBasis)
     active_run_id: str | None = None
     active_job_id: str | None = None
+    view_workboard: bool = False
+    consume_workboard: bool = False
+    last_signaled_board_revision: int | None = None
     stopped_at: str | None = None
     stop_reason: ManagerAutoStopReason | None = None
     stop_message: str | None = None
@@ -74,4 +77,3 @@ class ManagerWakeEvent(BaseModel):
     processor_id: str | None = None
     attempts: int = 0
     error: str | None = None
-

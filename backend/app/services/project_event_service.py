@@ -47,6 +47,7 @@ class ProjectEventService:
         card_id: str | None = None,
         run_id: str | None = None,
         job_id: str | None = None,
+        task_id: str | None = None,
         status: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -67,6 +68,7 @@ class ProjectEventService:
             "card_id": card_id,
             "run_id": run_id,
             "job_id": job_id,
+            "task_id": task_id,
             "status": status,
             "run_status": run_status,
             "card_status": card_status,
