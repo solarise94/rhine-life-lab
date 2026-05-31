@@ -37,7 +37,6 @@ Keep the Manager-facing schema small:
 - `ecosystem`
 - `runtime`
 - `packages`
-- `manager`
 - `timeout_seconds`
 
 ### `ecosystem`
@@ -89,16 +88,11 @@ Examples:
 
 Manager should not be responsible for adding conda-specific prefixes such as `r-` or guessing channel-specific distribution names.
 
-### `manager`
+### Installer Selection
 
-Optional. This selects the package manager family.
+Manager must not provide a package manager selector. Installer choice is a backend policy, not a tool argument.
 
-User-facing allowed intent:
-
-- Python: `conda`, `pip`
-- R: `conda`, `cran`, `bioconductor`
-
-Manager should not choose between `mamba`, `conda`, and `micromamba` directly. That is an execution detail owned by the backend. From Manager's perspective, `conda` means "use the conda-family installation path for this runtime". The backend is responsible for preferring:
+The backend is responsible for preferring:
 
 1. `mamba`
 2. `conda`
@@ -122,35 +116,32 @@ Default solver preference should favor dependency resolution quality and reprodu
 
 ### Python
 
-Default order:
+Default path:
 
 1. conda-family solver path, with backend preference `mamba -> conda -> micromamba`
-2. `pip`
 
 Rationale:
 
 - `mamba` is the preferred solver when available;
 - `conda` is the standard fallback when `mamba` is unavailable;
 - `micromamba` is an acceptable backend fallback when present;
-- `pip` remains useful as a last fallback, but it is weaker for cross-package environment resolution and can leave the runtime in a harder-to-explain state.
+- `pip` is not Manager-selectable through this tool. If conda-family resolution cannot find the package, Manager should surface the failed package name and ask for manual environment preparation or a corrected distribution name.
 
-When Manager does not explicitly request `pip`, backend should default Python installs to the conda-family path first.
+Backend should default Python installs to the conda-family path.
 
 ### R
 
-Default order:
+Default path:
 
 1. conda-family solver path, with backend preference `mamba -> conda -> micromamba`
-2. `cran`
-3. `bioconductor`
 
 Rationale:
 
 - conda-family installation provides pre-built binaries for many R packages and avoids local compilation;
 - CRAN/Bioconductor source installation is slower, noisier, and more failure-prone inside conda R environments;
-- source installs should remain available because some packages may not exist in conda channels, but they are lower-confidence paths.
+- CRAN/Bioconductor source installation is not Manager-selectable through this tool. If needed later, it must be a backend-owned fallback with the runtime `bin` directory prepended to `PATH` so conda compiler wrappers are visible.
 
-When Manager does not explicitly request `cran` or `bioconductor`, backend should default R installs to the conda-family path first for conda R runtimes.
+Backend should default R installs to the conda-family path for conda R runtimes.
 
 ## Preflight Expectations
 
@@ -178,7 +169,7 @@ Package name resolution should be owned by the backend, not by Manager prompt lo
 ### Contract
 
 - Manager sends ecosystem-native package names.
-- Backend resolves concrete installable package specs for the selected manager family.
+- Backend resolves concrete installable package specs for the backend-selected conda-family installer.
 - Backend should prefer repository-backed search and normalization over hardcoded name maps.
 - Only when backend resolution and obvious fallback paths both fail should Manager be asked to search for a different distribution name.
 
@@ -211,7 +202,7 @@ For Python packages:
 - first search the conda-family repositories using the package name as given;
 - backend may normalize simple variants such as lowercase and `-` vs `_`;
 - if a suitable conda-family package is found, install it through the conda-family path;
-- if not found, return a structured failure that can allow a `pip` fallback when appropriate.
+- if not found, return a structured failure with attempted candidates and manual fallback guidance.
 
 ### R Resolution
 
@@ -221,7 +212,7 @@ For R packages:
 - backend should try conda-style candidate forms such as `r-<lowercase(name)>` and other repository-backed matches;
 - backend may use CRAN or Bioconductor registry information as a fallback hint source, but Manager should not have to guess the conda package name itself;
 - if the package is found in the conda-family repositories, install the resolved distribution package;
-- if not found, backend should indicate whether fallback to `cran` or `bioconductor` is the next sensible path.
+- if not found, backend should indicate whether a manual `cran` or `bioconductor` preparation path may be sensible, without asking Manager to retry this tool with a package-manager selector.
 
 This keeps the package-name burden out of the LLM and out of user chat.
 
@@ -310,7 +301,7 @@ Recommended initial error codes:
 
 These codes do not need to cover every edge case. They only need to distinguish:
 
-- fixable manager-side retry choices;
+- corrected package names or user-provided environment preparation choices;
 - missing host/runtime prerequisites;
 - likely manual environment repair cases.
 
@@ -410,7 +401,7 @@ Doc 27 focuses on:
 This document adds the product boundary:
 
 - the tool is not only a repair tool;
-- Python should also prefer the conda-family path before `pip`;
+- Python and R installation should use the backend-selected conda-family path;
 - Manager should use the tool to avoid wasting foreground context on environment installation work;
 - the user-facing contract should stay aligned with the existing background task model used for card execution.
 
@@ -419,10 +410,9 @@ This document adds the product boundary:
 Manager guidance should be updated to express the following:
 
 - Use `install_runtime_dependencies` when explicit Python or R packages need to be added to an already selected non-system runtime.
-- Prefer `conda` for Python when the runtime is conda-based; backend should choose the best available conda-family solver automatically before falling back to `pip`.
-- Prefer `conda` for R packages in conda R runtimes; use `cran` or `bioconductor` only when source installation is truly needed.
+- Do not choose or pass a package manager. Backend should choose the best available conda-family solver automatically.
 - Provide ecosystem-native package names; do not try to guess solver-specific package names such as `r-...`.
-- If a conda-family install fails because the package is not available in the selected channels, Manager may try a source-install fallback (`pip` for Python, `cran` or `bioconductor` for R). If the failure instead indicates a missing runtime, missing solver, or broken host prerequisite, Manager should not retry blindly and should surface the prerequisite to the user.
+- If a conda-family install fails because the package is not available in the selected channels, Manager should not retry with a package manager argument. It should surface the attempted candidates and ask for manual environment preparation or a corrected distribution name.
 - Only ask for external lookup of the real package or distribution name after backend resolution and obvious controlled fallback paths are exhausted.
 - After the tool returns a `job_id`, stop the turn and wait for project-state events or wake events instead of polling.
 - If installation fails because the runtime executable or conda solver is missing, explain the prerequisite clearly instead of retrying blindly.
@@ -433,8 +423,8 @@ P0 for this contract should focus on:
 
 1. align Manager prompt and tool description with the background-task contract;
 2. enforce the same hard async boundary used by card runs;
-3. make Python default to the conda-family path before `pip`;
-4. keep R defaulting to the conda-family path before `cran/bioconductor` for conda R runtimes;
+3. make Python default to the conda-family path;
+4. keep R defaulting to the conda-family path for conda R runtimes;
 5. improve structured error returns for missing runtime/solver and common install failures;
 6. keep project-state event and wake-driven synchronization as the normal path.
 

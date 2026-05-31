@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from hashlib import sha256
 from pathlib import Path
 import re
@@ -134,7 +135,6 @@ class InstallRuntimeDependenciesPayload(BaseModel):
     ecosystem: str
     runtime: str
     packages: list[str] = Field(default_factory=list)
-    manager: str | None = None
     timeout_seconds: int = 600
     source: dict[str, Any] = Field(default_factory=dict)
 
@@ -980,6 +980,7 @@ class ManagerBlueprintTools:
             request_payload,
             self._install_runtime_dependencies_sync,
         )
+        manager_name = self._dependency_manager_label(request_payload["ecosystem"])
         return {
             "ok": True,
             "background": True,
@@ -992,7 +993,7 @@ class ManagerBlueprintTools:
             "ecosystem": request_payload["ecosystem"],
             "runtime": request_payload["runtime"],
             "packages": request_payload["packages"],
-            "manager": request_payload["manager"],
+            "manager": manager_name,
             "message": (
                 f"Started background dependency installation for {request_payload['runtime']} "
                 f"({len(request_payload['packages'])} package{'s' if len(request_payload['packages']) != 1 else ''})."
@@ -1050,12 +1051,12 @@ class ManagerBlueprintTools:
         if not runtime or runtime == "__system__":
             raise ManagerPlanningError("install_runtime_dependencies requires a selected non-system runtime.")
         timeout = max(30, min(int(request.timeout_seconds or 600), 1800))
-        manager_name = self._dependency_manager_label(ecosystem, request.manager)
+        manager_name = self._dependency_manager_label(ecosystem)
         try:
             if ecosystem == "python":
-                command, resolved_runtime = self._python_dependency_command(runtime, packages, request.manager)
+                command, resolved_runtime = self._python_dependency_command(runtime, packages)
             else:
-                command, resolved_runtime = self._r_dependency_command(runtime, packages, request.manager)
+                command, resolved_runtime = self._r_dependency_command(runtime, packages)
         except DependencyResolutionError as exc:
             payload = dict(exc.payload)
             payload.update(
@@ -1071,6 +1072,7 @@ class ManagerBlueprintTools:
             )
             return payload
         started_at = utc_now()
+        run_env = self._dependency_subprocess_env(ecosystem, manager_name, resolved_runtime)
         try:
             result = subprocess.run(
                 command,
@@ -1079,6 +1081,7 @@ class ManagerBlueprintTools:
                 capture_output=True,
                 timeout=timeout,
                 check=False,
+                env=run_env,
             )
         except subprocess.TimeoutExpired as exc:
             return {
@@ -1147,7 +1150,6 @@ class ManagerBlueprintTools:
             "ecosystem": ecosystem,
             "runtime": runtime,
             "packages": packages,
-            "manager": self._dependency_manager_label(ecosystem, request.manager),
             "timeout_seconds": timeout,
             "source": dict(request.source or {}),
         }
@@ -1880,8 +1882,8 @@ class ManagerBlueprintTools:
             raise ManagerPlanningError(f"Unsupported package specifier(s): {', '.join(invalid)}")
         return list(dict.fromkeys(cleaned))
 
-    def _python_dependency_command(self, runtime: str, packages: list[str], manager: str | None) -> tuple[list[str], str]:
-        manager_name = self._dependency_manager_label("python", manager)
+    def _python_dependency_command(self, runtime: str, packages: list[str]) -> tuple[list[str], str]:
+        manager_name = self._dependency_manager_label("python")
         conda_base, env_path = CommandTemplateWorkerAdapter._resolve_conda_runtime(runtime, self.project_service.settings)
         if not env_path.exists():
             raise ManagerPlanningError(f"Python runtime not found: {runtime}")
@@ -1894,8 +1896,8 @@ class ManagerBlueprintTools:
             raise ManagerPlanningError(f"Python executable not found for runtime: {runtime}")
         return [str(python_bin), "-m", "pip", "install", *packages], str(env_path)
 
-    def _r_dependency_command(self, runtime: str, packages: list[str], manager: str | None) -> tuple[list[str], str]:
-        manager_name = self._dependency_manager_label("R", manager)
+    def _r_dependency_command(self, runtime: str, packages: list[str]) -> tuple[list[str], str]:
+        manager_name = self._dependency_manager_label("R")
         rscript = CommandTemplateWorkerAdapter._resolve_rscript_runtime(runtime, self.project_service.settings)
         if rscript is None or not rscript.exists():
             raise ManagerPlanningError(f"R runtime not found: {runtime}")
@@ -1929,19 +1931,18 @@ class ManagerBlueprintTools:
         return [str(rscript), "--vanilla", "-e", expression], str(rscript)
 
     @staticmethod
-    def _dependency_manager_label(ecosystem: str, manager: str | None) -> str:
-        normalized = str(manager or "").strip().lower()
-        if ecosystem == "python":
-            if normalized == "pip":
-                return "pip"
-            return "conda"
-        if normalized in {"conda", "mamba", "micromamba"}:
-            return "conda"
-        if normalized == "cran":
-            return "cran"
-        if normalized == "bioconductor":
-            return "bioconductor"
+    def _dependency_manager_label(ecosystem: str) -> str:
         return "conda"
+
+    @staticmethod
+    def _dependency_subprocess_env(ecosystem: str, manager_name: str, resolved_runtime: str) -> dict[str, str] | None:
+        if ecosystem != "R" or manager_name == "conda":
+            return None
+        runtime_bin = Path(resolved_runtime).parent
+        env = dict(os.environ)
+        prior_path = env.get("PATH", "")
+        env["PATH"] = f"{runtime_bin}{os.pathsep}{prior_path}" if prior_path else str(runtime_bin)
+        return env
 
     @staticmethod
     def _resolve_conda_solver(conda_base: Path) -> Path:

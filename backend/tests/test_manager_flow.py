@@ -2082,19 +2082,32 @@ class ManagerFlowTest(unittest.TestCase):
         settings = get_settings()
         conda_base = Path(self.tmpdir) / "conda"
         rscript = conda_base / "envs" / "R_env" / "bin" / "Rscript"
+        mamba = conda_base / "bin" / "mamba"
         rscript.parent.mkdir(parents=True)
+        mamba.parent.mkdir(parents=True)
         rscript.write_text("#!/bin/sh\n", encoding="utf-8")
+        mamba.write_text("#!/bin/sh\n", encoding="utf-8")
         settings.executor_conda_base = conda_base
 
-        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
-        with patch("app.services.manager_blueprint_tools.subprocess.run", return_value=completed) as run:
+        install_completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
+
+        def fake_run(command, **kwargs):
+            if command[1:3] == ["repoquery", "search"]:
+                return subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout=f"{command[-1]} 1.0 r_0\n",
+                    stderr="",
+                )
+            return install_completed
+
+        with patch("app.services.manager_blueprint_tools.subprocess.run", side_effect=fake_run) as run:
             result = self.manager.blueprint_tools.install_runtime_dependencies(
                 "test-project",
                 {
                     "ecosystem": "r",
                     "runtime": "R_env",
                     "packages": ["GSVA", "limma"],
-                    "manager": "bioconductor",
                 },
             )
             for _ in range(40):
@@ -2107,22 +2120,14 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue(result["background"])
         self.assertEqual("succeeded", status["status"])
         self.assertTrue(status["ok"])
-        command = run.call_args.args[0]
-        self.assertEqual(str(rscript), command[0])
-        self.assertIn("BiocManager::install", command[-1])
-        self.assertIn('"GSVA"', command[-1])
+        self.assertEqual("conda", result["manager"])
+        command = run.call_args_list[-1].args[0]
+        self.assertEqual(str(mamba), command[0])
+        self.assertEqual(["install", "-y", "-p", str(conda_base / "envs" / "R_env"), "-c", "conda-forge", "r-gsva", "r-limma"], command[1:])
 
-    def test_manager_can_force_pip_for_python_dependency_install(self) -> None:
-        settings = get_settings()
-        conda_base = Path(self.tmpdir) / "conda"
-        python_bin = conda_base / "envs" / "rnaseq" / "bin" / "python"
-        python_bin.parent.mkdir(parents=True)
-        python_bin.write_text("#!/bin/sh\n", encoding="utf-8")
-        settings.executor_conda_base = conda_base
-
-        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
-        with patch("app.services.manager_blueprint_tools.subprocess.run", return_value=completed) as run:
-            result = self.manager.blueprint_tools.install_runtime_dependencies(
+    def test_manager_dependency_install_forbids_manager_field(self) -> None:
+        with self.assertRaises(ManagerPlanningError):
+            self.manager.blueprint_tools.install_runtime_dependencies(
                 "test-project",
                 {
                     "ecosystem": "python",
@@ -2131,16 +2136,6 @@ class ManagerFlowTest(unittest.TestCase):
                     "manager": "pip",
                 },
             )
-            for _ in range(40):
-                status = self.manager.blueprint_tools.get_runtime_dependency_install_status("test-project", result["job_id"])
-                if status["status"] in {"succeeded", "failed"}:
-                    break
-                time.sleep(0.01)
-
-        self.assertEqual("succeeded", status["status"])
-        command = run.call_args.args[0]
-        self.assertEqual(str(python_bin), command[0])
-        self.assertEqual(["-m", "pip", "install", "scanpy"], command[1:])
 
     def test_manager_can_start_background_r_conda_dependency_install_against_resolved_r_env(self) -> None:
         settings = get_settings()
@@ -2174,7 +2169,6 @@ class ManagerFlowTest(unittest.TestCase):
                     "ecosystem": "r",
                     "runtime": "R_env",
                     "packages": ["svglite"],
-                    "manager": "mamba",
                 },
             )
             for _ in range(40):
@@ -2234,7 +2228,7 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertEqual("succeeded", status["status"])
         self.assertEqual(["repoquery", "search", "scanpy"], run.call_args_list[0].args[0][1:])
 
-    def test_r_source_dependency_install_marks_stderr_failure_even_with_zero_exit(self) -> None:
+    def test_r_source_dependency_subprocess_env_prepends_runtime_bin(self) -> None:
         settings = get_settings()
         conda_base = Path(self.tmpdir) / "conda"
         rscript = conda_base / "envs" / "R_env" / "bin" / "Rscript"
@@ -2242,31 +2236,14 @@ class ManagerFlowTest(unittest.TestCase):
         rscript.write_text("#!/bin/sh\n", encoding="utf-8")
         settings.executor_conda_base = conda_base
 
-        completed = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout="",
-            stderr="installation of package 'WGCNA' had non-zero exit status\n",
+        env = self.manager.blueprint_tools._dependency_subprocess_env(
+            "R",
+            "cran",
+            str(rscript),
         )
-        with patch("app.services.manager_blueprint_tools.subprocess.run", return_value=completed):
-            result = self.manager.blueprint_tools.install_runtime_dependencies(
-                "test-project",
-                {
-                    "ecosystem": "r",
-                    "runtime": "R_env",
-                    "packages": ["WGCNA"],
-                    "manager": "cran",
-                },
-            )
-            for _ in range(40):
-                status = self.manager.blueprint_tools.get_runtime_dependency_install_status("test-project", result["job_id"])
-                if status["status"] in {"succeeded", "failed"}:
-                    break
-                time.sleep(0.01)
 
-        self.assertEqual("failed", status["status"])
-        self.assertFalse(status["ok"])
-        self.assertEqual("dependency_install_compilation_failed", status["error_code"])
+        self.assertIsNotNone(env)
+        self.assertTrue(env["PATH"].startswith(str(rscript.parent)))
 
     def test_manager_dependency_install_rejects_system_runtime(self) -> None:
         with self.assertRaises(ManagerPlanningError):

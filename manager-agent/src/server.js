@@ -184,7 +184,7 @@ Judgment:
 ${webJudgmentLines.join("\n")}
 - Write project memory only when the user explicitly asks you to remember a durable preference, says a behavior should be the default, or corrects something you should avoid in future. Keep memory summaries short.
 - Card agents cannot ask the user interactively. If a card needs a non-default Python or R runtime, use configure_card_execution on that card before telling the user it is ready.
-- Card executor agents run in a constrained runtime. They must not install missing R or Python packages on their own. If runtime packages are missing or the user explicitly wants packages added to a selected non-system runtime, you may use install_runtime_dependencies with explicit package names to start a background install job, then stop the current turn and wait for the dependency-install wake event. Prefer manager "conda" for conda-based runtimes unless you specifically need pip, cran, or bioconductor. Backend will pick the best available conda-family solver automatically. If installation fails or the missing dependency is a system tool, tell the user exactly what dependency must be prepared.
+- Card executor agents run in a constrained runtime. They must not install missing R or Python packages on their own. If runtime packages are missing or the user explicitly wants packages added to a selected non-system runtime, you may use install_runtime_dependencies with explicit package names to start a background install job, then stop the current turn and wait for the dependency-install wake event. Do not pass or invent a package manager; backend always picks the conda-family solver automatically. If installation fails or the missing dependency is a system tool, tell the user exactly what dependency must be prepared.
 - Search the skill/MCP library only when a card clearly may benefit from reusable execution abilities. The list/search tools are intentionally id/name-only; read one item detail only if the id/name is ambiguous.
 - If a task looks like a stable repeated workflow, search_card_templates before creating a new analysis card from scratch.
 - When a template requires script assets, ask the user which project script assets to bind before instantiate_card_template or before starting the card. Do not make card agents ask the user for bindings.
@@ -779,17 +779,15 @@ function dependencyInstallRetryHint(details = {}) {
   const attempted = Array.isArray(details.attempted_candidates) ? details.attempted_candidates.filter(Boolean) : [];
   const requestedPackage = details.requested_package || "the requested package";
   if (errorCode === "package_not_found_in_conda_channels") {
-    if (fallback.length) {
-      return `Conda channels do not contain ${requestedPackage}. Retry install_runtime_dependencies with manager=${fallback[0]} if that fallback fits; attempted candidates: ${attempted.join(", ") || "none"}.`;
-    }
-    return `Conda channels do not contain ${requestedPackage}. Do not blindly retry the same conda install; verify the real distribution name first.`;
+    const fallbackText = fallback.length ? ` Possible manual fallback families: ${fallback.join(", ")}.` : "";
+    return `Conda channels do not contain ${requestedPackage}. Do not retry install_runtime_dependencies with a manager argument; verify the real distribution name or tell the user manual environment preparation is needed. Attempted candidates: ${attempted.join(", ") || "none"}.${fallbackText}`;
   }
   if (errorCode === "github_source_install_not_supported" || errorCode === "external_source_install_not_supported") {
     return "Do not retry install_runtime_dependencies with source URLs, GitHub repos, or tarballs. Use a registry-backed package name or ask for a separate manual environment-preparation workflow.";
   }
   if (errorCode === "dependency_install_compilation_failed") {
     if (fallback.length) {
-      return `The source-style install path failed during compilation. Prefer a binary-backed retry with manager=${fallback[0]} if available; otherwise the runtime likely needs manual preparation.`;
+      return `The source-style install path failed during compilation. Do not retry with a manager argument; use backend default conda-family install or tell the user the runtime needs manual preparation.`;
     }
     return "The install failed during compilation. Prefer a binary-backed package source when possible, or tell the user the runtime needs manual preparation.";
   }
@@ -1859,12 +1857,11 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "install_runtime_dependencies",
       label: "Install runtime dependencies",
-      description: "Start a background job that installs explicitly named Python or R packages into an already selected non-system runtime. Use only for clear package lists. Prefer manager `conda` for conda-based runtimes unless you specifically need `pip`, `cran`, or `bioconductor`; backend will choose the best available conda-family solver automatically. After a successful start, report the job_id and stop this turn; do not poll status with get_runtime_dependency_install_status in the same turn.",
+      description: "Start a background job that installs explicitly named Python or R packages into an already selected non-system runtime. Use only for clear package lists. Do not choose or pass an installer; backend will choose the best available conda-family solver automatically. After a successful start, report the job_id and stop this turn; do not poll status with get_runtime_dependency_install_status in the same turn.",
       parameters: Type.Object({
         ecosystem: Type.String({ description: "python or R" }),
         runtime: Type.String({ description: "Selected non-system runtime name, such as omicverse, rnaseq, or R_env. Do not use __system__." }),
         packages: Type.Array(Type.String({ description: "Package names or simple Python version specs." })),
-        manager: Type.Optional(Type.String({ description: "For python: conda or pip. For R: conda, cran, or bioconductor. Use ecosystem-native package names; backend resolves conda-family package names and chooses the best available conda-family solver automatically." })),
         timeout_seconds: Type.Optional(Type.Number()),
       }),
       execute: async (toolCallId, params, signal) => {
