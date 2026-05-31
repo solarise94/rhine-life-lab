@@ -102,14 +102,17 @@ check_unknown_blueprint_env_keys() {
     BLUEPRINT_REVIEWER_MAX_TURNS
     BLUEPRINT_REVIEWER_MODEL
   )
-  local known_blob
-  known_blob="$(printf '\n%s\n' "${known_keys[@]}")"
+  local -A known_set=()
+  local known_key
+  for known_key in "${known_keys[@]}"; do
+    known_set["${known_key}"]=1
+  done
   local line key
   while IFS= read -r line; do
     line="${line#"${line%%[![:space:]]*}"}"
     [[ -n "${line}" && "${line}" != \#* && "${line}" == BLUEPRINT_*"="* ]] || continue
     key="${line%%=*}"
-    if [[ "${known_blob}" != *$'\n'"${key}"$'\n'* ]]; then
+    if [[ -z "${known_set[$key]+x}" ]]; then
       warn_deploy "Unknown BLUEPRINT_* key in .env will not be written to managed env files: ${key}"
     fi
   done < "${env_file}"
