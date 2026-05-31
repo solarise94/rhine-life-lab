@@ -17,6 +17,7 @@ import { CardStatusBadge } from "./CardStatusBadge";
 import { SpecialistAvatar } from "./SpecialistAvatar";
 import { FileBag } from "./FileBag";
 import { CardPage, EMPTY_CARD_PAGE_BY_ID, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
+import { latestManagerReview } from "@/lib/card-review";
 
 function preferredExecutorProfile(profiles: ExecutorProfile[], workerType?: string) {
   if (!workerType) return profiles[0];
@@ -80,6 +81,7 @@ export function ModuleCard({
   const setCardPage = useWorkspaceUiStore((s) => s.setCardPage);
   const storedPage = cardPages[card.card_id];
   const fileCount = card.outputs.filter((o) => o.asset_id).length;
+  const visibleManagerReview = latestManagerReview(card.manager_review);
 
   const isGhost = card.status === "proposed";
   const isRunning = card.status === "running" || card.status === "reviewing";
@@ -287,9 +289,9 @@ export function ModuleCard({
                     </ul>
                   ) : <div>暂无关键结果</div>}
                 </div>
-                {card.manager_review ? (
+                {visibleManagerReview ? (
                   <div style={{ fontSize: 11, color: "var(--amber-dark)", marginTop: 8, fontWeight: 500, padding: "6px 8px", background: "var(--amber-bg)", borderRadius: 6 }}>
-                    评审: {card.manager_review}
+                    评审: {visibleManagerReview}
                   </div>
                 ) : null}
                 

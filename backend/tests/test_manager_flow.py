@@ -1486,6 +1486,47 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertEqual(result["card"]["summary"], "new summary")
         self.assertEqual("accepted", result["card"]["status"])
 
+    def test_annotate_card_can_append_manager_review_without_replacing_status_text(self) -> None:
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        cards.append(
+            Card.model_validate(
+                {
+                    "card_id": "card_append_review",
+                    "card_type": "module",
+                    "title": "Append review",
+                    "status": "accepted",
+                    "step": 1,
+                    "summary": "s",
+                    "manager_review": "Reviewer accepted this run.",
+                }
+            )
+        )
+        store.save_cards(cards)
+
+        result = self.manager.blueprint_tools.annotate_card(
+            "test-project",
+            {"card_id": "card_append_review", "manager_review_append": "Manager note: keep this result."},
+        )
+
+        self.assertEqual("accepted", result["card"]["status"])
+        self.assertEqual(
+            "Reviewer accepted this run.\n\nManager note: keep this result.",
+            result["card"]["manager_review"],
+        )
+
+    def test_annotate_card_rejects_ambiguous_manager_review_edit(self) -> None:
+        with self.assertRaises(CardWriteValidationError) as ctx:
+            self.manager.blueprint_tools.annotate_card(
+                "test-project",
+                {
+                    "card_id": "card_enrichment_group",
+                    "manager_review": "replace",
+                    "manager_review_append": "append",
+                },
+            )
+        self.assertEqual("ambiguous_manager_review_edit", ctx.exception.payload["errors"][0]["code"])
+
     def test_annotate_card_merges_against_latest_locked_card_state(self) -> None:
         store = self.project_service.graph_store("test-project")
         cards = store.load_cards()

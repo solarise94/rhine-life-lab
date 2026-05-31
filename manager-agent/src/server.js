@@ -201,7 +201,7 @@ ${webJudgmentLines.join("\n")}
 Card fields:
 - create_card requires title, summary, and usually outputs.
 - revise_card_plan requires exact card_id; it is a selector, not a replacement identity field.
-- annotate_card requires exact card_id and is for title/summary/note changes only.
+- annotate_card requires exact card_id and is for title/summary/note changes only. Use manager_review only when replacing the displayed note is intended; use manager_review_append to add a note while preserving existing review/status text.
 - step is optional and controls timeline grouping.
 - Inputs are selected asset ids, shaped like { asset_id }. Use exact asset ids from find_assets or planned upstream outputs from card detail.
 - Outputs are explicit semantic contracts shaped like { role, artifact_class, description? }.
@@ -1756,12 +1756,13 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "annotate_card",
       label: "Annotate card",
-      description: "Update display-only card text without changing execution semantics. Use this for title, summary, or manager_review/note changes. Do not use this for step, inputs, outputs, or dependency repair.",
+      description: "Update display-only card text without changing execution semantics. Use title/summary for direct edits, manager_review for explicit replacement, or manager_review_append to add a note without replacing existing review text. Do not use this for step, inputs, outputs, or dependency repair.",
       parameters: Type.Object({
         card_id: Type.String(),
         title: Type.Optional(Type.String()),
         summary: Type.Optional(Type.String()),
         manager_review: Type.Optional(Type.String()),
+        manager_review_append: Type.Optional(Type.String()),
       }),
       execute: async (toolCallId, params, signal) => {
         const { card_id: cardId, ...body } = params;

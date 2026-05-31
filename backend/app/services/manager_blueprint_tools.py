@@ -199,6 +199,7 @@ class AnnotateCardPayload(BaseModel):
     title: str | None = None
     summary: str | None = None
     manager_review: str | None = None
+    manager_review_append: str | None = None
 
 
 class CardWriteValidationError(ManagerPlanningError):
@@ -697,7 +698,24 @@ class ManagerBlueprintTools:
         except ValidationError as exc:
             raise CardWriteValidationError(self._payload_validation_error_response("annotate", payload, exc)) from exc
         card_id = str(request.card_id or "").strip()
-        if request.title is None and request.summary is None and request.manager_review is None:
+        if request.manager_review is not None and request.manager_review_append is not None:
+            raise CardWriteValidationError(
+                {
+                    "ok": False,
+                    "error_type": "card_write_validation_failed",
+                    "action": "annotate",
+                    "errors": [
+                        {
+                            "code": "ambiguous_manager_review_edit",
+                            "field": "manager_review",
+                            "card_id": card_id,
+                            "message": "Use either manager_review for explicit replacement or manager_review_append for append-only edits, not both.",
+                            "blocking": True,
+                        }
+                    ],
+                }
+            )
+        if request.title is None and request.summary is None and request.manager_review is None and request.manager_review_append is None:
             raise CardWriteValidationError(
                 {
                     "ok": False,
@@ -708,7 +726,7 @@ class ManagerBlueprintTools:
                             "code": "no_annotation_fields_provided",
                             "field": None,
                             "card_id": card_id,
-                            "message": "annotate_card requires at least one of title, summary, or manager_review.",
+                            "message": "annotate_card requires at least one of title, summary, manager_review, or manager_review_append.",
                             "blocking": True,
                         }
                     ],
@@ -754,13 +772,21 @@ class ManagerBlueprintTools:
                             }
                         ],
                     }
-                )
+            )
             previous = cards[index]
+            manager_review = previous.manager_review
+            if request.manager_review is not None:
+                manager_review = request.manager_review
+            elif request.manager_review_append is not None:
+                append_text = request.manager_review_append.strip()
+                if append_text:
+                    current = str(previous.manager_review or "").strip()
+                    manager_review = f"{current}\n\n{append_text}" if current else append_text
             updated = previous.model_copy(
                 update={
                     "title": request.title if request.title is not None else previous.title,
                     "summary": request.summary if request.summary is not None else previous.summary,
-                    "manager_review": request.manager_review if request.manager_review is not None else previous.manager_review,
+                    "manager_review": manager_review,
                 }
             )
             cards[index] = updated

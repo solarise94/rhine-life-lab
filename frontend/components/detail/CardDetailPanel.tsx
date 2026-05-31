@@ -3,6 +3,7 @@
 import { Card, ProjectSummary, RunEvent, RunRecord, WorkItem } from "@/lib/types";
 import { CardStatusBadge } from "@/components/cards/CardStatusBadge";
 import { SpecialistAvatar } from "@/components/cards/SpecialistAvatar";
+import { latestManagerReview } from "@/lib/card-review";
 
 export function CardDetailPanel({
   card,
@@ -28,6 +29,7 @@ export function CardDetailPanel({
       </section>
     );
   }
+  const visibleManagerReview = latestManagerReview(card.manager_review);
 
   return (
     <section className="panel">
@@ -125,7 +127,7 @@ export function CardDetailPanel({
         </div>
         <div className="meta-block">
           <h4>Manager Review</h4>
-          <div className="meta-text" style={{ lineHeight: 1.5 }}>{card.manager_review || "Pending manager review."}</div>
+          <div className="meta-text" style={{ lineHeight: 1.5 }}>{visibleManagerReview || "Pending manager review."}</div>
         </div>
         <div className="meta-block">
           <h4>Key Findings</h4>

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ChevronDown, ChevronUp, ExternalLink, FileText, FolderOpen, Send, Terminal, Trash2, RotateCcw } from "lucide-react";
 import { Card } from "@/lib/types";
 import { useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
+import { latestManagerReview } from "@/lib/card-review";
 
 export function FileBag({
   projectId,
@@ -29,6 +30,7 @@ export function FileBag({
   const results = card.outputs.filter((o) => o.asset_id);
   const logs = card.linked_runs.length > 0 ? [{ id: `log-${card.card_id}`, label: "运行日志" }] : [];
   const isArchive = mode === "archive";
+  const visibleManagerReview = latestManagerReview(card.manager_review);
   const actions = [
     { label: "发送给 Manager", icon: Send, action: () => addAttachment(projectId, { type: "card", id: card.card_id, label: card.title }) },
   ];
@@ -65,7 +67,7 @@ export function FileBag({
               <Trash2 size={12} />
               已归档
             </div>
-            <div className="archive-summary">{card.manager_review || card.summary || "这张卡片已放入归档袋。"} </div>
+            <div className="archive-summary">{visibleManagerReview || card.summary || "这张卡片已放入归档袋。"} </div>
             <div className="archive-meta">
               <div>Card ID: {card.card_id}</div>
               <div>Linked runs: {card.linked_runs.length || 0}</div>
