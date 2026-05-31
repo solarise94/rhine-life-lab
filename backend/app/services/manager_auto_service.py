@@ -184,6 +184,27 @@ class ManagerAutoService:
             raise HTTPException(status_code=409, detail="Only the auto owner session may settle an auto turn.")
         return self.evaluate_workboard_and_maybe_signal(project_id, session_id, from_turn_settlement=async_boundary)
 
+    def notify_background_task_terminal(
+        self,
+        project_id: str,
+        *,
+        run_id: str | None = None,
+        job_id: str | None = None,
+    ) -> ManagerAutoState:
+        state = self.get_state(project_id)
+        owner_session_id = state.owner_session_id
+        if not state.enabled or not owner_session_id:
+            return state
+        clear_active_run = run_id is not None
+        clear_active_job = job_id is not None
+        if clear_active_run or clear_active_job:
+            state = self.set_runtime_state(
+                project_id,
+                clear_active_run=clear_active_run,
+                clear_active_job=clear_active_job,
+            )
+        return self.evaluate_workboard_and_maybe_signal(project_id, owner_session_id)
+
     def pending_directives(self, project_id: str) -> list[ManagerAutoDirective]:
         state = self.get_state(project_id)
         return [item.model_copy(deep=True) for item in state.pending_directives if item.status == "pending"]

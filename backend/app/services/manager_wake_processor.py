@@ -91,28 +91,12 @@ class ManagerWakeProcessor:
             self.manager_wake_service.mark_done(project_id, wake_event.wake_id)
             return
         try:
-            TERMINAL_RUN_WAKE_KINDS = {
-                "card_run_reviewed",
-                "card_run_failed",
-                "card_run_cancelled",
-                "manifest_validation_failed",
-                "executor_validation_failed",
-                "runtime_dependency_missing",
-                "run_filesystem_audit_failed",
-            }
-            clear_active_run = wake_event.kind in TERMINAL_RUN_WAKE_KINDS
-            clear_active_job = wake_event.kind in {
-                "runtime_dependency_install_succeeded",
-                "runtime_dependency_install_failed",
-            }
             self.manager_auto_service.set_runtime_state(
                 project_id,
                 state_value="thinking",
                 last_wake_id=wake_event.wake_id,
-                clear_active_run=clear_active_run,
-                clear_active_job=clear_active_job,
-                active_run_id=None if clear_active_run else (wake_event.run_id or auto_state.active_run_id),
-                active_job_id=None if clear_active_job else (wake_event.job_id or auto_state.active_job_id),
+                active_run_id=wake_event.run_id or auto_state.active_run_id,
+                active_job_id=wake_event.job_id or auto_state.active_job_id,
             )
             workboard_service = self.manager_auto_service.background_workboard_service
             workboard_snapshot = (

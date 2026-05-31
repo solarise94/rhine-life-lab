@@ -63,9 +63,13 @@ def get_chat_job_service() -> ChatJobService:
 def get_runtime_dependency_job_service() -> RuntimeDependencyJobService:
     return RuntimeDependencyJobService(
         get_project_service(),
-        manager_wake_service=get_manager_wake_service(),
         project_event_service=get_project_event_service(),
         background_task_service=get_background_task_service(),
+        background_terminal_callback=lambda project_id, run_id=None, job_id=None: get_manager_auto_service().notify_background_task_terminal(
+            project_id,
+            run_id=run_id,
+            job_id=job_id,
+        ),
     )
 
 
@@ -91,9 +95,13 @@ def get_worker_service() -> WorkerService:
         get_manifest_service(),
         get_runtime_approval_service(),
         get_library_registry_service(),
-        get_manager_wake_service(),
         project_event_service=get_project_event_service(),
         background_task_service=get_background_task_service(),
+        background_terminal_callback=lambda project_id, run_id=None, job_id=None: get_manager_auto_service().notify_background_task_terminal(
+            project_id,
+            run_id=run_id,
+            job_id=job_id,
+        ),
     )
 
 

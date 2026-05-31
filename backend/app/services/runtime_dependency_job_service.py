@@ -5,12 +5,12 @@ from dataclasses import dataclass, field
 import logging
 from threading import Lock
 import traceback
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
+from fastapi import HTTPException
+
 from app.services.background_task_service import BackgroundTaskService
-from app.models.manager_auto import ManagerWakeEvent, ManagerWakeSource
-from app.services.manager_wake_service import ManagerWakeService
 from app.services.project_event_service import ProjectEventService
 from app.services.project_service import ProjectService
 from app.services.utils import atomic_write_json, read_json, utc_now
@@ -40,18 +40,18 @@ class RuntimeDependencyJobService:
         self,
         project_service: ProjectService,
         max_workers: int = 2,
-        manager_wake_service: ManagerWakeService | None = None,
         project_event_service: ProjectEventService | None = None,
         background_task_service: BackgroundTaskService | None = None,
+        background_terminal_callback: Callable[[str, str | None, str | None], None] | None = None,
     ) -> None:
         self.project_service = project_service
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="runtime-deps")
         self.jobs: dict[str, RuntimeDependencyJob] = {}
         self.lock = Lock()
         self.runtime_locks: dict[tuple[str, str], Lock] = {}
-        self.manager_wake_service = manager_wake_service
         self.project_event_service = project_event_service
         self.background_task_service = background_task_service or BackgroundTaskService(project_service)
+        self.background_terminal_callback = background_terminal_callback
 
     def submit(self, project_id: str, payload: dict[str, Any], handler) -> RuntimeDependencyJob:
         task = self.background_task_service.create_task(
@@ -131,7 +131,7 @@ class RuntimeDependencyJobService:
                 )
                 self._persist_project_jobs_locked(job.project_id)
                 self._emit_project_event(job)
-                self._emit_wake_event(job, ok=False, message=job.error or "Dependency installation failed.")
+            self._notify_background_terminal(job.project_id, job_id=job.job_id)
             return
         with self.lock:
             job.status = "succeeded" if result.get("ok") else "failed"
@@ -148,7 +148,7 @@ class RuntimeDependencyJobService:
             )
             self._persist_project_jobs_locked(job.project_id)
             self._emit_project_event(job)
-            self._emit_wake_event(job, ok=bool(result.get("ok")), message=job.error or str(result.get("message") or "Dependency installation completed."))
+        self._notify_background_terminal(job.project_id, job_id=job.job_id)
 
     def _emit_project_event(self, job: RuntimeDependencyJob) -> None:
         if self.project_event_service is None:
@@ -251,36 +251,27 @@ class RuntimeDependencyJobService:
             ],
         )
 
-    def _emit_wake_event(self, job: RuntimeDependencyJob, *, ok: bool, message: str) -> None:
-        if self.manager_wake_service is None:
+    def _notify_background_terminal(self, project_id: str, *, job_id: str | None = None) -> None:
+        if self.background_terminal_callback is None:
             return
-        source_payload = job.payload.get("source") if isinstance(job.payload, dict) else {}
-        source = source_payload if isinstance(source_payload, dict) else {}
-        kind = "runtime_dependency_install_succeeded" if ok else "runtime_dependency_install_failed"
-        event = ManagerWakeEvent(
-            wake_id=f"wake_{uuid4().hex[:12]}",
-            project_id=job.project_id,
-            kind=kind,
-            source_type="dependency_job",
-            source_id=job.job_id,
-            card_id=source.get("card_id"),
-            run_id=source.get("run_id"),
-            job_id=job.job_id,
-            severity="info" if ok else "warning",
-            message=message,
-            payload_summary={
-                "runtime": job.payload.get("runtime") if isinstance(job.payload, dict) else None,
-                "packages": job.payload.get("packages") if isinstance(job.payload, dict) else None,
-                "job_status": job.status,
-            },
-            source=ManagerWakeSource(
-                card_id=source.get("card_id"),
-                run_id=source.get("run_id"),
-                wake_id=source.get("wake_id"),
-                reason=source.get("reason"),
-                job_id=job.job_id,
-            ),
-            idempotency_key=f"depjob:{job.job_id}:{'succeeded' if ok else 'failed'}",
-            created_at=utc_now(),
-        )
-        self.manager_wake_service.enqueue(event)
+        try:
+            self.background_terminal_callback(project_id, None, job_id)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                logger.debug(
+                    "Skipping background terminal notification for missing project=%s job=%s",
+                    project_id,
+                    job_id,
+                )
+                return
+            logger.exception(
+                "Failed to notify background terminal state for project=%s job=%s",
+                project_id,
+                job_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to notify background terminal state for project=%s job=%s",
+                project_id,
+                job_id,
+            )

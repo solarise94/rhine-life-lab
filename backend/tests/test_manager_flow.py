@@ -981,8 +981,12 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertEqual("处理完成", updated.messages[0].content)
 
     def test_auto_wake_persists_stream_timeline_for_visible_manager_process(self) -> None:
-        auto_service = ManagerAutoService(self.project_service)
         wake_service = ManagerWakeService(self.project_service)
+        auto_service = ManagerAutoService(
+            self.project_service,
+            background_workboard_service=self.background_workboard_service,
+            manager_wake_service=wake_service,
+        )
         chat_session_service = ChatSessionService(self.project_service, auto_service)
         session = chat_session_service.create_session("test-project")
         auto_service.enable("test-project", session.session_id)
@@ -990,10 +994,9 @@ class ManagerFlowTest(unittest.TestCase):
             ManagerWakeEvent(
                 wake_id="wake_visible",
                 project_id="test-project",
-                kind="card_run_reviewed",
-                source_type="card",
-                source_id="card_deg_module",
-                card_id="card_deg_module",
+                kind="workboard_actionable",
+                source_type="workboard",
+                source_id="workboard:1",
                 message="测试自动唤醒",
                 idempotency_key="wake-visible",
                 created_at="2026-05-28T00:00:00Z",
@@ -1023,8 +1026,12 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertFalse(manager_service.chat_called)
 
     def test_auto_wake_stream_error_settles_partial_message(self) -> None:
-        auto_service = ManagerAutoService(self.project_service)
         wake_service = ManagerWakeService(self.project_service)
+        auto_service = ManagerAutoService(
+            self.project_service,
+            background_workboard_service=self.background_workboard_service,
+            manager_wake_service=wake_service,
+        )
         chat_session_service = ChatSessionService(self.project_service, auto_service)
         session = chat_session_service.create_session("test-project")
         auto_service.enable("test-project", session.session_id)
@@ -1032,10 +1039,9 @@ class ManagerFlowTest(unittest.TestCase):
             ManagerWakeEvent(
                 wake_id="wake_broken",
                 project_id="test-project",
-                kind="card_run_reviewed",
-                source_type="card",
-                source_id="card_deg_module",
-                card_id="card_deg_module",
+                kind="workboard_actionable",
+                source_type="workboard",
+                source_id="workboard:1",
                 message="测试自动唤醒中断",
                 idempotency_key="wake-broken",
                 created_at="2026-05-28T00:00:00Z",
@@ -1114,6 +1120,75 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertFalse(auto_state.enabled)
         self.assertEqual("provider_api_error", auto_state.stop_reason)
         self.assertFalse(manager_service.chat_called)
+
+    def test_auto_run_terminal_state_emits_workboard_wake_only(self) -> None:
+        wake_service = ManagerWakeService(self.project_service)
+        auto_service = ManagerAutoService(
+            self.project_service,
+            background_workboard_service=self.background_workboard_service,
+            manager_wake_service=wake_service,
+        )
+        worker = WorkerService(
+            self.project_service,
+            self.manifest_service,
+            self.runtime_approval_service,
+            background_task_service=self.background_task_service,
+            background_terminal_callback=lambda project_id, run_id=None, job_id=None: auto_service.notify_background_task_terminal(
+                project_id,
+                run_id=run_id,
+                job_id=job_id,
+            ),
+        )
+        worker.executor_validation_service.reviewer_worker.review = _stub_reviewer_pass
+        auto_service.enable("test-project", "sess_auto")
+
+        run = worker.start_run("test-project", "card_enrichment_group")
+        self._wait_for_run("test-project", run["run_id"])
+
+        deadline = time.time() + 2
+        wakes: list[ManagerWakeEvent] = []
+        while time.time() < deadline:
+            wakes = wake_service.list_recent("test-project")
+            if wakes:
+                break
+            time.sleep(0.05)
+        self.assertEqual(["workboard_actionable"], [item.kind for item in wakes])
+        self.assertEqual("active", auto_service.get_state("test-project").state)
+
+    def test_auto_dependency_terminal_state_emits_workboard_wake_only(self) -> None:
+        wake_service = ManagerWakeService(self.project_service)
+        auto_service = ManagerAutoService(
+            self.project_service,
+            background_workboard_service=self.background_workboard_service,
+            manager_wake_service=wake_service,
+        )
+        service = RuntimeDependencyJobService(
+            self.project_service,
+            background_task_service=self.background_task_service,
+            background_terminal_callback=lambda project_id, run_id=None, job_id=None: auto_service.notify_background_task_terminal(
+                project_id,
+                run_id=run_id,
+                job_id=job_id,
+            ),
+        )
+        auto_service.enable("test-project", "sess_auto")
+
+        job = service.submit(
+            "test-project",
+            {
+                "ecosystem": "python",
+                "runtime": "rnaseq",
+                "packages": ["scanpy"],
+                "manager": "conda",
+                "source": {"card_id": "card_enrichment_group"},
+            },
+            lambda _project_id, _payload: {"ok": True, "message": "done"},
+        )
+        job.future.result(timeout=2)
+
+        wakes = wake_service.list_recent("test-project")
+        self.assertEqual(["workboard_actionable"], [item.kind for item in wakes])
+        self.assertEqual("active", auto_service.get_state("test-project").state)
 
     def test_delete_chat_session_removes_persisted_thread(self) -> None:
         first = self.chat_session_service.create_session("test-project", "第一条")
