@@ -9,6 +9,16 @@ from app.models.output_contracts import CreatedAssetRecord, TaskOutputSpec
 
 
 ManifestStatus = Literal["success", "failed", "partial"]
+FailureReasonCode = Literal[
+    "runtime_dependency_missing",
+    "input_missing",
+    "input_invalid",
+    "permission_denied",
+    "tool_unavailable",
+    "execution_error",
+    "contract_violation",
+    "unknown",
+]
 
 
 class TaskPacketAsset(BaseModel):
@@ -76,6 +86,11 @@ class CodeArtifact(BaseModel):
     sha256: str | None = None
 
 
+class ManagerReport(BaseModel):
+    summary: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ValidationIssue(BaseModel):
     severity: Literal["info", "warning", "error"]
     code: str
@@ -92,6 +107,7 @@ class ExecutorValidationReport(BaseModel):
 
 
 class Manifest(BaseModel):
+    schema_version: str | None = None
     run_id: str
     status: ManifestStatus
     summary: str
@@ -104,6 +120,47 @@ class Manifest(BaseModel):
     key_findings: list[str] = Field(default_factory=list)
     recommended_graph_updates: list[dict[str, Any]] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    manager_report: ManagerReport | None = None
+
+
+class ExecutorManifestV2(BaseModel):
+    schema_version: Literal["executor_manifest.v2"]
+    summary: str
+    created_assets: list[CreatedAssetRecord] = Field(default_factory=list)
+    code_artifacts: list[CodeArtifact] = Field(default_factory=list)
+    manager_report: ManagerReport = Field(default_factory=ManagerReport)
+
+
+class ExecutorCompletionReport(BaseModel):
+    schema_version: Literal["executor_completion.v1"]
+    candidate_manifest_path: str
+    canonical_manifest: dict[str, Any] | None = None
+
+
+class ExecutorFailureReport(BaseModel):
+    schema_version: Literal["executor_failure.v1"]
+    reason_code: FailureReasonCode = "unknown"
+    summary: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class TerminalReport(BaseModel):
+    schema_version: Literal["executor_terminal_report.v1"]
+    run_id: str
+    terminal_kind: Literal["report_complete", "report_fail", "synthetic_failure"]
+    accepted_at: str
+    summary: str
+    reason_code: FailureReasonCode | None = None
+    status: Literal["pending_review", "failed"] = "failed"
+    completion_report_path: str | None = None
+    failure_report_path: str | None = None
+    candidate_manifest_path: str | None = None
+
+
+class ExecutorResultState(BaseModel):
+    schema_version: Literal["executor_result_state.v1"] = "executor_result_state.v1"
+    report_complete_failure_count: int = 0
+    last_validation_errors: list[str] = Field(default_factory=list)
 
 
 class ManifestReviewContext(BaseModel):

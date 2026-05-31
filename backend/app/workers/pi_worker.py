@@ -16,7 +16,7 @@ class PiWorkerAdapter(AgentCliWorkerAdapter):
     ]
     notes = [
         "Requires BLUEPRINT_PI_COMMAND to point at a real non-interactive pi CLI or wrapper.",
-        "The pi agent must write manifest.json, manager_brief.json, and preserved code artifacts.",
+        "The pi agent must write manifest.candidate.json, call report_executor_result.py, and preserve code artifacts.",
         "DeepSeek is used by the backend validator/reviewer through the Manager AI configuration, not as a pi fallback executor.",
     ]
 

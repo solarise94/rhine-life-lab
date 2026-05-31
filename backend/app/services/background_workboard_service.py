@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.models.background import BackgroundWorkboardState, BackgroundWorkboardView, WorkboardItemRecord
+from app.models.runs import ExecutorFailureReport
 from app.services.background_task_service import BackgroundTaskService
 from app.services.flow_service import FlowService
 from app.services.project_service import ProjectService
@@ -470,6 +471,31 @@ class BackgroundWorkboardService:
         return derived
 
     def _classify_run_issue(self, project_id: str, run_id: str) -> dict[str, Any]:
+        run_dir = self.project_service.project_path(project_id) / "runs" / run_id
+        failure_path = run_dir / "executor_failure.json"
+        if failure_path.exists():
+            try:
+                failure = ExecutorFailureReport.model_validate(json.loads(failure_path.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, ValueError):
+                failure = None
+            if failure is not None:
+                mapping = {
+                    "runtime_dependency_missing": ("runtime_dependency_missing", "install_runtime_dependencies"),
+                    "input_missing": ("input_blocked", "ask_user_or_inspect_inputs"),
+                    "input_invalid": ("input_blocked", "ask_user_or_inspect_inputs"),
+                    "permission_denied": ("permission_blocked", "request_permission_or_reconfigure"),
+                    "tool_unavailable": ("tool_unavailable", "configure_runtime_or_tool"),
+                    "execution_error": ("execution_error", "inspect_run_failure"),
+                    "contract_violation": ("contract_violation", "repair_executor_contract_or_rerun"),
+                    "unknown": ("generic_run_failed", "inspect_run_failure"),
+                }
+                kind, action = mapping.get(failure.reason_code, ("generic_run_failed", "inspect_run_failure"))
+                return {
+                    "kind": kind,
+                    "recommended_action": action,
+                    "message": failure.summary,
+                    "payload": failure.model_dump(exclude_none=True),
+                }
         events = self.project_service.graph_store(project_id).load_run_events(run_id)
         for event in reversed(events):
             if event.event_type == "runtime_dependency_missing":

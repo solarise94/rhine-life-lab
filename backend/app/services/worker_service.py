@@ -30,6 +30,9 @@ from app.models.executor import (
 from app.models.graph import Asset, Claim, Module, ReportItem, RunRecord
 from app.models.output_contracts import CardOutputSpec
 from app.models.runs import (
+    ExecutorCompletionReport,
+    ExecutorFailureReport,
+    FailureReasonCode,
     ExpectedOutput,
     Manifest,
     RunContext,
@@ -38,6 +41,7 @@ from app.models.runs import (
     TaskPacketAsset,
     TaskPacketCardInput,
     TaskPacketCardOutput,
+    TerminalReport,
 )
 from app.services.app_config_service import AppConfigService
 from app.services.artifact_format_service import default_format_for_artifact_class
@@ -931,8 +935,8 @@ class WorkerService:
 
             ModuleGroupStateService.sync_linked_module_status_from_card(card, graph.modules)
             ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
-            brief = self._load_manager_brief(project_id, run_id)
-            run.summary = brief.get("final_report", {}).get("summary") or review_context.summary
+            manifest = self.manifest_service.load_manifest(project_id, run_id)
+            run.summary = self.manifest_service.manager_summary(manifest) or review_context.summary
             store.save_graph(graph)
             store.save_cards(cards)
             self._update_background_task_for_run(project_id, run_id, run.task_id, run.status, run.summary)
@@ -1048,7 +1052,24 @@ class WorkerService:
                 before_snapshot,
                 sandboxed=sandboxed,
             )
-            dependency_issue_message, dependency_issue_payload = self._blocking_dependency_issue(project_id, run_id)
+            terminal_report = self._load_terminal_report(project_id, run_id)
+            if terminal_report is not None and terminal_report.terminal_kind in {"report_fail", "synthetic_failure"}:
+                failure_report = self._load_executor_failure_report(project_id, run_id)
+                if failure_report is None:
+                    failure_report = ExecutorFailureReport(
+                        schema_version="executor_failure.v1",
+                        reason_code=terminal_report.reason_code or "unknown",
+                        summary=terminal_report.summary,
+                        details={},
+                    )
+                self._persist_backend_manager_brief(project_id, run_id, failure=failure_report)
+                self._apply_failure_report(project_id, run_id, card_id, failure_report)
+                return
+            has_terminal_complete = terminal_report is not None and terminal_report.terminal_kind == "report_complete"
+            dependency_issue_message = None
+            dependency_issue_payload: dict[str, Any] = {}
+            if not has_terminal_complete:
+                dependency_issue_message, dependency_issue_payload = self._blocking_dependency_issue(project_id, run_id)
             if dependency_issue_message:
                 self._append_event(
                     project_id,
@@ -1060,7 +1081,7 @@ class WorkerService:
                 )
                 self._set_run_attention(project_id, run_id, card_id, dependency_issue_message)
             recovered_from_timeout = False
-            if timed_out and not dependency_issue_message and not audit_errors:
+            if timed_out and not has_terminal_complete and not dependency_issue_message and not audit_errors:
                 recovered_from_timeout, recovery_message = self._recover_manifest_candidate_after_timeout(project_id, run_id)
                 if recovered_from_timeout:
                     self._append_event(
@@ -1070,59 +1091,94 @@ class WorkerService:
                         event_type="timeout_manifest_recovered",
                         message=recovery_message,
                     )
-            if timed_out and not recovered_from_timeout:
+            if timed_out and not recovered_from_timeout and not has_terminal_complete:
                 message = dependency_issue_message or "执行超时，已终止。"
                 if audit_errors:
                     message = f"{message} {'; '.join(audit_errors)}"
-                self._append_event(project_id, run_id, card_id, event_type="run_failed", message=message)
-                self._set_run_status(project_id, run_id, card_id, status="failed", summary=message, progress_note=None)
-                if dependency_issue_message:
-                    self._set_run_attention(project_id, run_id, card_id, dependency_issue_message)
-                self._commit_run_stage(project_id, run_id, "failed")
-                self._notify_background_terminal(project_id, run_id=run_id)
+                failure = self._synthesize_executor_failure(
+                    project_id,
+                    run_id,
+                    reason_code="execution_error",
+                    summary=message,
+                    details={"timed_out": True, "audit_errors": audit_errors},
+                )
+                self._apply_failure_report(project_id, run_id, card_id, failure)
                 return
 
-            if return_code != 0 and not recovered_from_timeout:
+            if return_code != 0 and not recovered_from_timeout and not has_terminal_complete:
                 message = dependency_issue_message or f"执行器退出码 {return_code}。"
                 if audit_errors:
                     message = f"{message} {'; '.join(audit_errors)}"
                 transcript_tail = self._transcript_tail(transcript_path)
                 if transcript_tail and not dependency_issue_message:
                     message = f"{message} 最近输出：{transcript_tail}"
-                self._append_event(project_id, run_id, card_id, event_type="run_failed", message=message)
-                self._set_run_status(project_id, run_id, card_id, status="failed", summary=message, progress_note=None)
-                if dependency_issue_message:
-                    self._set_run_attention(project_id, run_id, card_id, dependency_issue_message)
-                self._commit_run_stage(project_id, run_id, "failed")
-                self._notify_background_terminal(project_id, run_id=run_id)
+                failure = self._synthesize_executor_failure(
+                    project_id,
+                    run_id,
+                    reason_code="execution_error",
+                    summary=message,
+                    details={"exit_code": return_code, "audit_errors": audit_errors, "stderr_tail": transcript_tail},
+                )
+                self._apply_failure_report(project_id, run_id, card_id, failure)
                 return
 
             if not audit_ok:
                 message = "执行后文件系统审计失败：" + "; ".join(audit_errors)
-                self._append_event(project_id, run_id, card_id, event_type="run_failed", message=message)
-                self._set_run_status(project_id, run_id, card_id, status="failed", summary=message, progress_note=None)
-                self._commit_run_stage(project_id, run_id, "failed")
-                self._notify_background_terminal(project_id, run_id=run_id)
+                failure = self._synthesize_executor_failure(
+                    project_id,
+                    run_id,
+                    reason_code="contract_violation",
+                    summary=message,
+                    details={"audit_errors": audit_errors},
+                )
+                self._apply_failure_report(project_id, run_id, card_id, failure)
                 return
 
-            if dependency_issue_message:
-                self._append_event(project_id, run_id, card_id, event_type="run_failed", message=dependency_issue_message)
-                self._set_run_status(project_id, run_id, card_id, status="failed", summary=dependency_issue_message, progress_note=None)
-                self._set_run_attention(project_id, run_id, card_id, dependency_issue_message)
-                self._commit_run_stage(project_id, run_id, "failed")
-                self._notify_background_terminal(project_id, run_id=run_id)
+            if dependency_issue_message and terminal_report is None:
+                failure = self._synthesize_executor_failure(
+                    project_id,
+                    run_id,
+                    reason_code="runtime_dependency_missing",
+                    summary=dependency_issue_message,
+                    details=dependency_issue_payload,
+                )
+                self._apply_failure_report(project_id, run_id, card_id, failure)
                 return
 
+            if has_terminal_complete:
+                manifest, materialize_errors = self._materialize_completed_manifest(project_id, run_id)
+                if materialize_errors:
+                    failure = self._synthesize_executor_failure(
+                        project_id,
+                        run_id,
+                        reason_code="contract_violation",
+                        summary="Manifest 校验失败：" + "; ".join(materialize_errors),
+                        details={
+                            "validation_errors": materialize_errors,
+                            "failed_report": "report_complete",
+                        },
+                    )
+                    self._apply_failure_report(project_id, run_id, card_id, failure)
+                    return
+
+            # Migration compatibility: legacy executors may still exit 0 without a terminal report.
+            # If they produced a valid canonical/legacy manifest, keep accepting that path until the
+            # terminal helper contract is universal across built-in and user-configured executors.
             valid, errors = self.manifest_service.validate_manifest(project_id, run_id)
             if not valid:
                 message = "Manifest 校验失败：" + "; ".join(errors)
-                self._append_event(project_id, run_id, card_id, event_type="run_failed", message=message)
-                self._set_run_status(project_id, run_id, card_id, status="failed", summary=message, progress_note=None)
-                self._commit_run_stage(project_id, run_id, "failed")
-                self._notify_background_terminal(project_id, run_id=run_id)
+                failure = self._synthesize_executor_failure(
+                    project_id,
+                    run_id,
+                    reason_code="contract_violation",
+                    summary=message,
+                    details={"validation_errors": errors},
+                )
+                self._apply_failure_report(project_id, run_id, card_id, failure)
                 return
 
             manifest = self.manifest_service.load_manifest(project_id, run_id)
+            self._persist_backend_manager_brief(project_id, run_id, manifest=manifest)
             self._append_event(project_id, run_id, card_id, event_type="review_started", message="Reviewer 正在验收执行器代码、manifest 和输出资产。")
             self._set_run_status(
                 project_id,
@@ -1162,8 +1218,14 @@ class WorkerService:
                 message=validation_report.summary,
                 payload=validation_report.model_dump(),
             )
-            manager_brief = self._load_manager_brief(project_id, run_id)
-            summary = manager_brief.get("final_report", {}).get("summary") or manifest.summary
+            self._persist_backend_manager_brief(
+                project_id,
+                run_id,
+                manifest=manifest,
+                reviewer=validation_report.reviewer if isinstance(validation_report.reviewer, dict) else None,
+                validation=validation_report.model_dump(),
+            )
+            summary = self.manifest_service.manager_summary(manifest)
             review_result = self._finalize_run_review(project_id, run_id, accept=True, source="reviewer")
             if validation_warning_message:
                 self._set_run_attention(project_id, run_id, card_id, validation_warning_message)
@@ -1234,10 +1296,10 @@ class WorkerService:
             return False, "manifest.candidate.json does not exist."
         try:
             payload = json.loads(candidate_path.read_text(encoding="utf-8"))
-            manifest = Manifest.model_validate(payload)
-        except Exception as exc:
+            manifest = self.manifest_service.normalize_manifest_payload(payload, run_id=run_id)
+        except (ValidationError, ValueError, json.JSONDecodeError) as exc:
             return False, f"manifest.candidate.json is not valid: {exc}"
-        atomic_write_json(manifest_path, manifest.model_dump())
+        atomic_write_json(manifest_path, manifest.model_dump(exclude_none=True))
         return True, "执行器超时但 manifest.candidate.json 已完整生成，已提升为 manifest.json 并继续进入校验与 Reviewer。"
 
     def _execute_run_guarded(
@@ -1626,14 +1688,14 @@ class WorkerService:
             constraints=[
                 "Do not overwrite existing valid assets.",
                 f"Write outputs under {result_dir}/",
-                f"Write manifest to runs/{run_id}/manifest.json.",
+                f"Write the candidate manifest to runs/{run_id}/manifest.candidate.json.",
+                f"Call runs/{run_id}/report_executor_result.py complete or fail exactly once before exiting.",
                 "Do not modify graph/, .git/, or upstream input assets.",
-                f"Do not install missing runtime packages. If required packages/tools are unavailable, use runs/{run_id}/report_dependency_issue.py to report them and stop.",
-                "Record a short input conclusion in manifest.validation_evidence.input_conclusion for Reviewer instead of repeating the full input list.",
+                f"Do not install missing runtime packages. If required packages/tools are unavailable, use runs/{run_id}/report_executor_result.py fail to report them and stop.",
             ],
             worker_instructions=(
                 "You are a bioinformatics worker agent. Read task_packet.json, use the declared inputs, "
-                "write only inside allowed_paths, and produce a complete manifest that matches expected_outputs."
+                "write only inside allowed_paths, and produce terminal reports plus a candidate manifest that matches expected_outputs."
             ),
             run_context=RunContext(
                 run_id=run_id,
@@ -1818,7 +1880,154 @@ class WorkerService:
             return {}
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def _terminal_report_paths(self, project_id: str, run_id: str) -> dict[str, Path]:
+        run_dir = self.project_service.project_path(project_id) / "runs" / run_id
+        return {
+            "run_dir": run_dir,
+            "terminal": run_dir / "terminal_report.json",
+            "completion": run_dir / "executor_completion.json",
+            "failure": run_dir / "executor_failure.json",
+            "state": run_dir / "executor_result_state.json",
+        }
+
+    def _load_terminal_report(self, project_id: str, run_id: str) -> TerminalReport | None:
+        path = self._terminal_report_paths(project_id, run_id)["terminal"]
+        if not path.exists():
+            return None
+        try:
+            return TerminalReport.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, ValueError):
+            return None
+
+    def _load_executor_completion_report(self, project_id: str, run_id: str) -> ExecutorCompletionReport | None:
+        path = self._terminal_report_paths(project_id, run_id)["completion"]
+        if not path.exists():
+            return None
+        try:
+            return ExecutorCompletionReport.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, ValueError):
+            return None
+
+    def _load_executor_failure_report(self, project_id: str, run_id: str) -> ExecutorFailureReport | None:
+        path = self._terminal_report_paths(project_id, run_id)["failure"]
+        if not path.exists():
+            return None
+        try:
+            return ExecutorFailureReport.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, ValueError):
+            return None
+
+    def _persist_backend_manager_brief(
+        self,
+        project_id: str,
+        run_id: str,
+        *,
+        manifest: Manifest | None = None,
+        failure: ExecutorFailureReport | None = None,
+        reviewer: dict[str, Any] | None = None,
+        validation: dict[str, Any] | None = None,
+    ) -> None:
+        run_dir = self.project_service.project_path(project_id) / "runs" / run_id
+        path = run_dir / "manager_brief.json"
+        brief: dict[str, Any] = {"run_id": run_id}
+        if manifest is not None:
+            brief["final_report"] = {
+                "summary": self.manifest_service.manager_summary(manifest),
+                "warnings": self.manifest_service.manager_warnings(manifest),
+            }
+        if failure is not None:
+            brief["failure_report"] = failure.model_dump(exclude_none=True)
+            brief["final_report"] = {
+                "summary": failure.summary,
+                "warnings": [],
+            }
+        if reviewer:
+            brief["reviewer"] = reviewer
+        if validation:
+            brief["executor_validation"] = validation
+        atomic_write_json(path, brief)
+
+    def _synthesize_executor_failure(
+        self,
+        project_id: str,
+        run_id: str,
+        *,
+        reason_code: FailureReasonCode,
+        summary: str,
+        details: dict[str, Any] | None = None,
+    ) -> ExecutorFailureReport:
+        run_dir = self.project_service.project_path(project_id) / "runs" / run_id
+        failure = ExecutorFailureReport(
+            schema_version="executor_failure.v1",
+            reason_code=reason_code,
+            summary=summary,
+            details=details or {},
+        )
+        atomic_write_json(run_dir / "executor_failure.json", failure.model_dump(exclude_none=True))
+        atomic_write_json(
+            run_dir / "terminal_report.json",
+            TerminalReport(
+                schema_version="executor_terminal_report.v1",
+                run_id=run_id,
+                terminal_kind="synthetic_failure",
+                accepted_at=utc_now(),
+                summary=summary,
+                reason_code=reason_code,
+                status="failed",
+                failure_report_path="executor_failure.json",
+            ).model_dump(exclude_none=True),
+        )
+        self._persist_backend_manager_brief(project_id, run_id, failure=failure)
+        return failure
+
+    def _materialize_completed_manifest(self, project_id: str, run_id: str) -> tuple[Manifest | None, list[str]]:
+        completion = self._load_executor_completion_report(project_id, run_id)
+        if completion is not None and isinstance(completion.canonical_manifest, dict):
+            try:
+                manifest = self.manifest_service.normalize_manifest_payload(completion.canonical_manifest, run_id=run_id)
+            except (ValidationError, ValueError) as exc:
+                return None, [f"Manifest schema validation failed: {exc}"]
+            run_dir = self.project_service.project_path(project_id) / "runs" / run_id
+            atomic_write_json(run_dir / "manifest.json", manifest.model_dump(exclude_none=True))
+            return manifest, []
+        return self.manifest_service.promote_candidate_manifest(project_id, run_id)
+
+    def _apply_failure_report(
+        self,
+        project_id: str,
+        run_id: str,
+        card_id: str,
+        failure: ExecutorFailureReport,
+    ) -> None:
+        payload = failure.model_dump(exclude_none=True)
+        if failure.reason_code == "runtime_dependency_missing":
+            self._append_event(
+                project_id,
+                run_id,
+                card_id,
+                event_type="runtime_dependency_missing",
+                message=failure.summary,
+                payload=payload,
+            )
+        else:
+            self._append_event(
+                project_id,
+                run_id,
+                card_id,
+                event_type="run_failed",
+                message=failure.summary,
+                payload=payload,
+            )
+        self._set_run_status(project_id, run_id, card_id, status="failed", summary=failure.summary, progress_note=None)
+        self._set_run_attention(project_id, run_id, card_id, failure.summary)
+        self._commit_run_stage(project_id, run_id, "failed")
+        self._notify_background_terminal(project_id, run_id=run_id)
+
     def _blocking_dependency_issue(self, project_id: str, run_id: str) -> tuple[str | None, dict[str, Any]]:
+        failure_report = self._load_executor_failure_report(project_id, run_id)
+        if failure_report is not None and failure_report.reason_code == "runtime_dependency_missing":
+            message = failure_report.summary or "执行器报告运行环境依赖不足。"
+            return message, {"issues": [failure_report.model_dump(exclude_none=True)]}
         issue_path = self.project_service.project_path(project_id) / "runs" / run_id / "dependency_issue.json"
         file_payload: dict[str, Any] = {}
         if issue_path.exists():

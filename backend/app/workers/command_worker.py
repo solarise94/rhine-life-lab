@@ -95,6 +95,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "executor_prompt_path": str(contract_paths["executor_prompt_path"]),
             "adapter_contract_path": str(contract_paths["adapter_contract_path"]),
             "manager_brief_path": str(run_dir / "manager_brief.json"),
+            "executor_result_tool_path": str(contract_paths["executor_result_tool_path"]),
             "worker_type": self.name,
             "python": sys.executable,
             "repo_root": str(Path(__file__).resolve().parents[2].parent),
@@ -138,6 +139,11 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "BLUEPRINT_EXECUTOR_PROMPT": str(contract_paths["executor_prompt_path"]),
             "BLUEPRINT_ADAPTER_CONTRACT": str(contract_paths["adapter_contract_path"]),
             "BLUEPRINT_MANAGER_BRIEF": str(run_dir / "manager_brief.json"),
+            "BLUEPRINT_EXECUTOR_RESULT_TOOL": str(contract_paths["executor_result_tool_path"]),
+            "BLUEPRINT_EXECUTOR_COMPLETION_PATH": str(run_dir / "executor_completion.json"),
+            "BLUEPRINT_EXECUTOR_FAILURE_PATH": str(run_dir / "executor_failure.json"),
+            "BLUEPRINT_TERMINAL_REPORT_PATH": str(run_dir / "terminal_report.json"),
+            "BLUEPRINT_EXECUTOR_RESULT_STATE_PATH": str(run_dir / "executor_result_state.json"),
             "BLUEPRINT_DEPENDENCY_ISSUE_PATH": str(run_dir / "dependency_issue.json"),
             "BLUEPRINT_DEPENDENCY_REPORT_TOOL": str(contract_paths["dependency_report_tool_path"]),
             "BLUEPRINT_ALLOWED_PATHS": json.dumps(packet.allowed_paths),
@@ -722,7 +728,9 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         executor_brief_path = run_dir / "executor_brief.md"
         executor_prompt_path = run_dir / "executor_prompt.md"
         adapter_contract_path = run_dir / "adapter_contract.json"
+        executor_result_tool_path = run_dir / "report_executor_result.py"
         dependency_report_tool_path = run_dir / "report_dependency_issue.py"
+        self._write_executor_result_tool(executor_result_tool_path)
         self._write_dependency_report_tool(dependency_report_tool_path)
         executor_brief_path.write_text(self._render_executor_brief(packet), encoding="utf-8")
         executor_prompt_path.write_text(self._render_executor_prompt(packet), encoding="utf-8")
@@ -732,16 +740,20 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
                     "worker_type": self.name,
                     "task_packet_path": "task_packet.json",
                     "executor_prompt_path": "executor_prompt.md",
-                    "manifest_path": "manifest.json",
-                    "manifest_candidate_path": "manifest.candidate.json",
-                    "manager_brief_path": "manager_brief.json",
-                    "dependency_issue_path": "dependency_issue.json",
-                    "dependency_report_tool_path": "report_dependency_issue.py",
+                    "compatibility": {
+                        "manifest_candidate_path": "manifest.candidate.json",
+                        "dependency_issue_path": "dependency_issue.json",
+                        "dependency_report_tool_path": "report_dependency_issue.py",
+                    },
+                    "executor_completion_path": "executor_completion.json",
+                    "executor_failure_path": "executor_failure.json",
+                    "terminal_report_path": "terminal_report.json",
+                    "executor_result_state_path": "executor_result_state.json",
                     "executor_validation_path": "executor_validation.json",
+                    "executor_result_tool_path": "report_executor_result.py",
                     "skill_bindings_path": str(Path(str(library_paths["skill_bindings_path"])).relative_to(run_dir)),
                     "mcp_bindings_path": str(Path(str(library_paths["mcp_bindings_path"])).relative_to(run_dir)),
                     "mcp_config_path": str(Path(str(library_paths["mcp_config_path"])).relative_to(run_dir)),
-                    "stdout_prefix": packet.manager_reporting_contract.stdout_prefix if packet.manager_reporting_contract else "BP_EVENT ",
                     "allowed_paths": packet.allowed_paths,
                     "readonly_paths": packet.readonly_paths,
                     "forbidden_paths": packet.forbidden_paths,
@@ -752,60 +764,43 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
                         "run_dir",
                         "result_dir",
                         "task_packet_path",
-                        "manifest_path",
                         "manifest_candidate_path",
                         "transcript_path",
                         "executor_brief_path",
                         "executor_prompt_path",
                         "adapter_contract_path",
-                        "manager_brief_path",
+                        "executor_result_tool_path",
                         "worker_type",
                     ],
                     "expected_outputs": [item.model_dump() for item in packet.expected_outputs],
-                    "required_manifest_fields": [
-                        "run_id",
-                        "status",
-                        "summary",
-                        "created_assets",
-                        "code_artifacts",
-                        "commands_executed",
-                        "validation_evidence",
-                    ],
-                    "manifest_status_values": ["success", "failed", "partial"],
                     "executor_tools": [
                         {
-                            "name": "report_dependency_issue",
-                            "path": "report_dependency_issue.py",
-                            "purpose": "Report missing runtime dependencies to the card/manager instead of installing packages ad hoc.",
-                            "example": (
-                                "python runs/{run_id}/report_dependency_issue.py "
-                                "--ecosystem R --package clusterProfiler --package enrichplot "
-                                "--manager Bioconductor --message 'Required enrichment packages are unavailable.'"
-                            ).format(run_id=packet.task_id),
-                            "arguments": {
-                                "--ecosystem": "python | R | conda | system | other",
-                                "--package": "repeatable missing package/tool name",
-                                "--manager": "optional package manager such as pip, conda, CRAN, Bioconductor",
-                                "--runtime": "optional selected runtime/environment name",
-                                "--message": "optional human-readable reason",
-                                "--non-blocking": "mark as warning instead of blocking the run",
+                            "name": "report_executor_result",
+                            "path": "report_executor_result.py",
+                            "purpose": "Submit the terminal completion or failure report for this executor run.",
+                            "subcommands": {
+                                "complete": (
+                                    "python runs/{run_id}/report_executor_result.py complete "
+                                    "--manifest runs/{run_id}/manifest.candidate.json"
+                                ).format(run_id=packet.task_id),
+                                "fail": (
+                                    "python runs/{run_id}/report_executor_result.py fail "
+                                    "--reason-code runtime_dependency_missing "
+                                    "--summary 'Required enrichment packages are unavailable.' "
+                                    "--details-json '{{\"ecosystem\":\"R\",\"missing_packages\":[\"clusterProfiler\"]}}'"
+                                ).format(run_id=packet.task_id),
                             },
                         }
                     ],
                     "manifest_schema": {
-                        "run_id": "string",
-                        "status": "success | failed | partial",
+                        "schema_version": "executor_manifest.v2",
                         "summary": "string",
                         "created_assets": "array of {role,path,label?,asset_id?,description?,artifact_class?,format?}",
                         "code_artifacts": "array of {path,language?,purpose?,sha256?}",
-                        "validation_evidence": {
-                            "input_conclusion": "short factual note about the declared inputs and whether they were used",
+                        "manager_report": {
+                            "summary": "short summary shown to Manager before reviewer projection",
+                            "warnings": "array of strings",
                         },
-                        "commands_executed": "array of strings",
-                        "metrics": "object",
-                        "key_findings": "array of strings",
-                        "recommended_graph_updates": "array of objects",
-                        "warnings": "array of strings",
                     },
                     "code_artifact_scope": f"scripts/generated/{packet.task_id}/",
                 },
@@ -819,6 +814,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "executor_brief_path": executor_brief_path,
             "executor_prompt_path": executor_prompt_path,
             "adapter_contract_path": adapter_contract_path,
+            "executor_result_tool_path": executor_result_tool_path,
             "dependency_report_tool_path": dependency_report_tool_path,
         }
 
@@ -868,6 +864,369 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         }
 
     @staticmethod
+    def _write_executor_result_tool(path: Path) -> None:
+        path.write_text(
+            '''from __future__ import annotations
+
+from argparse import ArgumentParser
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+
+from pydantic import ValidationError
+
+from app.models.runs import (
+    ExecutorCompletionReport,
+    ExecutorFailureReport,
+    ExecutorResultState,
+    FailureReasonCode,
+    Manifest,
+    TaskPacket,
+    TerminalReport,
+)
+from app.services.artifact_format_service import detect_artifact_class, detect_artifact_format
+from app.services.manifest_service import ManifestService
+from app.services.utils import atomic_write_json
+
+
+REASON_CODES = {
+    "runtime_dependency_missing",
+    "input_missing",
+    "input_invalid",
+    "permission_denied",
+    "tool_unavailable",
+    "execution_error",
+    "contract_violation",
+    "unknown",
+}
+MAX_REPORT_COMPLETE_FAILURES = 3
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _read_json(path: Path, default):
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return default
+
+
+def _run_dir() -> Path:
+    return Path(os.environ["BLUEPRINT_RUN_DIR"]).resolve()
+
+
+def _project_root() -> Path:
+    return Path(os.environ["BLUEPRINT_PROJECT_ROOT"]).resolve()
+
+
+def _run_id() -> str:
+    return str(os.environ.get("BLUEPRINT_RUN_ID") or os.environ.get("BLUEPRINT_TASK_ID") or "").strip()
+
+
+def _paths() -> dict[str, Path]:
+    run_dir = _run_dir()
+    return {
+        "completion": Path(os.environ.get("BLUEPRINT_EXECUTOR_COMPLETION_PATH", run_dir / "executor_completion.json")),
+        "failure": Path(os.environ.get("BLUEPRINT_EXECUTOR_FAILURE_PATH", run_dir / "executor_failure.json")),
+        "terminal": Path(os.environ.get("BLUEPRINT_TERMINAL_REPORT_PATH", run_dir / "terminal_report.json")),
+        "state": Path(os.environ.get("BLUEPRINT_EXECUTOR_RESULT_STATE_PATH", run_dir / "executor_result_state.json")),
+        "task_packet": Path(os.environ.get("BLUEPRINT_TASK_PACKET", run_dir / "task_packet.json")),
+    }
+
+
+def _load_task_packet() -> TaskPacket:
+    return TaskPacket.model_validate(json.loads(_paths()["task_packet"].read_text(encoding="utf-8")))
+
+
+def _load_terminal_report() -> TerminalReport | None:
+    payload = _read_json(_paths()["terminal"], None)
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return TerminalReport.model_validate(payload)
+    except ValidationError:
+        return None
+
+
+def _load_state() -> ExecutorResultState:
+    payload = _read_json(_paths()["state"], {})
+    if isinstance(payload, dict):
+        try:
+            return ExecutorResultState.model_validate(payload)
+        except ValidationError:
+            pass
+    return ExecutorResultState()
+
+
+def _write_state(state: ExecutorResultState) -> None:
+    atomic_write_json(_paths()["state"], state.model_dump())
+
+
+def _terminal_error_payload(report: TerminalReport) -> dict:
+    return {
+        "ok": False,
+        "error_code": "run_already_terminal",
+        "terminal_status": report.status,
+        "terminal_kind": report.terminal_kind,
+    }
+
+
+def _normalize_reason_code(reason_code: str, details: dict) -> tuple[FailureReasonCode, dict]:
+    normalized = str(reason_code or "").strip()
+    if normalized in REASON_CODES:
+        return normalized, details
+    merged = dict(details)
+    merged["original_reason_code"] = normalized or None
+    return "unknown", merged
+
+
+def _resolve_candidate_path(candidate_manifest_path: str) -> Path:
+    return ManifestService.resolve_candidate_manifest_path(_run_dir(), candidate_manifest_path)
+
+
+def _validate_candidate_manifest(candidate_path: Path, packet: TaskPacket) -> tuple[Manifest | None, list[str]]:
+    errors: list[str] = []
+    if not candidate_path.exists():
+        return None, [f"{candidate_path.name} is missing."]
+    try:
+        payload = json.loads(candidate_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return None, [f"{candidate_path.name} is not valid JSON: {exc}"]
+    try:
+        manifest = ManifestService.normalize_manifest_payload(payload, run_id=_run_id())
+    except (ValidationError, ValueError) as exc:
+        return None, [str(exc)]
+
+    expected_by_role = {
+        item.role: item
+        for item in packet.expected_outputs
+        if item.role and item.path_hint and item.artifact_class
+    }
+    required_roles = {role for role, item in expected_by_role.items() if item.required}
+    created_by_role = {item.role: item for item in manifest.created_assets if item.role}
+    missing_roles = sorted(required_roles - set(created_by_role))
+    if missing_roles:
+        formatted = ", ".join(
+            f"{role} ({expected_by_role[role].path_hint})"
+            for role in missing_roles
+            if role in expected_by_role
+        )
+        errors.append(f"{candidate_path.name} is missing created_assets for expected outputs: {formatted}")
+    project_root = _project_root()
+    allowed_prefixes = tuple(packet.allowed_paths)
+    for role, asset in created_by_role.items():
+        expected = expected_by_role.get(role)
+        if expected is None:
+            errors.append(f"{candidate_path.name} declared unexpected output role: {role}")
+            continue
+        if not asset.path.startswith(allowed_prefixes):
+            errors.append(f"{candidate_path.name} output is outside allowed_paths: {asset.path}")
+        output_path = (project_root / asset.path).resolve()
+        project_root_resolved = project_root.resolve()
+        if output_path != project_root_resolved and project_root_resolved not in output_path.parents:
+            errors.append(f"{candidate_path.name} output path escapes project root: {asset.path}")
+            continue
+        if not output_path.exists():
+            errors.append(f"Missing output file: {asset.path} ({role})")
+            continue
+        detected_class = detect_artifact_class(output_path)
+        detected_format = detect_artifact_format(output_path)
+        if detected_class != expected.artifact_class:
+            errors.append(
+                f"{candidate_path.name} output class mismatch for {role}: expected {expected.artifact_class}, got {detected_class or 'unknown'}"
+            )
+        if expected.accepted_formats and detected_format not in expected.accepted_formats:
+            errors.append(
+                f"{candidate_path.name} output format mismatch for {role}: expected one of {', '.join(expected.accepted_formats)}, got {detected_format or 'unknown'}"
+            )
+    return manifest, errors
+
+
+def _record_complete_failure(errors: list[str]) -> ExecutorResultState:
+    state = _load_state()
+    state.report_complete_failure_count += 1
+    state.last_validation_errors = list(errors)
+    _write_state(state)
+    return state
+
+
+def _accept_terminal_report(report: TerminalReport) -> None:
+    atomic_write_json(_paths()["terminal"], report.model_dump(exclude_none=True))
+
+
+def _handle_complete(candidate_manifest_path: str) -> int:
+    existing = _load_terminal_report()
+    if existing is not None:
+        print(json.dumps(_terminal_error_payload(existing), ensure_ascii=False), flush=True)
+        return 2
+    packet = _load_task_packet()
+    try:
+        candidate_path = _resolve_candidate_path(candidate_manifest_path)
+    except ValueError as exc:
+        state = _record_complete_failure([str(exc)])
+        exhausted = state.report_complete_failure_count >= MAX_REPORT_COMPLETE_FAILURES
+        payload = {
+            "ok": False,
+            "error_code": "report_complete_repair_budget_exhausted" if exhausted else "report_complete_invalid",
+            "summary": "Manifest completion failed validation too many times." if exhausted else "Manifest completion failed validation.",
+            "validation_errors": [str(exc)],
+            "failure_reason_code": "contract_violation",
+            "terminal": exhausted,
+        }
+        if exhausted:
+            failure = ExecutorFailureReport(
+                schema_version="executor_failure.v1",
+                reason_code="contract_violation",
+                summary="Manifest completion failed validation too many times.",
+                details={
+                    "validation_errors": [str(exc)],
+                    "failed_report": "report_complete",
+                    "attempt_count": state.report_complete_failure_count,
+                },
+            )
+            atomic_write_json(_paths()["failure"], failure.model_dump())
+            _accept_terminal_report(
+                TerminalReport(
+                    schema_version="executor_terminal_report.v1",
+                    run_id=_run_id(),
+                    terminal_kind="synthetic_failure",
+                    accepted_at=_utc_now(),
+                    summary=failure.summary,
+                    reason_code=failure.reason_code,
+                    status="failed",
+                    failure_report_path=_paths()["failure"].name,
+                )
+            )
+        print(json.dumps(payload, ensure_ascii=False), flush=True)
+        return 2 if exhausted else 1
+    manifest, errors = _validate_candidate_manifest(candidate_path, packet)
+    if errors:
+        state = _record_complete_failure(errors)
+        exhausted = state.report_complete_failure_count >= MAX_REPORT_COMPLETE_FAILURES
+        payload = {
+            "ok": False,
+            "error_code": "report_complete_repair_budget_exhausted" if exhausted else "report_complete_invalid",
+            "summary": "Manifest completion failed validation too many times." if exhausted else "Manifest completion failed validation.",
+            "validation_errors": errors,
+            "failure_reason_code": "contract_violation",
+            "terminal": exhausted,
+        }
+        if exhausted:
+            failure = ExecutorFailureReport(
+                schema_version="executor_failure.v1",
+                reason_code="contract_violation",
+                summary="Manifest completion failed validation too many times.",
+                details={
+                    "validation_errors": errors,
+                    "failed_report": "report_complete",
+                    "attempt_count": state.report_complete_failure_count,
+                },
+            )
+            atomic_write_json(_paths()["failure"], failure.model_dump())
+            _accept_terminal_report(
+                TerminalReport(
+                    schema_version="executor_terminal_report.v1",
+                    run_id=_run_id(),
+                    terminal_kind="synthetic_failure",
+                    accepted_at=_utc_now(),
+                    summary=failure.summary,
+                    reason_code=failure.reason_code,
+                    status="failed",
+                    failure_report_path=_paths()["failure"].name,
+                )
+            )
+        print(json.dumps(payload, ensure_ascii=False), flush=True)
+        return 2 if exhausted else 1
+    completion = ExecutorCompletionReport(
+        schema_version="executor_completion.v1",
+        candidate_manifest_path=str(candidate_path.relative_to(_run_dir())),
+        canonical_manifest=manifest.model_dump(exclude_none=True),
+    )
+    atomic_write_json(_paths()["completion"], completion.model_dump(exclude_none=True))
+    _write_state(ExecutorResultState())
+    _accept_terminal_report(
+        TerminalReport(
+            schema_version="executor_terminal_report.v1",
+            run_id=_run_id(),
+            terminal_kind="report_complete",
+            accepted_at=_utc_now(),
+            summary=(manifest.manager_report.summary if manifest.manager_report and manifest.manager_report.summary else manifest.summary),
+            status="pending_review",
+            completion_report_path=_paths()["completion"].name,
+            candidate_manifest_path=completion.candidate_manifest_path,
+        )
+    )
+    print(json.dumps({"ok": True, "accepted_for_review": True, "candidate_manifest_path": completion.candidate_manifest_path}, ensure_ascii=False), flush=True)
+    return 0
+
+
+def _handle_fail(reason_code: str, summary: str, details_json: str | None) -> int:
+    existing = _load_terminal_report()
+    if existing is not None:
+        print(json.dumps(_terminal_error_payload(existing), ensure_ascii=False), flush=True)
+        return 2
+    try:
+        details = json.loads(details_json) if details_json else {}
+    except json.JSONDecodeError as exc:
+        print(json.dumps({"ok": False, "error_code": "invalid_details_json", "summary": str(exc)}, ensure_ascii=False), flush=True)
+        return 1
+    if not isinstance(details, dict):
+        print(json.dumps({"ok": False, "error_code": "invalid_details_json", "summary": "details-json must decode to an object."}, ensure_ascii=False), flush=True)
+        return 1
+    normalized_reason, normalized_details = _normalize_reason_code(reason_code, details)
+    failure = ExecutorFailureReport(
+        schema_version="executor_failure.v1",
+        reason_code=normalized_reason,
+        summary=summary,
+        details=normalized_details,
+    )
+    atomic_write_json(_paths()["failure"], failure.model_dump(exclude_none=True))
+    _accept_terminal_report(
+        TerminalReport(
+            schema_version="executor_terminal_report.v1",
+            run_id=_run_id(),
+            terminal_kind="report_fail",
+            accepted_at=_utc_now(),
+            summary=failure.summary,
+            reason_code=failure.reason_code,
+            status="failed",
+            failure_report_path=_paths()["failure"].name,
+        )
+    )
+    print(json.dumps({"ok": True, "failed": True, "reason_code": failure.reason_code}, ensure_ascii=False), flush=True)
+    return 0
+
+
+def main() -> int:
+    parser = ArgumentParser(description="Submit the terminal result for a Blueprint executor run.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    complete_parser = subparsers.add_parser("complete")
+    complete_parser.add_argument("--manifest", required=True, dest="candidate_manifest_path")
+
+    fail_parser = subparsers.add_parser("fail")
+    fail_parser.add_argument("--reason-code", required=True)
+    fail_parser.add_argument("--summary", required=True)
+    fail_parser.add_argument("--details-json", default="")
+
+    args = parser.parse_args()
+    if args.command == "complete":
+        return _handle_complete(args.candidate_manifest_path)
+    return _handle_fail(args.reason_code, args.summary, args.details_json)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+''',
+            encoding="utf-8",
+        )
+
+    @staticmethod
     def _write_dependency_report_tool(path: Path) -> None:
         path.write_text(
             '''from __future__ import annotations
@@ -907,6 +1266,7 @@ def main() -> int:
     blocking = not args.non_blocking
     package_text = ", ".join(packages)
     message = args.message or f"Missing required {args.ecosystem} runtime dependencies: {package_text}."
+    result_tool = Path(os.environ.get("BLUEPRINT_EXECUTOR_RESULT_TOOL", "report_executor_result.py"))
     event = {
         "type": "issue_report",
         "stage": "runtime_dependency_check",
@@ -953,8 +1313,31 @@ def main() -> int:
     brief["dependency_issues"] = dependency_issues
     _atomic_write_json(brief_path, brief)
 
+    details = {
+        "ecosystem": args.ecosystem,
+        "missing_packages": packages,
+        "package_manager": args.manager,
+        "runtime": runtime,
+        "blocking": blocking,
+    }
+    complete = __import__("subprocess").run(
+        [
+            os.environ.get("PYTHON", "python3"),
+            str(result_tool),
+            "fail",
+            "--reason-code",
+            "runtime_dependency_missing",
+            "--summary",
+            message,
+            "--details-json",
+            json.dumps(details, ensure_ascii=False),
+        ],
+        check=False,
+    )
     prefix = os.environ.get("BLUEPRINT_MANAGER_REPORT_STDOUT_PREFIX", "BP_EVENT ")
     print(prefix + json.dumps(event, ensure_ascii=False), flush=True)
+    if complete.returncode not in {0, 2}:
+        return complete.returncode
     return 3 if blocking else 0
 
 
@@ -1023,10 +1406,10 @@ if __name__ == "__main__":
             [
                 "",
                 "## Reporting Contract",
-                "- Report progress/issues/final summary through BP_EVENT stdout or manager_brief.json.",
-                "- If required runtime packages or tools are missing, report them with report_dependency_issue.py instead of installing packages.",
+                "- Use report_executor_result.py to submit either the complete or fail terminal report.",
+                "- Do not write or update manager_brief.json directly.",
                 "- Preserve executed code under scripts/generated/{run_id}/ and declare it in manifest.code_artifacts.",
-                "- Agent CLI wrappers must write manifest.candidate.json first; the wrapper promotes it to manifest.json only after schema validation.",
+                "- Write a candidate manifest first; the backend promotes it to manifest.json only after validation.",
                 "- Backend validation will reject missing outputs, missing code evidence, path violations, and placeholder data.",
             ]
         )
@@ -1041,14 +1424,14 @@ if __name__ == "__main__":
             "",
             "Executor contract:",
             "- The backend validates outputs using task_packet.json, adapter_contract.json, "
-            "manifest.json, manager_brief.json, and preserved code artifacts.",
+            "manifest.candidate.json, terminal reports, and preserved code artifacts.",
             "- If validation fails, the run will return structured errors for repair instead of being accepted by Manager.",
             "- Keep executable analysis code under scripts/generated/{run_id}/ and declare it in manifest.code_artifacts.",
-            "- Write your final manifest to manifest.candidate.json. The wrapper validates it and promotes it to manifest.json.",
+            "- Write your candidate manifest to manifest.candidate.json and then call the terminal result helper with the complete subcommand.",
             "- If your launch environment provides BLUEPRINT_MANIFEST_CANDIDATE_PATH, write the candidate manifest there.",
             "- If required runtime dependencies are missing, do not install packages with pip, conda, install.packages, or BiocManager. "
-            "Use the dependency report tool and stop the analysis until the runtime is fixed.",
-            "- After all result files, manager_brief.json, and manifest.candidate.json are written, exit immediately with success. "
+            "Call the terminal result helper with the fail subcommand and stop the analysis until the runtime is fixed.",
+            "- After your terminal result has been accepted, exit immediately. "
             "Do not keep chatting, inspecting files, or printing result contents.",
             "",
             "Task packet:",
@@ -1091,23 +1474,21 @@ if __name__ == "__main__":
             )
             lines.extend(f"- Instruction: {item}" for item in packet.executor_context.instruction_blocks)
             lines.extend(f"- Reference: {item.path} ({item.type})" for item in packet.executor_context.references)
-        dependency_tool_path = f"runs/{packet.task_id}/report_dependency_issue.py"
+        result_tool_path = f"runs/{packet.task_id}/report_executor_result.py"
         lines.extend(
             [
                 "",
                 "Stdout discipline:",
                 "- Do not print tables, matrices, SVG, reports, JSON manifests, or file contents to stdout.",
                 "- Do not run cat/head/tail on large outputs for the user. The user will inspect files through Blueprint previews.",
-                "- Stdout should contain only short BP_EVENT progress updates or one concise final sentence with output paths.",
-                "- Once manifest.candidate.json validates in your own reasoning and manager_brief.json is written, stop the process.",
+                "- Stdout should contain only short factual progress lines or one concise final sentence with output paths.",
+                "- Do not rely on BP_EVENT, manager_brief.json, or free-form stdout as the completion contract.",
                 "",
                 "Runtime dependency policy:",
                 "- Probe required Python/R/system packages before doing expensive analysis.",
                 "- Do not create or modify conda environments and do not install missing analysis packages inside the run.",
-                "- When a required dependency is missing, call the reporting tool, then stop rather than substituting a weaker method silently.",
-                f"- Tool: python {dependency_tool_path} --ecosystem R --package <missing-package> --manager <CRAN|Bioconductor|conda|pip> --message '<why it is required>'",
-                "- For multiple missing packages, repeat --package for each one.",
-                "- Use --non-blocking only for optional dependencies where the analysis can still produce valid outputs.",
+                "- When a required dependency is missing, call the terminal result helper with fail, then stop rather than substituting a weaker method silently.",
+                f"- Tool: python {result_tool_path} fail --reason-code runtime_dependency_missing --summary 'Required package is unavailable.' --details-json '{{\"ecosystem\":\"R\",\"missing_packages\":[\"clusterProfiler\"],\"package_manager\":\"Bioconductor\"}}'",
             ]
         )
         lines.extend(
@@ -1116,17 +1497,12 @@ if __name__ == "__main__":
                 "Output contract:",
                 "- manifest.candidate.json must declare every created asset in created_assets with role/path.",
                 "- manifest.candidate.json must declare preserved code in code_artifacts when assets are created.",
-                "- status must be exactly one of: success, failed, partial.",
+                "- manifest.candidate.json must set schema_version=executor_manifest.v2.",
+                "- manifest.candidate.json must include summary and manager_report.summary.",
                 "- Use created_assets, not outputs.",
-                "- Include summary and commands_executed.",
-                "- manager_brief.json should summarize final status for Manager; it must not mutate graph/card state.",
-                "",
-                "Input reporting rules:",
-                "- The declared inputs are already available in task_packet.json and will be forwarded to Reviewer.",
-                "- Record a short factual input conclusion in manifest.validation_evidence.input_conclusion.",
-                "- Do not restate the full input list in the manifest unless you have a concrete reason to do so.",
-                "- Do not use report_dependency_issue.py for input reporting or manifest completeness questions.",
-                "- Use report_dependency_issue.py only when a required runtime dependency is actually missing and you need to stop for environment repair.",
+                "- Do not include run_id, status, inputs_used, commands_executed, validation_evidence, top-level metrics, top-level key_findings, recommended_graph_updates, or top-level warnings.",
+                "- Keep warnings under manager_report.warnings.",
+                f"- Completion tool: python {result_tool_path} complete --manifest runs/{packet.task_id}/manifest.candidate.json",
             ]
         )
         return "\n".join(lines) + "\n"

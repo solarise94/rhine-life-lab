@@ -3,9 +3,11 @@ from __future__ import annotations
 from argparse import ArgumentParser
 from pathlib import Path
 import json
+import subprocess
+import sys
 import time
 
-from app.models.runs import CodeArtifact, CreatedAsset, Manifest, TaskPacket
+from app.models.runs import CodeArtifact, CreatedAsset, ExecutorManifestV2, ManagerReport, TaskPacket
 from app.services.utils import atomic_write_json
 
 
@@ -128,11 +130,9 @@ def main() -> int:
         encoding="utf-8",
     )
 
-    manifest = Manifest(
-        run_id=packet.task_id,
-        status="success",
+    manifest = ExecutorManifestV2(
+        schema_version="executor_manifest.v2",
         summary="Local scaffold worker completed successfully.",
-        inputs_used=packet.input_assets,
         created_assets=created_assets,
         code_artifacts=[
             CodeArtifact(
@@ -141,24 +141,29 @@ def main() -> int:
                 purpose="Preserved scaffold executor replay note for validator review.",
             )
         ],
-        commands_executed=["demo_executor"],
-        metrics={"synthetic_score": 0.91, "asset_count": len(created_assets)},
-        key_findings=["Generated representative downstream result set."],
-        recommended_graph_updates=[
-            {"op": "create_asset", "asset_type": asset.artifact_class or "binary", "role": asset.role}
-            for asset in created_assets
-        ],
-        warnings=[],
+        manager_report=ManagerReport(summary="Local scaffold worker completed successfully.", warnings=[]),
     )
-    atomic_write_json(run_dir / "manifest.json", manifest.model_dump())
+    atomic_write_json(run_dir / "manifest.candidate.json", manifest.model_dump(exclude_none=True))
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(run_dir / "report_executor_result.py"),
+            "complete",
+            "--manifest",
+            str(run_dir / "manifest.candidate.json"),
+        ],
+        cwd=run_dir,
+        check=False,
+    )
+    if result.returncode != 0:
+        return result.returncode
     print(
         "BP_EVENT "
         + json.dumps(
             {
                 "type": "final_report",
                 "summary": manifest.summary,
-                "key_findings": manifest.key_findings,
-                "warnings": manifest.warnings,
+                "warnings": manifest.manager_report.warnings,
             },
             ensure_ascii=False,
         ),

@@ -87,10 +87,6 @@ class ExecutorValidationService:
                     )
                 )
 
-        manager_brief_parse_issue = self._manager_brief_parse_issue(root / "runs" / run_id / "manager_brief.json")
-        if manager_brief_parse_issue is not None:
-            issues.append(manager_brief_parse_issue)
-
         issue_status = "fail" if any(issue.severity == "error" for issue in issues) else "warn" if issues else deterministic_status
         status = self._combine_status(issue_status, reviewer_status)
         report = ExecutorValidationReport(
@@ -211,16 +207,6 @@ class ExecutorValidationService:
                     )
                 )
 
-        manager_brief = root / "runs" / packet.task_id / "manager_brief.json"
-        if not manager_brief.exists():
-            issues.append(
-                ValidationIssue(
-                    severity="warning",
-                    code="missing_manager_brief",
-                    message="Executor did not write manager_brief.json; backend will rely on manifest and captured BP_EVENTs.",
-                    repair_hint="Write a concise manager_brief.json for Manager review.",
-                )
-            )
         return issues
 
     @staticmethod
@@ -248,22 +234,6 @@ class ExecutorValidationService:
         if status == "warn":
             return reviewer_payload.get("summary") or f"Executor outputs passed with {len(issues)} warning(s)."
         return reviewer_payload.get("summary") or f"Executor validation failed with {len(issues)} issue(s)."
-
-    @staticmethod
-    def _manager_brief_parse_issue(path: Path) -> ValidationIssue | None:
-        if not path.exists():
-            return None
-        try:
-            json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            return ValidationIssue(
-                severity="warning",
-                code="manager_brief_json_invalid",
-                message=f"manager_brief.json could not be parsed: {exc}",
-                path=str(path.name),
-                repair_hint="Rewrite manager_brief.json as valid JSON so the Manager can read the executor final report.",
-            )
-        return None
 
     @staticmethod
     def _merge_manager_brief(path: Path, report: ExecutorValidationReport) -> None:

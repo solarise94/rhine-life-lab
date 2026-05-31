@@ -135,6 +135,31 @@
       "title": "CreatedAssetRecord",
       "type": "object"
     },
+    "ManagerReport": {
+      "properties": {
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "title": "ManagerReport",
+      "type": "object"
+    },
     "TaskPacketAsset": {
       "properties": {
         "asset_id": {
@@ -184,6 +209,18 @@
     }
   },
   "properties": {
+    "schema_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Schema Version"
+    },
     "run_id": {
       "title": "Run Id",
       "type": "string"
@@ -260,6 +297,17 @@
       },
       "title": "Warnings",
       "type": "array"
+    },
+    "manager_report": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ManagerReport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

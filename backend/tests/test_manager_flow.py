@@ -3078,27 +3078,32 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertIn("BLUEPRINT_EXECUTOR_BRIEF", spec.environment)
         self.assertIn("BLUEPRINT_EXECUTOR_PROMPT", spec.environment)
         self.assertIn("BLUEPRINT_ADAPTER_CONTRACT", spec.environment)
+        self.assertIn("BLUEPRINT_EXECUTOR_RESULT_TOOL", spec.environment)
         self.assertIn("BLUEPRINT_DEPENDENCY_REPORT_TOOL", spec.environment)
         self.assertIn("BLUEPRINT_PI_SKILL_PATHS", spec.environment)
         self.assertIn("BLUEPRINT_ALLOWED_PATHS", spec.environment)
         self.assertEqual(str(run_dir), spec.environment["BLUEPRINT_RUNTIME_WORKING_DIR"])
         self.assertTrue(any(request.target == "scripts/generated/" for request in spec.permission_requests))
+        self.assertTrue((run_dir / "report_executor_result.py").exists())
         self.assertTrue((run_dir / "report_dependency_issue.py").exists())
 
         contract = json.loads((run_dir / "adapter_contract.json").read_text(encoding="utf-8"))
         self.assertEqual("shell", contract["worker_type"])
-        self.assertEqual("BP_EVENT ", contract["stdout_prefix"])
         self.assertEqual("executor_prompt.md", contract["executor_prompt_path"])
-        self.assertEqual("manifest.candidate.json", contract["manifest_candidate_path"])
-        self.assertEqual(["success", "failed", "partial"], contract["manifest_status_values"])
-        self.assertEqual("dependency_issue.json", contract["dependency_issue_path"])
-        self.assertEqual("report_dependency_issue.py", contract["dependency_report_tool_path"])
-        self.assertEqual("report_dependency_issue", contract["executor_tools"][0]["name"])
+        self.assertEqual("manifest.candidate.json", contract["compatibility"]["manifest_candidate_path"])
+        self.assertEqual("dependency_issue.json", contract["compatibility"]["dependency_issue_path"])
+        self.assertEqual("report_dependency_issue.py", contract["compatibility"]["dependency_report_tool_path"])
+        self.assertNotIn("manager_brief_path", contract)
+        self.assertNotIn("manager_brief_path", contract["compatibility"])
+        self.assertEqual("report_executor_result", contract["executor_tools"][0]["name"])
+        self.assertEqual("report_executor_result.py", contract["executor_result_tool_path"])
         prompt = (run_dir / "executor_prompt.md").read_text(encoding="utf-8")
         self.assertIn("Runtime dependency policy", prompt)
-        self.assertIn("report_dependency_issue.py", prompt)
-        self.assertIn("validation_evidence.input_conclusion", prompt)
-        self.assertIn("Do not restate the full input list in the manifest", prompt)
+        self.assertIn("report_executor_result.py", prompt)
+        self.assertIn("schema_version=executor_manifest.v2", prompt)
+        self.assertIn("manager_report.summary", prompt)
+        self.assertNotIn("validation_evidence.input_conclusion", prompt)
+        self.assertNotIn("report_dependency_issue.py", prompt)
 
     def test_dependency_report_tool_marks_run_failed_with_attention(self) -> None:
         adapter = ShellWorkerAdapter()
@@ -3124,8 +3129,455 @@ class ManagerFlowTest(unittest.TestCase):
         issue = json.loads((run_dir / "dependency_issue.json").read_text(encoding="utf-8"))
         self.assertTrue(issue["blocking"])
         self.assertEqual("runtime_dependency_missing", issue["issues"][0]["metadata"]["issue_kind"])
+        terminal = json.loads((run_dir / "terminal_report.json").read_text(encoding="utf-8"))
+        self.assertEqual("report_fail", terminal["terminal_kind"])
+        self.assertEqual("runtime_dependency_missing", terminal["reason_code"])
+        failure = json.loads((run_dir / "executor_failure.json").read_text(encoding="utf-8"))
+        self.assertEqual("runtime_dependency_missing", failure["reason_code"])
         brief = json.loads((run_dir / "manager_brief.json").read_text(encoding="utf-8"))
-        self.assertEqual("runtime_dependency_missing", brief["dependency_issues"][0]["metadata"]["issue_kind"])
+        self.assertEqual("runtime_dependency_missing", brief["failure_report"]["reason_code"])
+
+    def test_executor_result_tool_accepts_valid_complete_manifest(self) -> None:
+        project_root = self.project_service.project_path("test-project")
+        run_id = "run_executor_result_complete"
+        run_dir = project_root / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store = self.project_service.graph_store("test-project")
+        card = next(item for item in store.load_cards() if item.card_id == "card_enrichment_group")
+        packet = self.worker._task_packet("test-project", run_id, card, store.load_graph().assets, "shell")
+        packet_path = run_dir / "task_packet.json"
+        packet_path.write_text(json.dumps(packet.model_dump(), ensure_ascii=True), encoding="utf-8")
+
+        adapter = ShellWorkerAdapter()
+        spec = adapter.build_launch_spec(
+            packet=packet,
+            packet_path=packet_path,
+            run_dir=run_dir,
+            project_root=project_root,
+            settings=self.project_service.settings,
+        )
+
+        created_assets: list[dict[str, Any]] = []
+        for item in packet.expected_outputs:
+            output_path = project_root / item.path_hint
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(f"generated:{item.role}\n", encoding="utf-8")
+            created_assets.append(
+                {
+                    "role": item.role,
+                    "path": item.path_hint,
+                    "artifact_class": item.artifact_class,
+                    "format": item.preferred_format or (item.accepted_formats[0] if item.accepted_formats else None),
+                }
+            )
+        code_path = project_root / "scripts" / "generated" / run_id / "analysis.py"
+        code_path.parent.mkdir(parents=True, exist_ok=True)
+        code_path.write_text("print('ok')\n", encoding="utf-8")
+        atomic_write_json(
+            run_dir / "manifest.candidate.json",
+            {
+                "schema_version": "executor_manifest.v2",
+                "summary": "Executor result helper completed.",
+                "created_assets": created_assets,
+                "code_artifacts": [
+                    {
+                        "path": str(code_path.relative_to(project_root)),
+                        "language": "python",
+                        "purpose": "Test artifact.",
+                    }
+                ],
+                "manager_report": {
+                    "summary": "Executor result helper completed.",
+                    "warnings": [],
+                },
+            },
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(run_dir / "report_executor_result.py"),
+                "complete",
+                "--manifest",
+                str(run_dir / "manifest.candidate.json"),
+            ],
+            cwd=run_dir,
+            env=spec.environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        payload = json.loads(result.stdout.strip())
+        self.assertTrue(payload["ok"])
+        terminal = json.loads((run_dir / "terminal_report.json").read_text(encoding="utf-8"))
+        self.assertEqual("report_complete", terminal["terminal_kind"])
+        self.assertEqual("pending_review", terminal["status"])
+        completion = json.loads((run_dir / "executor_completion.json").read_text(encoding="utf-8"))
+        self.assertEqual("manifest.candidate.json", completion["candidate_manifest_path"])
+        manifest = Manifest.model_validate(completion["canonical_manifest"])
+        self.assertEqual("success", manifest.status)
+        self.assertEqual(run_id, manifest.run_id)
+        self.assertEqual("Executor result helper completed.", self.manifest_service.manager_summary(manifest))
+
+    def test_executor_result_tool_budget_exhaustion_forces_contract_violation(self) -> None:
+        project_root = self.project_service.project_path("test-project")
+        run_id = "run_executor_result_budget"
+        run_dir = project_root / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store = self.project_service.graph_store("test-project")
+        card = next(item for item in store.load_cards() if item.card_id == "card_enrichment_group")
+        packet = self.worker._task_packet("test-project", run_id, card, store.load_graph().assets, "shell")
+        packet_path = run_dir / "task_packet.json"
+        packet_path.write_text(json.dumps(packet.model_dump(), ensure_ascii=True), encoding="utf-8")
+
+        adapter = ShellWorkerAdapter()
+        spec = adapter.build_launch_spec(
+            packet=packet,
+            packet_path=packet_path,
+            run_dir=run_dir,
+            project_root=project_root,
+            settings=self.project_service.settings,
+        )
+
+        atomic_write_json(
+            run_dir / "manifest.candidate.json",
+            {
+                "schema_version": "executor_manifest.v2",
+                "summary": "invalid complete",
+                "created_assets": [],
+                "code_artifacts": [],
+                "manager_report": {"summary": "invalid complete", "warnings": []},
+            },
+        )
+        last_payload = None
+        for _ in range(3):
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(run_dir / "report_executor_result.py"),
+                    "complete",
+                    "--manifest",
+                    str(run_dir / "manifest.candidate.json"),
+                ],
+                cwd=run_dir,
+                env=spec.environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            last_payload = json.loads(result.stdout.strip())
+
+        self.assertIsNotNone(last_payload)
+        self.assertFalse(last_payload["ok"])
+        self.assertEqual("report_complete_repair_budget_exhausted", last_payload["error_code"])
+        terminal = json.loads((run_dir / "terminal_report.json").read_text(encoding="utf-8"))
+        self.assertEqual("synthetic_failure", terminal["terminal_kind"])
+        failure = json.loads((run_dir / "executor_failure.json").read_text(encoding="utf-8"))
+        self.assertEqual("contract_violation", failure["reason_code"])
+
+    def test_executor_result_tool_duplicate_terminal_call_returns_already_terminal(self) -> None:
+        project_root = self.project_service.project_path("test-project")
+        run_id = "run_executor_result_duplicate"
+        run_dir = project_root / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store = self.project_service.graph_store("test-project")
+        card = next(item for item in store.load_cards() if item.card_id == "card_enrichment_group")
+        packet = self.worker._task_packet("test-project", run_id, card, store.load_graph().assets, "shell")
+        packet_path = run_dir / "task_packet.json"
+        packet_path.write_text(json.dumps(packet.model_dump(), ensure_ascii=True), encoding="utf-8")
+
+        adapter = ShellWorkerAdapter()
+        spec = adapter.build_launch_spec(
+            packet=packet,
+            packet_path=packet_path,
+            run_dir=run_dir,
+            project_root=project_root,
+            settings=self.project_service.settings,
+        )
+
+        first = subprocess.run(
+            [
+                sys.executable,
+                str(run_dir / "report_executor_result.py"),
+                "fail",
+                "--reason-code",
+                "runtime_dependency_missing",
+                "--summary",
+                "missing package",
+                "--details-json",
+                "{\"missing_packages\":[\"scanpy\"]}",
+            ],
+            cwd=run_dir,
+            env=spec.environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        second = subprocess.run(
+            [
+                sys.executable,
+                str(run_dir / "report_executor_result.py"),
+                "fail",
+                "--reason-code",
+                "execution_error",
+                "--summary",
+                "late second terminal",
+                "--details-json",
+                "{}",
+            ],
+            cwd=run_dir,
+            env=spec.environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+        self.assertEqual(2, second.returncode, second.stdout + second.stderr)
+        payload = json.loads(second.stdout.strip())
+        self.assertEqual("run_already_terminal", payload["error_code"])
+        terminal = json.loads((run_dir / "terminal_report.json").read_text(encoding="utf-8"))
+        self.assertEqual("runtime_dependency_missing", terminal["reason_code"])
+
+    def test_executor_result_tool_cross_direction_terminal_idempotency(self) -> None:
+        project_root = self.project_service.project_path("test-project")
+        run_id = "run_executor_result_cross_direction"
+        run_dir = project_root / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store = self.project_service.graph_store("test-project")
+        card = next(item for item in store.load_cards() if item.card_id == "card_enrichment_group")
+        packet = self.worker._task_packet("test-project", run_id, card, store.load_graph().assets, "shell")
+        packet_path = run_dir / "task_packet.json"
+        packet_path.write_text(json.dumps(packet.model_dump(), ensure_ascii=True), encoding="utf-8")
+
+        adapter = ShellWorkerAdapter()
+        spec = adapter.build_launch_spec(
+            packet=packet,
+            packet_path=packet_path,
+            run_dir=run_dir,
+            project_root=project_root,
+            settings=self.project_service.settings,
+        )
+
+        created_assets: list[dict[str, Any]] = []
+        for item in packet.expected_outputs:
+            output_path = project_root / item.path_hint
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(f"generated:{item.role}\n", encoding="utf-8")
+            created_assets.append(
+                {
+                    "role": item.role,
+                    "path": item.path_hint,
+                    "artifact_class": item.artifact_class,
+                    "format": item.preferred_format or (item.accepted_formats[0] if item.accepted_formats else None),
+                }
+            )
+        code_path = project_root / "scripts" / "generated" / run_id / "analysis.py"
+        code_path.parent.mkdir(parents=True, exist_ok=True)
+        code_path.write_text("print('ok')\n", encoding="utf-8")
+        atomic_write_json(
+            run_dir / "manifest.candidate.json",
+            {
+                "schema_version": "executor_manifest.v2",
+                "summary": "cross direction complete",
+                "created_assets": created_assets,
+                "code_artifacts": [{"path": str(code_path.relative_to(project_root)), "language": "python"}],
+                "manager_report": {"summary": "cross direction complete", "warnings": []},
+            },
+        )
+
+        first_complete = subprocess.run(
+            [
+                sys.executable,
+                str(run_dir / "report_executor_result.py"),
+                "complete",
+                "--manifest",
+                str(run_dir / "manifest.candidate.json"),
+            ],
+            cwd=run_dir,
+            env=spec.environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        second_fail = subprocess.run(
+            [
+                sys.executable,
+                str(run_dir / "report_executor_result.py"),
+                "fail",
+                "--reason-code",
+                "execution_error",
+                "--summary",
+                "late fail",
+                "--details-json",
+                "{}",
+            ],
+            cwd=run_dir,
+            env=spec.environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, first_complete.returncode, first_complete.stdout + first_complete.stderr)
+        self.assertEqual(2, second_fail.returncode, second_fail.stdout + second_fail.stderr)
+        payload = json.loads(second_fail.stdout.strip())
+        self.assertEqual("run_already_terminal", payload["error_code"])
+        terminal = json.loads((run_dir / "terminal_report.json").read_text(encoding="utf-8"))
+        self.assertEqual("report_complete", terminal["terminal_kind"])
+
+        run_id_2 = "run_executor_result_cross_direction_fail_first"
+        run_dir_2 = project_root / "runs" / run_id_2
+        run_dir_2.mkdir(parents=True, exist_ok=True)
+        packet_2 = self.worker._task_packet("test-project", run_id_2, card, store.load_graph().assets, "shell")
+        packet_path_2 = run_dir_2 / "task_packet.json"
+        packet_path_2.write_text(json.dumps(packet_2.model_dump(), ensure_ascii=True), encoding="utf-8")
+        spec_2 = adapter.build_launch_spec(
+            packet=packet_2,
+            packet_path=packet_path_2,
+            run_dir=run_dir_2,
+            project_root=project_root,
+            settings=self.project_service.settings,
+        )
+        created_assets_2: list[dict[str, Any]] = []
+        for item in packet_2.expected_outputs:
+            output_path = project_root / item.path_hint
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(f"generated:{item.role}\n", encoding="utf-8")
+            created_assets_2.append(
+                {
+                    "role": item.role,
+                    "path": item.path_hint,
+                    "artifact_class": item.artifact_class,
+                    "format": item.preferred_format or (item.accepted_formats[0] if item.accepted_formats else None),
+                }
+            )
+        code_path_2 = project_root / "scripts" / "generated" / run_id_2 / "analysis.py"
+        code_path_2.parent.mkdir(parents=True, exist_ok=True)
+        code_path_2.write_text("print('ok')\n", encoding="utf-8")
+        atomic_write_json(
+            run_dir_2 / "manifest.candidate.json",
+            {
+                "schema_version": "executor_manifest.v2",
+                "summary": "late complete",
+                "created_assets": created_assets_2,
+                "code_artifacts": [{"path": str(code_path_2.relative_to(project_root)), "language": "python"}],
+                "manager_report": {"summary": "late complete", "warnings": []},
+            },
+        )
+
+        first_fail = subprocess.run(
+            [
+                sys.executable,
+                str(run_dir_2 / "report_executor_result.py"),
+                "fail",
+                "--reason-code",
+                "execution_error",
+                "--summary",
+                "fail first",
+                "--details-json",
+                "{}",
+            ],
+            cwd=run_dir_2,
+            env=spec_2.environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        second_complete = subprocess.run(
+            [
+                sys.executable,
+                str(run_dir_2 / "report_executor_result.py"),
+                "complete",
+                "--manifest",
+                str(run_dir_2 / "manifest.candidate.json"),
+            ],
+            cwd=run_dir_2,
+            env=spec_2.environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, first_fail.returncode, first_fail.stdout + first_fail.stderr)
+        self.assertEqual(2, second_complete.returncode, second_complete.stdout + second_complete.stderr)
+        payload_2 = json.loads(second_complete.stdout.strip())
+        self.assertEqual("run_already_terminal", payload_2["error_code"])
+        terminal_2 = json.loads((run_dir_2 / "terminal_report.json").read_text(encoding="utf-8"))
+        self.assertEqual("report_fail", terminal_2["terminal_kind"])
+
+    def test_executor_result_tool_unknown_reason_code_normalizes_to_unknown(self) -> None:
+        project_root = self.project_service.project_path("test-project")
+        run_id = "run_executor_result_unknown_reason"
+        run_dir = project_root / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store = self.project_service.graph_store("test-project")
+        card = next(item for item in store.load_cards() if item.card_id == "card_enrichment_group")
+        packet = self.worker._task_packet("test-project", run_id, card, store.load_graph().assets, "shell")
+        packet_path = run_dir / "task_packet.json"
+        packet_path.write_text(json.dumps(packet.model_dump(), ensure_ascii=True), encoding="utf-8")
+
+        adapter = ShellWorkerAdapter()
+        spec = adapter.build_launch_spec(
+            packet=packet,
+            packet_path=packet_path,
+            run_dir=run_dir,
+            project_root=project_root,
+            settings=self.project_service.settings,
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(run_dir / "report_executor_result.py"),
+                "fail",
+                "--reason-code",
+                "custom_reason",
+                "--summary",
+                "unknown failure",
+                "--details-json",
+                "{\"source\":\"test\"}",
+            ],
+            cwd=run_dir,
+            env=spec.environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        failure = json.loads((run_dir / "executor_failure.json").read_text(encoding="utf-8"))
+        self.assertEqual("unknown", failure["reason_code"])
+        self.assertEqual("custom_reason", failure["details"]["original_reason_code"])
+
+    def test_manifest_service_rejects_candidate_manifest_path_traversal_and_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="manifest-path-check-") as tmpdir:
+            root = Path(tmpdir)
+            run_dir = root / "runs" / "run_path_guard"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            outside = root / "outside.json"
+            outside.write_text("{}", encoding="utf-8")
+            escaped = run_dir / "escaped.json"
+            escaped.symlink_to(outside)
+
+            with self.assertRaises(ValueError):
+                ManifestService.resolve_candidate_manifest_path(run_dir, "../outside.json")
+            with self.assertRaises(ValueError):
+                ManifestService.resolve_candidate_manifest_path(run_dir, str(escaped))
+
+    def test_report_complete_run_exits_without_synthesized_failure_and_backend_writes_manager_brief(self) -> None:
+        run = self.worker.start_run("test-project", "card_enrichment_group")
+        self._wait_for_run("test-project", run["run_id"])
+
+        run_dir = self.project_service.project_path("test-project") / "runs" / run["run_id"]
+        terminal = json.loads((run_dir / "terminal_report.json").read_text(encoding="utf-8"))
+        self.assertEqual("report_complete", terminal["terminal_kind"])
+        self.assertFalse((run_dir / "executor_failure.json").exists())
+        brief = json.loads((run_dir / "manager_brief.json").read_text(encoding="utf-8"))
+        self.assertIn("final_report", brief)
+        self.assertTrue(brief["final_report"]["summary"])
 
     def test_command_adapter_wraps_with_bwrap_when_available(self) -> None:
         project_root = self.project_service.project_path("test-project")
@@ -3388,7 +3840,8 @@ candidate.write_text(json.dumps(manifest), encoding="utf-8")
             self.assertTrue(any(item["status"] == "failed" for item in trace["manifest_validation"]))
             self.assertTrue(any(item["path"].endswith("manifest.json") for item in trace["file_timeline"]))
             self.assertTrue((run_dir / "manifest_repair_prompt.md").exists())
-            self.assertIn("status must be exactly one of", (run_dir / "manifest_repair_prompt.md").read_text(encoding="utf-8"))
+            self.assertIn("schema_version", (run_dir / "manifest_repair_prompt.md").read_text(encoding="utf-8"))
+            self.assertIn("manager_report", (run_dir / "manifest_repair_prompt.md").read_text(encoding="utf-8"))
             self.assertEqual(
                 ["executor_prompt.md", "manifest_repair_prompt.md"],
                 (run_dir / "seen_prompts.log").read_text(encoding="utf-8").splitlines(),
@@ -3470,11 +3923,10 @@ candidate.write_text(json.dumps(manifest), encoding="utf-8")
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             manifest = Manifest.model_validate(json.loads((run_dir / "manifest.json").read_text(encoding="utf-8")))
             self.assertEqual("success", manifest.status)
-            self.assertEqual("Reviewed the declared inputs and used the relevant ones for this analysis.", manifest.validation_evidence["input_conclusion"])
             self.assertFalse((run_dir / "manifest_repair_prompt.md").exists())
             prompt_text = (run_dir / "executor_prompt.md").read_text(encoding="utf-8")
-            self.assertIn("validation_evidence.input_conclusion", prompt_text)
-            self.assertIn("Do not restate the full input list in the manifest", prompt_text)
+            self.assertIn("manager_report.summary", prompt_text)
+            self.assertNotIn("validation_evidence.input_conclusion", prompt_text)
             context = self.manifest_service.manifest_to_review_context("test-project", run_id)
             self.assertEqual(len(packet.input_assets), len(context.declared_input_assets))
             self.assertEqual("Reviewed the declared inputs and used the relevant ones for this analysis.", context.input_conclusion)
@@ -3599,24 +4051,21 @@ print(
     flush=True,
 )
 manifest = {
-    "run_id": packet["task_id"],
-    "status": "success",
+    "schema_version": "executor_manifest.v2",
     "summary": "Provider manifest complete.",
-    "inputs_used": packet["input_assets"],
     "created_assets": created_assets,
     "code_artifacts": [{"path": str(code_path.relative_to(project_root)), "language": "python"}],
-    "commands_executed": ["provider-stub"],
-    "metrics": {},
-    "key_findings": ["provider stub emitted structured events"],
-    "recommended_graph_updates": [],
-    "warnings": [],
+    "manager_report": {
+        "summary": "Provider wrapper completed.",
+        "warnings": [],
+    },
 }
 manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 """.strip()
             + "\n",
             encoding="utf-8",
         )
-        settings.opencode_command = f"{{python}} {script_path} {{manifest_path}} {{task_packet_path}} {{project_root}}"
+        settings.opencode_command = f"{{python}} {script_path} {{manifest_candidate_path}} {{task_packet_path}} {{project_root}}"
         try:
             run = self.worker.start_run("test-project", "card_enrichment_group", worker_type="opencode")
             self._wait_for_run("test-project", run["run_id"])
@@ -3656,10 +4105,181 @@ print('BP_EVENT {"type":"progress_update","stage":"provider","progress":10,"mess
             snapshot = self.project_service.get_project_snapshot("test-project")
             run_record = next(item for item in snapshot["graph"].runs if item.run_id == run["run_id"])
             self.assertEqual("failed", run_record.status)
+            failure = json.loads((project_root / "runs" / run["run_id"] / "executor_failure.json").read_text(encoding="utf-8"))
+            self.assertEqual("execution_error", failure["reason_code"])
             transcript = (
                 self.project_service.project_path("test-project") / "runs" / run["run_id"] / "transcript.md"
             ).read_text(encoding="utf-8")
             self.assertIn("manifest.json is missing", transcript)
+        finally:
+            settings.opencode_command = original_command
+
+    def test_exit_zero_without_terminal_report_synthesizes_contract_violation(self) -> None:
+        script = "print('exit zero without terminal report', flush=True)"
+        self.worker.registry["no_terminal_zero_stub"] = InlineCommandWorkerAdapter("no_terminal_zero_stub", script)
+
+        run = self.worker.start_run("test-project", "card_enrichment_group", worker_type="no_terminal_zero_stub")
+        self._wait_for_run("test-project", run["run_id"])
+
+        run_dir = self.project_service.project_path("test-project") / "runs" / run["run_id"]
+        failure = json.loads((run_dir / "executor_failure.json").read_text(encoding="utf-8"))
+        self.assertEqual("contract_violation", failure["reason_code"])
+        terminal = json.loads((run_dir / "terminal_report.json").read_text(encoding="utf-8"))
+        self.assertEqual("synthetic_failure", terminal["terminal_kind"])
+
+    def test_agent_cli_wrapper_nonzero_exit_without_terminal_report_marks_execution_error(self) -> None:
+        settings = self.project_service.settings
+        original_command = settings.opencode_command
+        project_root = self.project_service.project_path("test-project")
+        script_path = project_root / "scripts" / "generated" / "opencode_nonzero_exit.py"
+        script_path.write_text(
+            """
+import sys
+print("provider failed before terminal report", flush=True)
+raise SystemExit(9)
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        settings.opencode_command = f"{{python}} {script_path}"
+        try:
+            run = self.worker.start_run("test-project", "card_enrichment_group", worker_type="opencode")
+            self._wait_for_run("test-project", run["run_id"])
+            run_dir = project_root / "runs" / run["run_id"]
+            failure = json.loads((run_dir / "executor_failure.json").read_text(encoding="utf-8"))
+            self.assertEqual("execution_error", failure["reason_code"])
+            terminal = json.loads((run_dir / "terminal_report.json").read_text(encoding="utf-8"))
+            self.assertEqual("synthetic_failure", terminal["terminal_kind"])
+        finally:
+            settings.opencode_command = original_command
+
+    def test_agent_cli_wrapper_terminal_failure_trace_uses_reason_code(self) -> None:
+        settings = self.project_service.settings
+        original_command = settings.opencode_command
+        project_root = self.project_service.project_path("test-project")
+        script_path = project_root / "scripts" / "generated" / "opencode_terminal_fail.py"
+        script_path.write_text(
+            """
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+run_dir = Path(os.environ["BLUEPRINT_RUN_DIR"])
+tool = Path(os.environ["BLUEPRINT_EXECUTOR_RESULT_TOOL"])
+result = subprocess.run(
+    [
+        sys.executable,
+        str(tool),
+        "fail",
+        "--reason-code",
+        "execution_error",
+        "--summary",
+        "provider failed cleanly",
+        "--details-json",
+        json.dumps({"source": "provider"}),
+    ],
+    cwd=run_dir,
+    check=False,
+)
+raise SystemExit(result.returncode)
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        settings.opencode_command = f"{{python}} {script_path}"
+        try:
+            run = self.worker.start_run("test-project", "card_enrichment_group", worker_type="opencode")
+            self._wait_for_run("test-project", run["run_id"])
+            trace = json.loads((project_root / "runs" / run["run_id"] / "agent_trace.json").read_text(encoding="utf-8"))
+            self.assertEqual("execution_error", trace["current_phase"])
+            self.assertTrue(any(item["code"] == "terminal_failure_reported" for item in trace["observations"]))
+        finally:
+            settings.opencode_command = original_command
+
+    def test_report_complete_path_ignores_legacy_dependency_issue_side_channel(self) -> None:
+        settings = self.project_service.settings
+        original_command = settings.opencode_command
+        project_root = self.project_service.project_path("test-project")
+        script_path = project_root / "scripts" / "generated" / "opencode_complete_with_legacy_issue.py"
+        script_path.write_text(
+            """
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+packet = json.loads(Path(os.environ["BLUEPRINT_TASK_PACKET"]).read_text(encoding="utf-8"))
+project_root = Path(os.environ["BLUEPRINT_PROJECT_ROOT"])
+run_dir = Path(os.environ["BLUEPRINT_RUN_DIR"])
+issue_path = Path(os.environ["BLUEPRINT_DEPENDENCY_ISSUE_PATH"])
+created_assets = []
+for item in packet["expected_outputs"]:
+    output_path = project_root / item["path_hint"]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(f"generated:{item['role']}\\n", encoding="utf-8")
+    created_assets.append({"role": item["role"], "path": item["path_hint"]})
+code_path = project_root / "scripts" / "generated" / packet["task_id"] / "analysis.py"
+code_path.parent.mkdir(parents=True, exist_ok=True)
+code_path.write_text("print('ok')\\n", encoding="utf-8")
+issue_path.write_text(
+    json.dumps(
+        {
+            "schema_version": "dependency_issue.v1",
+            "blocking": True,
+            "issues": [
+                {
+                    "metadata": {
+                        "issue_kind": "runtime_dependency_missing",
+                        "missing_packages": ["legacyOnly"],
+                        "blocking": True,
+                    }
+                }
+            ],
+        }
+    ),
+    encoding="utf-8",
+)
+candidate = run_dir / "manifest.candidate.json"
+candidate.write_text(
+    json.dumps(
+        {
+            "schema_version": "executor_manifest.v2",
+            "summary": "complete despite legacy side channel",
+            "created_assets": created_assets,
+            "code_artifacts": [{"path": str(code_path.relative_to(project_root)), "language": "python"}],
+            "manager_report": {"summary": "complete despite legacy side channel", "warnings": []},
+        }
+    ),
+    encoding="utf-8",
+)
+result = subprocess.run(
+    [
+        sys.executable,
+        os.environ["BLUEPRINT_EXECUTOR_RESULT_TOOL"],
+        "complete",
+        "--manifest",
+        str(candidate),
+    ],
+    cwd=run_dir,
+    check=False,
+)
+raise SystemExit(result.returncode)
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        settings.opencode_command = f"{{python}} {script_path}"
+        try:
+            run = self.worker.start_run("test-project", "card_enrichment_group", worker_type="opencode")
+            self._wait_for_run("test-project", run["run_id"])
+            events = self.project_service.graph_store("test-project").load_run_events(run["run_id"])
+            self.assertFalse(any(event.event_type == "runtime_dependency_missing" for event in events))
+            snapshot = self.project_service.get_project_snapshot("test-project")
+            run_record = next(item for item in snapshot["graph"].runs if item.run_id == run["run_id"])
+            self.assertEqual("reviewed", run_record.status)
         finally:
             settings.opencode_command = original_command
 

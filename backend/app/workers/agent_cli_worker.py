@@ -15,7 +15,7 @@ class AgentCliWorkerAdapter(CommandTemplateWorkerAdapter):
     recommended_launch_examples: list[str] = []
     notes: list[str] = [
         "This adapter runs through the shared Blueprint agent_cli_executor wrapper.",
-        "The provider launch template should invoke a non-interactive CLI that consumes executor_prompt.md and writes manifest.json.",
+        "The provider launch template should invoke a non-interactive CLI that consumes executor_prompt.md, writes manifest.candidate.json, and calls report_executor_result.py.",
     ]
 
     def resolve_command_template(self, settings: object) -> str | None:

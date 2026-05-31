@@ -7,10 +7,12 @@ import csv
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 from urllib import error, request
 
-from app.models.runs import CreatedAsset, Manifest, TaskPacket
+from app.models.runs import CodeArtifact, CreatedAsset, ExecutorManifestV2, ManagerReport, TaskPacket
 from app.services.utils import atomic_write_json
 
 
@@ -20,6 +22,38 @@ PROVIDER_RETRY_DELAYS_SECONDS = [1, 2, 4, 8]
 
 def _emit(payload: dict[str, Any]) -> None:
     print("BP_EVENT " + json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+def _report_complete(run_dir: Path) -> int:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(run_dir / "report_executor_result.py"),
+            "complete",
+            "--manifest",
+            str(run_dir / "manifest.candidate.json"),
+        ],
+        cwd=run_dir,
+        check=False,
+    ).returncode
+
+
+def _report_fail(run_dir: Path, *, summary: str, reason_code: str = "execution_error", details: dict[str, Any] | None = None) -> int:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(run_dir / "report_executor_result.py"),
+            "fail",
+            "--reason-code",
+            reason_code,
+            "--summary",
+            summary,
+            "--details-json",
+            json.dumps(details or {}, ensure_ascii=False),
+        ],
+        cwd=run_dir,
+        check=False,
+    ).returncode
 
 
 def _read_text_preview(path: Path) -> str:
@@ -197,28 +231,45 @@ def _run_rna_prep(packet: TaskPacket, project_root: Path, run_dir: Path) -> int:
         CreatedAsset(role="run_summary", path=summary_rel, description="RNA prep summary."),
         CreatedAsset(role="run_preview", path=preview_rel, description="RNA prep SVG preview."),
     ]
-    manifest = Manifest(
-        run_id=packet.task_id,
-        status="success",
-        summary=f"Filtered {len(rows)} genes to {len(filtered_rows)} genes using count>=10 in at least 3 samples.",
-        inputs_used=packet.input_assets,
-        created_assets=created_assets,
-        commands_executed=["pi_agent_executor:rna_prep_local_filter"],
-        metrics={
-            "raw_genes": len(rows),
-            "filtered_genes": len(filtered_rows),
-            "samples": len(sample_columns),
-        },
-        key_findings=[
-            f"{len(filtered_rows)} of {len(rows)} genes passed the low-expression filter.",
-            f"Detected sample groups: {', '.join(f'{key}={value}' for key, value in sorted(group_counts.items()))}.",
-        ],
-        warnings=warning_messages,
+    code_dir = project_root / "scripts" / "generated" / packet.task_id
+    code_dir.mkdir(parents=True, exist_ok=True)
+    code_path = code_dir / "rna_prep_local_filter.py"
+    code_path.write_text(
+        "\n".join(
+            [
+                '"""Preserved local RNA prep filtering note for Blueprint validation."""',
+                f"RUN_ID = {packet.task_id!r}",
+                f"RAW_GENE_COUNT = {len(rows)}",
+                f"FILTERED_GENE_COUNT = {len(filtered_rows)}",
+                f"SAMPLE_COUNT = {len(sample_columns)}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
     )
-    atomic_write_json(run_dir / "manifest.json", manifest.model_dump())
+    manifest = ExecutorManifestV2(
+        schema_version="executor_manifest.v2",
+        summary=f"Filtered {len(rows)} genes to {len(filtered_rows)} genes using count>=10 in at least 3 samples.",
+        created_assets=created_assets,
+        code_artifacts=[
+            CodeArtifact(
+                path=str(code_path.relative_to(project_root)),
+                language="python",
+                purpose="Preserved local RNA prep filtering logic summary.",
+            )
+        ],
+        manager_report=ManagerReport(
+            summary=f"Filtered {len(rows)} genes to {len(filtered_rows)} genes using count>=10 in at least 3 samples.",
+            warnings=warning_messages,
+        ),
+    )
+    atomic_write_json(run_dir / "manifest.candidate.json", manifest.model_dump(exclude_none=True))
+    result = _report_complete(run_dir)
+    if result != 0:
+        return result
     for asset in created_assets:
         _emit({"type": "progress_update", "stage": asset.role, "message": f"Wrote {asset.role}.", "artifacts": [asset.path]})
-    _emit({"type": "final_report", "summary": manifest.summary, "key_findings": manifest.key_findings, "warnings": manifest.warnings})
+    _emit({"type": "final_report", "summary": manifest.summary, "warnings": manifest.manager_report.warnings})
     return 0
 
 
@@ -396,28 +447,40 @@ def main() -> int:
         response = _extract_json(_extract_text(response_payload))
         _emit({"type": "progress_update", "stage": "model_response", "progress": 60, "message": "DeepSeek returned executor JSON."})
         created_assets = _write_outputs(packet, project_root, response)
-        manifest = Manifest(
-            run_id=packet.task_id,
-            status="success",
+        code_dir = project_root / "scripts" / "generated" / packet.task_id
+        code_dir.mkdir(parents=True, exist_ok=True)
+        code_path = code_dir / "pi_executor_response.json"
+        code_path.write_text(json.dumps(response, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        manifest = ExecutorManifestV2(
+            schema_version="executor_manifest.v2",
             summary=str(response.get("summary") or "Pi executor completed."),
-            inputs_used=packet.input_assets,
             created_assets=created_assets,
-            commands_executed=["pi_agent_executor:deepseek_messages"],
-            metrics=response.get("metrics") if isinstance(response.get("metrics"), dict) else {},
-            key_findings=response.get("key_findings") if isinstance(response.get("key_findings"), list) else [],
-            warnings=response.get("warnings") if isinstance(response.get("warnings"), list) else [],
+            code_artifacts=[
+                CodeArtifact(
+                    path=str(code_path.relative_to(project_root)),
+                    language="json",
+                    purpose="Preserved structured pi executor response.",
+                )
+            ],
+            manager_report=ManagerReport(
+                summary=str(response.get("summary") or "Pi executor completed."),
+                warnings=response.get("warnings") if isinstance(response.get("warnings"), list) else [],
+            ),
         )
-        atomic_write_json(run_dir / "manifest.json", manifest.model_dump())
+        atomic_write_json(run_dir / "manifest.candidate.json", manifest.model_dump(exclude_none=True))
+        result = _report_complete(run_dir)
+        if result != 0:
+            return result
         _emit(
             {
                 "type": "final_report",
                 "summary": manifest.summary,
-                "key_findings": manifest.key_findings,
-                "warnings": manifest.warnings,
+                "warnings": manifest.manager_report.warnings,
             }
         )
         return 0
     except Exception as exc:
+        _report_fail(run_dir, summary=str(exc), reason_code="execution_error", details={"provider": "pi"})
         _emit({"type": "issue_report", "stage": "pi_executor", "severity": "high", "needs_manager": True, "message": str(exc)})
         print(f"[pi_agent_executor] {exc}", flush=True)
         return 1

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.models.runs import ExecutorValidationReport, Manifest, ManifestReviewContext, TaskPacket
+from app.models.runs import (
+    ExecutorManifestV2,
+    ExecutorValidationReport,
+    Manifest,
+    ManifestReviewContext,
+    TaskPacket,
+)
 from app.services.artifact_format_service import detect_artifact_class, detect_artifact_format
 from app.services.project_service import ProjectService
 from app.services.utils import atomic_write_json, read_json, resolve_within, sha256_file
@@ -36,7 +43,74 @@ class ManifestService:
     def load_manifest(self, project_id: str, run_id: str) -> Manifest:
         root = self.project_service.project_path(project_id)
         payload = read_json(root / "runs" / run_id / "manifest.json", {})
-        return Manifest.model_validate(payload)
+        return self.normalize_manifest_payload(payload, run_id=run_id)
+
+    @staticmethod
+    def normalize_manifest_payload(payload: object, *, run_id: str) -> Manifest:
+        if not isinstance(payload, dict):
+            raise ValueError("Manifest payload must be a JSON object.")
+        schema_version = str(payload.get("schema_version") or "").strip()
+        if schema_version == "executor_manifest.v2":
+            manifest_v2 = ExecutorManifestV2.model_validate(payload)
+            return Manifest(
+                schema_version=manifest_v2.schema_version,
+                run_id=run_id,
+                status="success",
+                summary=manifest_v2.summary,
+                created_assets=manifest_v2.created_assets,
+                code_artifacts=manifest_v2.code_artifacts,
+                warnings=list(manifest_v2.manager_report.warnings),
+                manager_report=manifest_v2.manager_report,
+            )
+        manifest = Manifest.model_validate(payload)
+        if manifest.run_id != run_id:
+            raise ValueError(f"Manifest run_id mismatch: expected {run_id}, got {manifest.run_id}")
+        return manifest
+
+    def promote_candidate_manifest(
+        self,
+        project_id: str,
+        run_id: str,
+        *,
+        candidate_manifest_path: str = "manifest.candidate.json",
+    ) -> tuple[Manifest | None, list[str]]:
+        root = self.project_service.project_path(project_id)
+        run_dir = root / "runs" / run_id
+        try:
+            candidate_path = self.resolve_candidate_manifest_path(run_dir, candidate_manifest_path)
+        except ValueError as exc:
+            return None, [str(exc)]
+        try:
+            payload = read_json(candidate_path, {})
+            manifest = self.normalize_manifest_payload(payload, run_id=run_id)
+        except (ValidationError, ValueError) as exc:
+            return None, [f"Manifest schema validation failed: {exc}"]
+        atomic_write_json(run_dir / "manifest.json", manifest.model_dump(exclude_none=True))
+        return manifest, []
+
+    @staticmethod
+    def resolve_candidate_manifest_path(run_dir: Path, candidate_manifest_path: str) -> Path:
+        raw = Path(candidate_manifest_path)
+        candidate = raw if raw.is_absolute() else (run_dir / raw)
+        resolved = candidate.resolve()
+        run_root = run_dir.resolve()
+        if resolved != run_root and run_root not in resolved.parents:
+            raise ValueError(f"Candidate manifest path escapes run directory: {candidate_manifest_path}")
+        if candidate.exists() and not candidate.is_file():
+            raise ValueError(f"Candidate manifest path is not a file: {candidate_manifest_path}")
+        return candidate
+
+    @staticmethod
+    def manager_summary(manifest: Manifest) -> str:
+        if manifest.manager_report and manifest.manager_report.summary:
+            return manifest.manager_report.summary
+        return manifest.summary
+
+    @staticmethod
+    def manager_warnings(manifest: Manifest) -> list[str]:
+        if manifest.manager_report is not None:
+            return list(manifest.manager_report.warnings)
+        return list(manifest.warnings)
 
     def load_task_packet(self, project_id: str, run_id: str) -> TaskPacket:
         root = self.project_service.project_path(project_id)
@@ -48,7 +122,7 @@ class ManifestService:
         errors: list[str] = []
         try:
             manifest = self.load_manifest(project_id, run_id)
-        except ValidationError as exc:
+        except (ValidationError, ValueError) as exc:
             return False, [f"Manifest schema validation failed: {exc}"]
         packet = self.load_task_packet(project_id, run_id)
         allowed_prefixes = tuple(packet.allowed_paths)
@@ -173,8 +247,13 @@ class ManifestService:
             f"runs/{run_id}/events.json",
             f"runs/{run_id}/executor_brief.md",
             f"runs/{run_id}/executor_prompt.md",
+            f"runs/{run_id}/report_executor_result.py",
             f"runs/{run_id}/filesystem_audit.json",
             f"runs/{run_id}/manager_brief.json",
+            f"runs/{run_id}/executor_completion.json",
+            f"runs/{run_id}/executor_failure.json",
+            f"runs/{run_id}/terminal_report.json",
+            f"runs/{run_id}/executor_result_state.json",
             f"runs/{run_id}/runtime_approvals.json",
             f"runs/{run_id}/task_packet.json",
             f"runs/{run_id}/transcript.md",
@@ -253,7 +332,7 @@ class ManifestService:
             commands_executed=manifest.commands_executed,
             metrics=manifest.metrics,
             key_findings=manifest.key_findings,
-            warnings=manifest.warnings,
+            warnings=self.manager_warnings(manifest),
             validation_errors=[] if valid and not validation_errors else validation_errors,
             executor_validation=executor_validation,
         )

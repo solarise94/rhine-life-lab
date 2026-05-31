@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from app.models.runs import Manifest
 from app.services.artifact_format_service import detect_artifact_class, detect_artifact_format
+from app.services.manifest_service import ManifestService
 from app.services.utils import atomic_write_json
 
 MAX_MANIFEST_REPAIR_ATTEMPTS = 3
@@ -60,6 +61,15 @@ def _load_task_packet(packet_path: Path) -> dict:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _read_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return default
 
 
 def _redact_text(value: str) -> str:
@@ -468,9 +478,11 @@ def _manifest_validation_errors(path: Path, *, packet: dict[str, Any] | None = N
     except json.JSONDecodeError as exc:
         return [f"{path.name} is not valid JSON: {exc}"]
     try:
-        manifest = Manifest.model_validate(payload)
-    except ValidationError as exc:
-        return [str(error) for error in exc.errors()]
+        manifest = ManifestService.normalize_manifest_payload(payload, run_id=str((packet or {}).get("task_id") or path.parent.name))
+    except (ValidationError, ValueError) as exc:
+        if isinstance(exc, ValidationError):
+            return [str(error) for error in exc.errors()]
+        return [str(exc)]
     if not packet:
         return []
 
@@ -533,7 +545,11 @@ def _promote_candidate_manifest(*, run_dir: Path) -> list[str]:
         if errors:
             return errors
         payload = json.loads(candidate_path.read_text(encoding="utf-8"))
-        atomic_write_json(manifest_path, payload)
+        manifest = ManifestService.normalize_manifest_payload(
+            payload,
+            run_id=str((packet or {}).get("task_id") or run_dir.name),
+        )
+        atomic_write_json(manifest_path, manifest.model_dump(exclude_none=True))
         return []
     if manifest_path.exists():
         return _manifest_validation_errors(manifest_path, packet=packet, project_root=run_dir.parent.parent)
@@ -558,7 +574,17 @@ def _sync_run_generated_scripts(*, run_dir: Path, packet: dict[str, Any] | None)
         shutil.copy2(source, target)
 
 
+def _terminal_failure_reason(run_dir: Path) -> str | None:
+    terminal_report = _read_json(run_dir / "terminal_report.json", {})
+    if isinstance(terminal_report, dict) and terminal_report.get("terminal_kind") in {"report_fail", "synthetic_failure"}:
+        reason_code = terminal_report.get("reason_code")
+        return reason_code if isinstance(reason_code, str) and reason_code else "unknown"
+    return None
+
+
 def _has_blocking_dependency_issue(run_dir: Path) -> bool:
+    if _terminal_failure_reason(run_dir) == "runtime_dependency_missing":
+        return True
     issue_path = run_dir / "dependency_issue.json"
     if issue_path.exists():
         try:
@@ -583,6 +609,11 @@ def _has_blocking_dependency_issue(run_dir: Path) -> bool:
             if isinstance(issue, dict) and issue.get("metadata", {}).get("issue_kind") == "runtime_dependency_missing"
         ]
     return any(isinstance(issue, dict) and issue.get("metadata", {}).get("blocking", True) for issue in issues)
+
+
+def _terminal_report(run_dir: Path) -> dict[str, Any]:
+    payload = _read_json(run_dir / "terminal_report.json", {})
+    return payload if isinstance(payload, dict) else {}
 
 
 def _write_manifest_repair_prompt(*, run_dir: Path, packet: dict, errors: list[str], attempt: int) -> Path:
@@ -626,8 +657,7 @@ def _write_manifest_repair_prompt(*, run_dir: Path, packet: dict, errors: list[s
             "```json",
             json.dumps(
                 {
-                    "run_id": packet.get("task_id"),
-                    "status": "success",
+                    "schema_version": "executor_manifest.v2",
                     "summary": "One concise summary sentence.",
                     "created_assets": [
                         {
@@ -647,14 +677,10 @@ def _write_manifest_repair_prompt(*, run_dir: Path, packet: dict, errors: list[s
                             "purpose": "Reproducible analysis script.",
                         }
                     ],
-                    "validation_evidence": {
-                        "input_conclusion": "Short factual note about the declared inputs and whether they were used.",
+                    "manager_report": {
+                        "summary": "Short summary shown to Manager before reviewer projection.",
+                        "warnings": [],
                     },
-                    "commands_executed": ["brief command description"],
-                    "metrics": {},
-                    "key_findings": [],
-                    "recommended_graph_updates": [],
-                    "warnings": [],
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -662,14 +688,12 @@ def _write_manifest_repair_prompt(*, run_dir: Path, packet: dict, errors: list[s
             "```",
             "",
             "Strict rules:",
-            "- status must be exactly one of: success, failed, partial.",
             "- Use created_assets, not outputs.",
-            "- Include summary and commands_executed.",
+            "- Include summary and manager_report.summary.",
             "- created_assets paths must point to files already produced under allowed result paths.",
             "- created_assets roles must match expected_outputs.role.",
             "- Output file class and format are detected from the file itself and must satisfy the contract.",
-            "- Preserve existing metrics and key findings if they are factual.",
-            "- validation_evidence.input_conclusion should summarize the declared inputs without repeating the full list.",
+            "- Do not add run_id, status, inputs_used, commands_executed, validation_evidence, metrics, key_findings, or top-level warnings.",
         ]
     )
     prompt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -717,6 +741,30 @@ def _run_provider_with_repair_loop(
         trace_started_monotonic=trace_started_monotonic,
     )
 
+    terminal_failure_reason = _terminal_failure_reason(run_dir)
+    if terminal_failure_reason is not None:
+        trace["status"] = "failed"
+        trace["current_phase"] = terminal_failure_reason
+        trace["finished_at"] = _utc_now()
+        trace["total_duration_seconds"] = round(time.monotonic() - started, 3)
+        if terminal_failure_reason == "runtime_dependency_missing":
+            _record_observation(
+                trace,
+                "runtime_dependency_missing",
+                "Provider reported missing required runtime dependencies; manifest repair was skipped.",
+                severity="error",
+            )
+        else:
+            _record_observation(
+                trace,
+                "terminal_failure_reported",
+                f"Provider submitted terminal failure report ({terminal_failure_reason}); manifest repair was skipped.",
+                severity="error",
+            )
+        trace["file_timeline"] = _collect_file_timeline(project_root, run_dir, packet, started_monotonic=started)
+        _write_trace(run_dir, trace)
+        return 0
+
     if _has_blocking_dependency_issue(run_dir):
         trace["status"] = "failed"
         trace["current_phase"] = "runtime_dependency_missing"
@@ -730,7 +778,11 @@ def _run_provider_with_repair_loop(
         )
         trace["file_timeline"] = _collect_file_timeline(project_root, run_dir, packet, started_monotonic=started)
         _write_trace(run_dir, trace)
-        return 3
+        return 0
+
+    terminal_report = _terminal_report(run_dir)
+    if terminal_report.get("terminal_kind") == "report_complete":
+        return_code = 0
 
     if return_code == 0:
         validation_errors = _promote_candidate_manifest(run_dir=run_dir)
@@ -802,7 +854,7 @@ def _run_provider_with_repair_loop(
     trace["finished_at"] = _utc_now()
     trace["total_duration_seconds"] = round(time.monotonic() - started, 3)
     trace["file_timeline"] = _collect_file_timeline(project_root, run_dir, packet, started_monotonic=started)
-    if not (run_dir / "manifest.json").exists():
+    if not (run_dir / "manifest.json").exists() and terminal_report.get("terminal_kind") not in {"report_fail", "synthetic_failure"}:
         _record_observation(trace, "manifest_missing", "manifest.json was not produced.", severity="error")
     _write_trace(run_dir, trace)
     print(
