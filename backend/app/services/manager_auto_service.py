@@ -85,8 +85,10 @@ class ManagerAutoService:
             next_state.max_chain_count = self._max_chain_count(limit_basis.executable_card_count)
             graph.metadata["manager_auto"] = next_state.model_dump()
             store.save_graph(graph)
-            self._emit_auto_event(project_id, next_state)
-            return next_state
+        if self.background_workboard_service is not None:
+            return self.evaluate_workboard_and_maybe_signal(project_id, session_id)
+        self._emit_auto_event(project_id, next_state)
+        return next_state
 
     def stop(self, project_id: str, session_id: str, *, reason: str, message: str) -> ManagerAutoState:
         if not session_id:

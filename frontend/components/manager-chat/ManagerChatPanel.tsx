@@ -546,7 +546,8 @@ export function ManagerChatPanel({
   const isAutoOwnerSession = Boolean(effectiveManagerAuto?.enabled && sessionId && effectiveManagerAuto.owner_session_id === sessionId);
   const isBtwSession = Boolean(effectiveManagerAuto?.enabled && sessionId && effectiveManagerAuto.owner_session_id && effectiveManagerAuto.owner_session_id !== sessionId);
   const autoBackgroundRunning = Boolean(
-    effectiveManagerAuto?.state === "running" ||
+    effectiveManagerAuto?.state === "active" ||
+      effectiveManagerAuto?.state === "running" ||
       effectiveManagerAuto?.state === "thinking" ||
       effectiveManagerAuto?.active_run_id ||
       effectiveManagerAuto?.active_job_id,

@@ -11,6 +11,7 @@ The problem is that the composer button currently uses only ownership as the vis
 
 - auto owner idle still breathes, which makes the UI look busy when no background work is active;
 - auto running is not represented as an interruptible state on the composer button;
+- workboard-active auto (`state === "active"`) should be treated as part of the interruptible running state;
 - the text input remains available during auto running, even though user steering should happen only by explicitly interrupting or by queuing directives at safe wake points;
 - `busy` is a manual chat-stream state and should not be reused as the source of truth for auto background progress.
 
@@ -41,6 +42,7 @@ const isAutoOwnerSession = Boolean(
 );
 
 const autoBackgroundRunning = Boolean(
+  managerAuto?.state === "active" ||
   managerAuto?.state === "running" ||
     managerAuto?.state === "thinking" ||
     managerAuto?.active_run_id ||
@@ -161,4 +163,3 @@ Suggested test coverage:
 - A component-level test or lightweight browser smoke check for the four visual states.
 - A functional test that auto-running click calls the stop endpoint rather than the chat submit endpoint.
 - A check that `busy` manual streaming still renders `.manager-stop-button` and is not confused with auto-running.
-

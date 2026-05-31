@@ -1121,6 +1121,38 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertEqual("provider_api_error", auto_state.stop_reason)
         self.assertFalse(manager_service.chat_called)
 
+    def test_enable_auto_immediately_activates_ready_workboard_items(self) -> None:
+        wake_service = ManagerWakeService(self.project_service)
+        auto_service = ManagerAutoService(
+            self.project_service,
+            background_workboard_service=self.background_workboard_service,
+            manager_wake_service=wake_service,
+        )
+        manager_with_worker = ManagerService(
+            self.project_service,
+            planner=AnswerOnlyPlanner(),
+            worker_service=self.worker,
+            background_workboard_service=self.background_workboard_service,
+        )
+        created = manager_with_worker.blueprint_tools.create_card(
+            "test-project",
+            {
+                "title": "Auto Workboard Entry",
+                "step": 2,
+                "summary": "Card for immediate auto workboard activation.",
+                "inputs": [],
+                "outputs": [{"role": "auto_entry", "artifact_class": "table"}],
+            },
+        )
+        board = manager_with_worker.blueprint_tools.get_background_workboard("test-project", "sess_auto")
+        self.assertTrue(any(item["card_id"] == created["card_id"] for item in board["ready_to_start"]))
+
+        state = auto_service.enable("test-project", "sess_auto")
+
+        self.assertEqual("active", state.state)
+        wakes = wake_service.list_recent("test-project")
+        self.assertEqual(["workboard_actionable"], [item.kind for item in wakes])
+
     def test_auto_run_terminal_state_emits_workboard_wake_only(self) -> None:
         wake_service = ManagerWakeService(self.project_service)
         auto_service = ManagerAutoService(
@@ -1141,6 +1173,7 @@ class ManagerFlowTest(unittest.TestCase):
         )
         worker.executor_validation_service.reviewer_worker.review = _stub_reviewer_pass
         auto_service.enable("test-project", "sess_auto")
+        initial_wake_count = len(wake_service.list_recent("test-project"))
 
         run = worker.start_run("test-project", "card_enrichment_group")
         self._wait_for_run("test-project", run["run_id"])
@@ -1149,10 +1182,11 @@ class ManagerFlowTest(unittest.TestCase):
         wakes: list[ManagerWakeEvent] = []
         while time.time() < deadline:
             wakes = wake_service.list_recent("test-project")
-            if wakes:
+            if len(wakes) > initial_wake_count:
                 break
             time.sleep(0.05)
-        self.assertEqual(["workboard_actionable"], [item.kind for item in wakes])
+        self.assertGreater(len(wakes), initial_wake_count)
+        self.assertTrue(all(item.kind == "workboard_actionable" for item in wakes))
         self.assertEqual("active", auto_service.get_state("test-project").state)
 
     def test_auto_dependency_terminal_state_emits_workboard_wake_only(self) -> None:
@@ -1172,6 +1206,7 @@ class ManagerFlowTest(unittest.TestCase):
             ),
         )
         auto_service.enable("test-project", "sess_auto")
+        initial_wake_count = len(wake_service.list_recent("test-project"))
 
         job = service.submit(
             "test-project",
@@ -1187,7 +1222,8 @@ class ManagerFlowTest(unittest.TestCase):
         job.future.result(timeout=2)
 
         wakes = wake_service.list_recent("test-project")
-        self.assertEqual(["workboard_actionable"], [item.kind for item in wakes])
+        self.assertGreater(len(wakes), initial_wake_count)
+        self.assertTrue(all(item.kind == "workboard_actionable" for item in wakes))
         self.assertEqual("active", auto_service.get_state("test-project").state)
 
     def test_delete_chat_session_removes_persisted_thread(self) -> None:
