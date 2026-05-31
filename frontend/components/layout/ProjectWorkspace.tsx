@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import dynamic from "next/dynamic";
 
-import { ApiError, api } from "@/lib/api";
+import { ApiError, api, apiUrl } from "@/lib/api";
 import {
   useAdvancedGit,
   useAdvancedGraph,
@@ -67,6 +67,23 @@ const SettingsPanels = dynamic(
 type View = "tasks" | "results" | "files" | "report" | "advanced" | "settings";
 const EMPTY_CARD_INTERACTION_ORDER: string[] = [];
 
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(() =>
+    typeof window === "undefined" ? false : window.matchMedia(query).matches,
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const media = window.matchMedia(query);
+    const handleChange = () => setMatches(media.matches);
+    handleChange();
+    media.addEventListener("change", handleChange);
+    return () => media.removeEventListener("change", handleChange);
+  }, [query]);
+
+  return matches;
+}
+
 function formatRuntime(runtime?: string) {
   if (!runtime || runtime === "__system__") return "system";
   return runtime;
@@ -81,6 +98,12 @@ function preferredExecutorProfile(profiles: ExecutorProfile[], workerType?: stri
 
 export function ProjectWorkspace({ projectId, view }: { projectId: string; view: View }) {
   const queryClient = useQueryClient();
+  const isMobileWorkspace = useMediaQuery("(max-width: 1100px)");
+  const projectEventSourceRef = useRef<EventSource | null>(null);
+  const projectEventReconnectTimerRef = useRef<number | null>(null);
+  const projectRefreshTimerRef = useRef<number | null>(null);
+  const projectDelayedRefreshTimerRef = useRef<number | null>(null);
+  const currentChatSessionIdRef = useRef<string | null>(null);
   const selectedCardId = useWorkspaceUiStore((s) => s.selectedCardByProject[projectId]);
   const cardInteractionOrder = useWorkspaceUiStore(
     (s) => s.cardInteractionOrderByProject[projectId] ?? EMPTY_CARD_INTERACTION_ORDER,
@@ -93,6 +116,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const selectedRRuntimeByProject = useWorkspaceUiStore((s) => s.selectedRRuntimeByProject?.[projectId] ?? EMPTY_SELECTED_RUNTIME_BY_CARD);
   const scriptPreference = useWorkspaceUiStore((s) => s.scriptPreferenceByProject?.[projectId] ?? "auto");
   const currentChatSessionId = useWorkspaceUiStore((s) => s.currentChatSessionIdByProject[projectId] ?? null);
+  currentChatSessionIdRef.current = currentChatSessionId;
   const notice = useWorkspaceUiStore((s) => s.noticesByProject[projectId] ?? null);
   const setSelectedCard = useWorkspaceUiStore((s) => s.setSelectedCard);
   const setSelectedWorker = useWorkspaceUiStore((s) => s.setSelectedWorker);
@@ -163,6 +187,108 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     () => snapshot?.graph.runs.filter((item) => ["queued", "needs_approval", "running", "reviewing"].includes(item.status)).length ?? 0,
     [snapshot?.graph.runs],
   );
+
+  function refetchProjectEventState(runId?: string | null) {
+    const queries = [
+      queryClient.refetchQueries({ queryKey: queryKeys.project(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.workOrder(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.advancedProposals(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.results(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.files(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.managerAuto(projectId, currentChatSessionIdRef.current), type: "active" }),
+    ];
+    if (runId) {
+      queries.push(queryClient.refetchQueries({ queryKey: queryKeys.runEvents(projectId, runId), type: "active" }));
+    }
+    void Promise.all(queries);
+  }
+
+  function scheduleProjectEventRefresh(runId?: string | null) {
+    if (typeof window === "undefined") return;
+    if (projectRefreshTimerRef.current !== null) {
+      window.clearTimeout(projectRefreshTimerRef.current);
+    }
+    projectRefreshTimerRef.current = window.setTimeout(() => {
+      projectRefreshTimerRef.current = null;
+      refetchProjectEventState(runId);
+    }, 120);
+    if (projectDelayedRefreshTimerRef.current !== null) {
+      window.clearTimeout(projectDelayedRefreshTimerRef.current);
+    }
+    projectDelayedRefreshTimerRef.current = window.setTimeout(() => {
+      projectDelayedRefreshTimerRef.current = null;
+      refetchProjectEventState(runId);
+    }, 1_000);
+  }
+
+  useEffect(() => {
+    projectEventSourceRef.current?.close();
+    projectEventSourceRef.current = null;
+    if (projectEventReconnectTimerRef.current !== null && typeof window !== "undefined") {
+      window.clearTimeout(projectEventReconnectTimerRef.current);
+      projectEventReconnectTimerRef.current = null;
+    }
+    if (typeof window === "undefined") {
+      return;
+    }
+    let stopped = false;
+    let reconnectAttempt = 0;
+
+    const connect = () => {
+      if (stopped) return;
+      const source = new EventSource(apiUrl(`/projects/${projectId}/events`));
+      projectEventSourceRef.current = source;
+      source.onopen = () => {
+        reconnectAttempt = 0;
+      };
+      source.onmessage = (event) => {
+        if (!event.data) return;
+        const payload = JSON.parse(event.data) as {
+          type?: string;
+          reason?: string;
+          run_id?: string | null;
+        };
+        if (payload.type === "heartbeat") {
+          return;
+        }
+        const runId = typeof payload.run_id === "string" ? payload.run_id : null;
+        scheduleProjectEventRefresh(runId);
+      };
+      source.onerror = () => {
+        source.close();
+        if (projectEventSourceRef.current === source) {
+          projectEventSourceRef.current = null;
+        }
+        if (stopped) return;
+        refetchProjectEventState();
+        const delay = Math.min(10_000, 1_000 * 2 ** reconnectAttempt);
+        reconnectAttempt += 1;
+        projectEventReconnectTimerRef.current = window.setTimeout(() => {
+          projectEventReconnectTimerRef.current = null;
+          connect();
+        }, delay);
+      };
+    };
+
+    connect();
+    return () => {
+      stopped = true;
+      projectEventSourceRef.current?.close();
+      projectEventSourceRef.current = null;
+      if (projectEventReconnectTimerRef.current !== null) {
+        window.clearTimeout(projectEventReconnectTimerRef.current);
+        projectEventReconnectTimerRef.current = null;
+      }
+      if (projectRefreshTimerRef.current !== null) {
+        window.clearTimeout(projectRefreshTimerRef.current);
+        projectRefreshTimerRef.current = null;
+      }
+      if (projectDelayedRefreshTimerRef.current !== null) {
+        window.clearTimeout(projectDelayedRefreshTimerRef.current);
+        projectDelayedRefreshTimerRef.current = null;
+      }
+    };
+  }, [projectId, queryClient]);
   const selectedWorkerType = selectedCard
     ? selectedWorkerByProject[selectedCard.card_id] ?? selectedRun?.worker_type ?? configuredWorkers[0]?.worker_type
     : configuredWorkers[0]?.worker_type;
@@ -520,6 +646,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
         ) : null}
         {notice ? <div className="notice-panel notice-toast">{notice}</div> : null}
         {/* Desktop */}
+        {!isMobileWorkspace ? (
         <div className="desktop-content">
           {view === "tasks" ? tasksContent : null}
           {view === "results" ? (
@@ -619,8 +746,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             />
           ) : null}
         </div>
+        ) : null}
 
         {/* Mobile */}
+        {isMobileWorkspace ? (
         <div className="mobile-content">
           {view === "tasks" ? (
             mobileTab === "chat" ? (
@@ -766,6 +895,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             </div>
           ) : null}
         </div>
+        ) : null}
 
         {artifactPreview.open ? (
           <div

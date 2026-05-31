@@ -267,10 +267,52 @@ function lastTimelineIndex(timeline: MessageTimelineItem[], predicate: (item: Me
   return -1;
 }
 
-function normalizeSessionMessages(messages: ChatSessionMessageRecord[]): ChatMessage[] {
+function hasVisibleTimelineContent(timeline?: Array<MessageTimelineItem | NonNullable<ChatSessionMessageRecord["timeline"]>[number]> | null) {
+  return Boolean(
+    timeline?.some((item) => {
+      if (!item) return false;
+      const content = "content" in item ? item.content : undefined;
+      const label = "label" in item ? item.label : undefined;
+      const toolName = "toolName" in item ? item.toolName : "tool_name" in item ? item.tool_name : undefined;
+      return Boolean(String(content ?? label ?? toolName ?? "").trim());
+    }),
+  );
+}
+
+function isEmptyPendingManagerSessionMessage(message: ChatSessionMessageRecord) {
+  return (
+    message.role === "manager" &&
+    message.state !== "done" &&
+    message.state !== "error" &&
+    !String(message.content ?? "").trim() &&
+    !String(message.thinking ?? "").trim() &&
+    !hasVisibleTimelineContent(message.timeline)
+  );
+}
+
+function isEmptyPendingManagerMessage(message: ChatMessage) {
+  return (
+    message.role === "manager" &&
+    message.state !== "done" &&
+    message.state !== "error" &&
+    !message.content.trim() &&
+    !String(message.thinking ?? "").trim() &&
+    !hasVisibleTimelineContent(message.timeline)
+  );
+}
+
+function isPendingManagerSessionMessage(message: ChatSessionMessageRecord) {
+  return message.role === "manager" && message.state !== "done" && message.state !== "error";
+}
+
+function normalizeSessionMessages(
+  messages: ChatSessionMessageRecord[],
+  options: { settleStaleManagerMessages?: boolean } = {},
+): ChatMessage[] {
   return messages
-    .filter((message) => Boolean(message?.id) && (message.role === "user" || message.role === "manager"))
+    .filter((message) => Boolean(message?.id) && (message.role === "user" || message.role === "manager") && !isEmptyPendingManagerSessionMessage(message))
     .map((message) => {
+      const settleStaleManagerMessage = Boolean(options.settleStaleManagerMessages && isPendingManagerSessionMessage(message));
       const timeline: MessageTimelineItem[] = message.timeline?.length
         ? message.timeline.map((item) => ({
             id: item.id,
@@ -278,9 +320,9 @@ function normalizeSessionMessages(messages: ChatSessionMessageRecord[]): ChatMes
             content: item.content ?? undefined,
             label: item.label ?? undefined,
             toolName: item.tool_name ?? undefined,
-            status: (item.status as ToolState | "idle" | undefined) ?? undefined,
+            status: settleStaleManagerMessage && item.status === "running" ? "done" : (item.status as ToolState | "idle" | undefined) ?? undefined,
             startedAt: item.started_at ?? undefined,
-            endedAt: item.ended_at ?? undefined,
+            endedAt: settleStaleManagerMessage && item.status === "running" ? item.ended_at ?? Date.now() : item.ended_at ?? undefined,
             firstKeptMessageId: item.first_kept_message_id ?? undefined,
             tokensBefore: item.tokens_before ?? undefined,
             tokensAfter: item.tokens_after ?? undefined,
@@ -314,8 +356,8 @@ function normalizeSessionMessages(messages: ChatSessionMessageRecord[]): ChatMes
         proposal: message.proposal ?? undefined,
         thinking: message.thinking ?? undefined,
         attachments: message.attachments ?? [],
-        state: message.state ?? "done",
-        thinkingState: message.thinking ? "done" : "idle",
+        state: settleStaleManagerMessage ? "done" : message.state ?? "done",
+        thinkingState: message.thinking || settleStaleManagerMessage ? "done" : "idle",
         timeline,
         tokenUsage: normalizeTokenUsage(message.token_usage),
       };
@@ -323,8 +365,10 @@ function normalizeSessionMessages(messages: ChatSessionMessageRecord[]): ChatMes
 }
 
 function mergeChatMessagesById(current: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
-  const merged = new Map(current.map((message) => [message.id, message]));
-  for (const message of incoming) {
+  const cleanCurrent = current.filter((message) => !isEmptyPendingManagerMessage(message));
+  const cleanIncoming = incoming.filter((message) => !isEmptyPendingManagerMessage(message));
+  const merged = new Map(cleanCurrent.map((message) => [message.id, message]));
+  for (const message of cleanIncoming) {
     const existing = merged.get(message.id);
     merged.set(
       message.id,
@@ -341,11 +385,11 @@ function mergeChatMessagesById(current: ChatMessage[], incoming: ChatMessage[]):
     );
   }
   const ordered: ChatMessage[] = [];
-  for (const message of current) {
+  for (const message of cleanCurrent) {
     ordered.push(merged.get(message.id) ?? message);
   }
-  for (const message of incoming) {
-    if (!current.some((item) => item.id === message.id)) {
+  for (const message of cleanIncoming) {
+    if (!cleanCurrent.some((item) => item.id === message.id)) {
       ordered.push(message);
     }
   }
@@ -353,7 +397,7 @@ function mergeChatMessagesById(current: ChatMessage[], incoming: ChatMessage[]):
 }
 
 function serializeSessionMessages(messages: ChatMessage[]): ChatSessionMessageRecord[] {
-  return messages.map((message) => ({
+  return messages.filter((message) => !isEmptyPendingManagerMessage(message)).map((message) => ({
     id: message.id,
     role: message.role,
     content: message.content,
@@ -487,14 +531,13 @@ export function ManagerChatPanel({
   const delayedRefreshTimerRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const autoSessionReconnectTimerRef = useRef<number | null>(null);
-  const projectEventReconnectTimerRef = useRef<number | null>(null);
   const activeStreamControllerRef = useRef<AbortController | null>(null);
   const autoSessionEventSourceRef = useRef<EventSource | null>(null);
-  const projectEventSourceRef = useRef<EventSource | null>(null);
   const activeAutoStreamMessagesRef = useRef<Set<string>>(new Set());
   const autoStreamSeqRef = useRef<Map<string, number>>(new Map());
   const remoteHydratingRef = useRef(false);
   const stopRequestedRef = useRef(false);
+  const currentSessionKeyRef = useRef(`${projectId}:${sessionId ?? ""}`);
   const currentSessionIdRef = useRef<string | null>(sessionId ?? null);
   const hydratedSessionIdRef = useRef<string | null>(null);
   const lastSavedSignatureRef = useRef("[]");
@@ -646,10 +689,15 @@ export function ManagerChatPanel({
   }, [effortMenuOpen]);
 
   useEffect(() => {
+    const nextSessionKey = `${projectId}:${sessionId ?? ""}`;
+    const sessionChanged = currentSessionKeyRef.current !== nextSessionKey;
+    currentSessionKeyRef.current = nextSessionKey;
     currentSessionIdRef.current = sessionId ?? null;
-    activeStreamControllerRef.current?.abort(new Error("session_changed"));
-    activeStreamControllerRef.current = null;
-    stopRequestedRef.current = false;
+    if (sessionChanged) {
+      activeStreamControllerRef.current?.abort(new Error("session_changed"));
+      activeStreamControllerRef.current = null;
+      stopRequestedRef.current = false;
+    }
     if (saveTimerRef.current !== null && typeof window !== "undefined") {
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
@@ -662,31 +710,32 @@ export function ManagerChatPanel({
       window.clearTimeout(delayedRefreshTimerRef.current);
       delayedRefreshTimerRef.current = null;
     }
-    if (projectEventReconnectTimerRef.current !== null && typeof window !== "undefined") {
-      window.clearTimeout(projectEventReconnectTimerRef.current);
-      projectEventReconnectTimerRef.current = null;
+    if (sessionChanged) {
+      activeAutoStreamMessagesRef.current.clear();
+      autoStreamSeqRef.current.clear();
+      hydratedSessionIdRef.current = null;
+      lastSavedSignatureRef.current = "[]";
+      setBusy(false);
+      setError(null);
+      setEditingProposalId(null);
+      setEditDraft("");
+      setMentionState(null);
+      setMentionIndex(0);
+      setSlashCommandState(null);
+      setSlashCommandIndex(0);
+      setEffortMenuOpen(false);
+      setMessages([]);
     }
-    activeAutoStreamMessagesRef.current.clear();
-    autoStreamSeqRef.current.clear();
-    hydratedSessionIdRef.current = null;
-    lastSavedSignatureRef.current = "[]";
-    setBusy(false);
-    setError(null);
-    setEditingProposalId(null);
-    setEditDraft("");
-    setMentionState(null);
-    setMentionIndex(0);
-    setSlashCommandState(null);
-    setSlashCommandIndex(0);
-    setEffortMenuOpen(false);
-    setMessages([]);
-  }, [sessionId]);
+  }, [projectId, sessionId]);
 
   useEffect(() => {
     if (!sessionId || !chatSessionQuery.data?.session || activeStreamControllerRef.current) {
       return;
     }
-    const nextMessages = normalizeSessionMessages(chatSessionQuery.data.session.messages.filter((message) => !shouldIgnoreIncomingSessionMessage(message)));
+    const nextMessages = normalizeSessionMessages(
+      chatSessionQuery.data.session.messages.filter((message) => !shouldIgnoreIncomingSessionMessage(message)),
+      { settleStaleManagerMessages: true },
+    );
     const mergedMessages = mergeChatMessagesById(messages, nextMessages);
     const nextSignature = sessionMessagesSignature(mergedMessages);
     sessionRevisionRef.current = chatSessionQuery.data.session.revision;
@@ -833,71 +882,6 @@ export function ManagerChatPanel({
     };
   }, [effectiveManagerAuto?.enabled, isAutoOwnerSession, projectId, queryClient, refetchChatSession, sessionId]);
 
-  useEffect(() => {
-    projectEventSourceRef.current?.close();
-    projectEventSourceRef.current = null;
-    if (projectEventReconnectTimerRef.current !== null && typeof window !== "undefined") {
-      window.clearTimeout(projectEventReconnectTimerRef.current);
-      projectEventReconnectTimerRef.current = null;
-    }
-    if (typeof window === "undefined") {
-      return;
-    }
-    let stopped = false;
-    let reconnectAttempt = 0;
-
-    const connect = () => {
-      if (stopped) return;
-      const source = new EventSource(apiUrl(`/projects/${projectId}/events`));
-      projectEventSourceRef.current = source;
-      source.onopen = () => {
-        reconnectAttempt = 0;
-      };
-      source.onmessage = (event) => {
-        if (!event.data) return;
-        const payload = JSON.parse(event.data) as {
-          type?: string;
-          reason?: string;
-          run_id?: string | null;
-        };
-        if (payload.type === "heartbeat") {
-          return;
-        }
-        const runId = typeof payload.run_id === "string" ? payload.run_id : null;
-        schedulePartialRefresh(runId);
-        if (payload.type === "project_state_baseline" || payload.reason === "manager_auto_changed") {
-          void queryClient.refetchQueries({ queryKey: queryKeys.managerAuto(projectId, sessionId), type: "active" });
-        }
-      };
-      source.onerror = () => {
-        source.close();
-        if (projectEventSourceRef.current === source) {
-          projectEventSourceRef.current = null;
-        }
-        if (stopped) return;
-        refetchWorkspaceState();
-        void queryClient.refetchQueries({ queryKey: queryKeys.managerAuto(projectId, sessionId), type: "active" });
-        const delay = Math.min(10_000, 1_000 * 2 ** reconnectAttempt);
-        reconnectAttempt += 1;
-        projectEventReconnectTimerRef.current = window.setTimeout(() => {
-          projectEventReconnectTimerRef.current = null;
-          connect();
-        }, delay);
-      };
-    };
-
-    connect();
-    return () => {
-      stopped = true;
-      if (projectEventReconnectTimerRef.current !== null) {
-        window.clearTimeout(projectEventReconnectTimerRef.current);
-        projectEventReconnectTimerRef.current = null;
-      }
-      projectEventSourceRef.current?.close();
-      projectEventSourceRef.current = null;
-    };
-  }, [projectId, queryClient, sessionId]);
-
   useEffect(() => () => {
     if (saveTimerRef.current !== null && typeof window !== "undefined") {
       window.clearTimeout(saveTimerRef.current);
@@ -911,12 +895,8 @@ export function ManagerChatPanel({
     if (autoSessionReconnectTimerRef.current !== null && typeof window !== "undefined") {
       window.clearTimeout(autoSessionReconnectTimerRef.current);
     }
-    if (projectEventReconnectTimerRef.current !== null && typeof window !== "undefined") {
-      window.clearTimeout(projectEventReconnectTimerRef.current);
-    }
     activeStreamControllerRef.current?.abort();
     autoSessionEventSourceRef.current?.close();
-    projectEventSourceRef.current?.close();
   }, []);
 
   useEffect(() => {
@@ -1753,7 +1733,7 @@ export function ManagerChatPanel({
       clearAttachments(projectId);
       await onRefresh();
     } catch (nextError) {
-      if (stopRequestedRef.current || isAbortLikeError(nextError)) {
+      if (stopRequestedRef.current) {
         setError(null);
         updateMessage(managerMessageId, (current) => ({
           ...current,
@@ -1764,6 +1744,24 @@ export function ManagerChatPanel({
           thinking: current.thinking,
           timeline: settleRunningTimelineItems(current.timeline ?? [], "done"),
         }));
+        return;
+      }
+      if (isAbortLikeError(nextError)) {
+        setError(null);
+        setMessages((previous) =>
+          previous
+            .map((message) =>
+              message.id === managerMessageId && !isEmptyPendingManagerMessage(message)
+                ? {
+                    ...message,
+                    state: message.state === "error" ? ("error" as const) : ("done" as const),
+                    thinkingState: message.thinkingState === "running" ? "done" : message.thinkingState,
+                    timeline: settleRunningTimelineItems(message.timeline ?? [], "done"),
+                  }
+                : message,
+            )
+            .filter((message) => message.id !== managerMessageId || !isEmptyPendingManagerMessage(message)),
+        );
         return;
       }
       const message = nextError instanceof Error ? nextError.message : "Chat failed.";
