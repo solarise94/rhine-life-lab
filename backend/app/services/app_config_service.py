@@ -86,6 +86,7 @@ class AppConfigService:
             "default_worker_type": str(
                 config.get("default_worker_type") or self.settings.default_worker_type
             ),
+            "worker_timeout_seconds": self._effective_worker_timeout_seconds(config),
             "available_executors": self._available_executors(),
         }
 
@@ -115,6 +116,15 @@ class AppConfigService:
             value = str(payload["default_worker_type"]).strip()
             if value in {"pi", "opencode", "codex", "claude_code"}:
                 config["default_worker_type"] = value
+
+        if "worker_timeout_seconds" in payload and payload["worker_timeout_seconds"] is not None:
+            try:
+                value = int(payload["worker_timeout_seconds"])
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="worker_timeout_seconds must be an integer.") from exc
+            if value < 1:
+                raise HTTPException(status_code=400, detail="worker_timeout_seconds must be at least 1 second.")
+            config["worker_timeout_seconds"] = value
 
         if payload.get("clear_deepseek_api_key"):
             config.pop("deepseek_api_key", None)
@@ -252,6 +262,7 @@ class AppConfigService:
             "openai_api_base_url": str(config.get("openai_api_base_url") or self.settings.openai_api_base_url),
             "api_provider_profiles": providers,
             "provider_bindings": self._public_provider_bindings(config, provider_profiles=self._public_api_provider_profiles(config)),
+            "worker_timeout_seconds": self._effective_worker_timeout_seconds(config),
         }
 
     def _load(self) -> dict[str, Any]:
@@ -291,6 +302,8 @@ class AppConfigService:
     def _apply_runtime_overrides(self, config: dict[str, Any], *, strict: bool) -> None:
         if config.get("default_worker_type"):
             self.settings.default_worker_type = str(config["default_worker_type"])
+        if config.get("worker_timeout_seconds") is not None:
+            self.settings.worker_timeout_seconds = self._effective_worker_timeout_seconds(config)
         if config.get("deepseek_api_base_url"):
             self.settings.deepseek_api_base_url = str(config["deepseek_api_base_url"])
         if config.get("pi_deepseek_base_url"):
@@ -318,6 +331,14 @@ class AppConfigService:
         except HTTPException:
             if strict:
                 raise
+
+    def _effective_worker_timeout_seconds(self, config: dict[str, Any]) -> int:
+        value = config.get("worker_timeout_seconds")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return int(self.settings.worker_timeout_seconds)
+        return max(1, parsed)
 
     def _apply_provider_binding_overrides(self, config: dict[str, Any]) -> None:
         self.settings.manager_api_key = None

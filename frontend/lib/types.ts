@@ -449,6 +449,7 @@ export interface AppSettings {
   api_provider_profiles: ApiProviderProfile[];
   provider_bindings: ProviderBindings;
   default_worker_type: string;
+  worker_timeout_seconds: number;
   available_executors: string[];
 }
 
@@ -493,6 +494,7 @@ export interface UpdateAppSettingsPayload {
   clear_api_provider_keys?: string[];
   provider_bindings?: ProviderBindings | null;
   default_worker_type?: string | null;
+  worker_timeout_seconds?: number | null;
 }
 
 export interface TestApiProviderPayload {

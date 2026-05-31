@@ -276,6 +276,7 @@ export function SettingsPanels({
     library_summarizer: { provider_id: "deepseek" },
   });
   const [defaultWorkerType, setDefaultWorkerType] = useState("pi");
+  const [workerTimeoutSeconds, setWorkerTimeoutSeconds] = useState("900");
   const [webSearchEnabled, setWebSearchEnabled] = useState(appSettingsQuery.data?.web_search.enabled ?? false);
   const [tavilyBaseUrl, setTavilyBaseUrl] = useState(appSettingsQuery.data?.web_search.base_url ?? "https://api.tavily.com");
   const [scriptPreference, setScriptPreference] = useState<ScriptPreference>(project.runtime_preferences.script_preference);
@@ -300,6 +301,7 @@ export function SettingsPanels({
     setProviderProfiles(appSettingsQuery.data.api_provider_profiles);
     setProviderBindings(appSettingsQuery.data.provider_bindings);
     setDefaultWorkerType(appSettingsQuery.data.default_worker_type);
+    setWorkerTimeoutSeconds(String(appSettingsQuery.data.worker_timeout_seconds));
     setProviderKeys({});
     setClearProviderKeys({});
     setEditingProviderId(null);
@@ -313,6 +315,14 @@ export function SettingsPanels({
   async function saveApiSettings() {
     setStatus(null);
     try {
+      const trimmedWorkerTimeout = workerTimeoutSeconds.trim();
+      if (!trimmedWorkerTimeout) {
+        throw new Error("运行超时时间不能为空。");
+      }
+      const parsedWorkerTimeout = Number.parseInt(trimmedWorkerTimeout, 10);
+      if (!Number.isFinite(parsedWorkerTimeout) || parsedWorkerTimeout < 1) {
+        throw new Error("运行超时时间必须是大于等于 1 的整数秒。");
+      }
       const apiProviderKeys = Object.fromEntries(
         Object.entries(providerKeys)
           .map(([providerId, value]) => [providerId, value.trim()])
@@ -326,6 +336,7 @@ export function SettingsPanels({
           .map(([providerId]) => providerId),
         provider_bindings: providerBindings,
         default_worker_type: defaultWorkerType,
+        worker_timeout_seconds: parsedWorkerTimeout,
         manager_websearch_enabled: webSearchEnabled,
         tavily_api_key: tavilyKey || null,
         clear_tavily_api_key: clearTavilyKey,
@@ -334,6 +345,7 @@ export function SettingsPanels({
       setProviderProfiles(saved.api_provider_profiles);
       setProviderBindings(saved.provider_bindings);
       setDefaultWorkerType(saved.default_worker_type);
+      setWorkerTimeoutSeconds(String(saved.worker_timeout_seconds));
       setProviderTestResults(testResultsFromProfiles(saved.api_provider_profiles));
       setEditingProviderId(null);
       setDraftProviderIds({});
@@ -878,6 +890,31 @@ export function SettingsPanels({
                     : "无（请在环境变量中配置 *_COMMAND 或 *_COMMAND_JSON）"}
                 </div>
               )}
+            </div>
+          </div>
+
+          <div className="settings-provider-card">
+            <div className="settings-provider-card-header">
+              <div>
+                <strong>执行超时</strong>
+                <span>后台 card run 的系统级执行上限，单位秒。超时后 backend 会终止 executor 进程。</span>
+              </div>
+              <em>{workerTimeoutSeconds || "—"}s</em>
+            </div>
+            <div className="settings-form-grid compact">
+              <label className="settings-field">
+                <span>超时时间（秒）</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={workerTimeoutSeconds}
+                  onChange={(event) => setWorkerTimeoutSeconds(event.target.value)}
+                />
+              </label>
+              <div className="settings-inline-help">
+                当前设置会写入应用级配置，并覆盖默认的 `BLUEPRINT_WORKER_TIMEOUT_SECONDS` 运行时值。
+              </div>
             </div>
           </div>
 
