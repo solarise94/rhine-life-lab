@@ -96,10 +96,6 @@ const RUN_CONTROL_TOOLS = /^(start_card_run|rerun_card|review_card_run|stop_card
 const SLASH_COMMANDS: SlashCommandOption[] = [
   { command: "/compact", label: "压缩当前会话上下文" },
   { command: "/auto", label: "开启自动推进模式" },
-  { command: "/auto once", label: "只自动推进一轮" },
-  { command: "/auto status", label: "查看自动模式状态" },
-  { command: "/auto off", label: "关闭自动模式" },
-  { command: "/auto stop", label: "停止当前自动推进" },
 ];
 
 const DEFAULT_MANAGER_MESSAGE: ChatMessage = {
@@ -1593,8 +1589,12 @@ export function ManagerChatPanel({
   async function submit() {
     if (!draft.trim() || busy || !sessionId) return;
     const text = draft.trim();
-    if (text === "/auto" || text === "/auto once" || text === "/auto status" || text === "/auto off" || text === "/auto stop") {
+    if (text === "/auto") {
       await handleAutoCommand(text);
+      return;
+    }
+    if (text === "/auto once" || text === "/auto status" || text === "/auto off" || text === "/auto stop") {
+      handleDeprecatedAutoCommand(text);
       return;
     }
     if (text === "/compact") {
@@ -1809,55 +1809,21 @@ export function ManagerChatPanel({
     setBusy(true);
     setError(null);
     try {
-      if (command === "/auto" || command === "/auto once") {
-        const mode = command === "/auto once" ? "once" : "continuous";
-        const response = await api.enableManagerAuto(projectId, sessionId, mode);
-        applyManagerAutoState(response.state);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: createMessageId(),
-            role: "manager",
-            content:
-              mode === "once"
-                ? "Auto once 已开启。我会处理当前阻塞或启动下一张 ready card，完成后自动退出。"
-                : "Auto mode 已开启。我会在 card 完成、依赖任务结束或出现可处理阻塞时继续推进，并把每次动作写在这里。",
-            state: "done",
-            timeline: [],
-          },
-        ]);
-      } else if (command === "/auto status") {
-        const response = await api.getManagerAuto(projectId, sessionId);
-        const state = response.state;
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: createMessageId(),
-            role: "manager",
-            content: `AUTO ${state.enabled ? "ON" : "OFF"} · state=${state.state} · chain=${state.chain_count}/${state.max_chain_count}${state.stop_message ? ` · ${state.stop_message}` : ""}`,
-            state: "done",
-            timeline: [],
-          },
-        ]);
-      } else if (command === "/auto off" || command === "/auto stop") {
-        const response = await api.stopManagerAuto(
-          projectId,
-          sessionId,
-          command === "/auto stop" ? "user_stop" : "user_off",
-          command === "/auto stop" ? "因用户停止任务，已退出 auto 模式。" : "Auto mode 已关闭。",
-        );
-        applyManagerAutoState(response.state);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: createMessageId(),
-            role: "manager",
-            content: command === "/auto stop" ? "因用户停止任务，已退出 auto 模式。" : "Auto mode 已关闭。",
-            state: "done",
-            timeline: [],
-          },
-        ]);
+      if (command !== "/auto") {
+        return;
       }
+      const response = await api.enableManagerAuto(projectId, sessionId, "continuous");
+      applyManagerAutoState(response.state);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: createMessageId(),
+          role: "manager",
+          content: "Auto mode 已开启。我会在 card 完成、依赖任务结束或出现可处理阻塞时继续推进，并把每次动作写在这里。",
+          state: "done",
+          timeline: [],
+        },
+      ]);
       setDraft("");
       await onRefresh();
     } catch (nextError) {
@@ -1865,6 +1831,27 @@ export function ManagerChatPanel({
     } finally {
       setBusy(false);
     }
+  }
+
+  function handleDeprecatedAutoCommand(command: string) {
+    const message =
+      command === "/auto stop" || command === "/auto off"
+        ? "旧的 `/auto stop` 和 `/auto off` 输入入口已收起。请在 AUTO 运行态直接点发送按钮停止，或使用当前会话的 auto 控件。"
+        : command === "/auto status"
+          ? "旧的 `/auto status` 输入入口已收起。当前 auto 状态请直接看会话和项目状态面板。"
+          : "旧的 `/auto once` 输入入口已收起。当前前端只保留 `/auto` 作为显式 autonomous session 入口。";
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: createMessageId(),
+        role: "manager",
+        content: message,
+        state: "done",
+        timeline: [{ id: `${createMessageId()}_text`, kind: "text", content: message, status: "done" }],
+      },
+    ]);
+    setDraft("");
+    setError(null);
   }
 
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
