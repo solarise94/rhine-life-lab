@@ -181,9 +181,15 @@ class AssetTimelineService:
         producer_source: dict[str, str] = {}
         duplicate_outputs: set[str] = set()
         for asset in assets:
+            metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
             if asset.created_by_run and asset.created_by_run in run_card_by_id:
-                producer_by_asset[asset.asset_id] = run_card_by_id[asset.created_by_run]
+                producer_card_id = run_card_by_id[asset.created_by_run]
+                producer_by_asset[asset.asset_id] = producer_card_id
                 producer_source[asset.asset_id] = "run_output"
+                planned_asset_id = str(metadata.get("planned_asset_id") or "").strip()
+                if planned_asset_id:
+                    producer_by_asset.setdefault(planned_asset_id, producer_card_id)
+                    producer_source.setdefault(planned_asset_id, "run_output_alias")
         for card in cards:
             for output in card.outputs:
                 if not output.asset_id:

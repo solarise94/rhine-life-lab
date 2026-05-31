@@ -453,10 +453,13 @@ export const api = {
       stderr_tail?: string | null;
     }>(`/projects/${projectId}/runtime-dependency-jobs/${jobId}`);
   },
-  acceptProposal(projectId: string, proposalId: string) {
+  acceptProposal(projectId: string, proposalId: string, sessionId?: string | null) {
     return request<{ proposal: Proposal; apply_result: unknown; snapshot: ProjectSnapshot }>(
       `/projects/${projectId}/proposals/${proposalId}/accept`,
-      { method: "POST" },
+      {
+        method: "POST",
+        body: JSON.stringify({ session_id: sessionId ?? null }),
+      },
     );
   },
   modifyProposal(projectId: string, proposalId: string, message: string) {

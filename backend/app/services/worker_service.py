@@ -794,9 +794,11 @@ class WorkerService:
                 asset_by_id_copy = {a.asset_id: a for a in graph_copy.assets}
                 for output_index, real_asset in planned_bindings_for_commit:
                     out = card_copy.outputs[output_index]
+                    promoted_asset = asset_by_id_copy.get(real_asset.asset_id)
+                    if promoted_asset is not None:
+                        self._backfill_planned_asset_alias(promoted_asset, out.asset_id)
                     out.asset_id = real_asset.asset_id
                     # Use the promoted asset status from graph_copy, not the original candidate status.
-                    promoted_asset = asset_by_id_copy.get(real_asset.asset_id)
                     out.status = promoted_asset.status if promoted_asset else real_asset.status
 
                 # Attach assets.
@@ -873,6 +875,7 @@ class WorkerService:
                         asset.status = "valid"
                     for output_index, real_asset in planned_bindings_for_commit:
                         out = card.outputs[output_index]
+                        self._backfill_planned_asset_alias(real_asset, out.asset_id)
                         out.asset_id = real_asset.asset_id
                         out.status = real_asset.status
                     new_claim_ids = self._materialize_claims(
@@ -2511,9 +2514,25 @@ class WorkerService:
         )
         for output_index, real_asset in bindings:
             output = card.outputs[output_index]
+            WorkerService._backfill_planned_asset_alias(real_asset, output.asset_id)
             output.asset_id = real_asset.asset_id
             output.status = real_asset.status
         return unmapped
+
+    @staticmethod
+    def _backfill_planned_asset_alias(asset: Asset, planned_asset_id: str | None) -> None:
+        alias = str(planned_asset_id or "").strip()
+        if not alias:
+            return
+        metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
+        if str(metadata.get("planned_asset_id") or "").strip():
+            if asset.metadata is not metadata:
+                asset.metadata = metadata
+            return
+        asset.metadata = {
+            **metadata,
+            "planned_asset_id": alias,
+        }
 
     @staticmethod
     def _current_output_assets(card: Card, assets: list[Asset], *, current_run_id: str) -> list[Asset]:

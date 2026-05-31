@@ -67,11 +67,15 @@ class DependencyAttentionServiceTest(unittest.TestCase):
         return {issue["kind"] for issue in self.service.analyze_project(snapshot)["issues"]}
 
     def test_input_asset_missing(self) -> None:
-        downstream = card("downstream", inputs=[{"label": "missing", "asset_id": "missing_asset"}])
+        downstream = card("downstream", status="accepted", inputs=[{"label": "missing", "asset_id": "missing_asset"}])
         self.assertIn("input_asset_missing", self._kinds(self._snapshot([downstream], [], [])))
 
+    def test_planned_card_does_not_emit_input_attention(self) -> None:
+        downstream = card("downstream", status="planned", inputs=[{"label": "missing", "asset_id": "missing_asset"}])
+        self.assertEqual(set(), self._kinds(self._snapshot([downstream], [], [])))
+
     def test_input_asset_not_valid(self) -> None:
-        downstream = card("downstream", inputs=[{"label": "old", "asset_id": "old_asset"}])
+        downstream = card("downstream", status="accepted", inputs=[{"label": "old", "asset_id": "old_asset"}])
         snapshot = self._snapshot([downstream], [asset("old_asset", status="superseded")], [])
         issues = self.service.analyze_project(snapshot)["issues"]
         self.assertEqual("input_asset_not_valid", issues[0]["kind"])
@@ -84,7 +88,7 @@ class DependencyAttentionServiceTest(unittest.TestCase):
 
     def test_input_asset_outdated_uses_metadata_role(self) -> None:
         producer = card("producer", status="accepted", outputs=[output("table", "new_asset")])
-        downstream = card("downstream", inputs=[{"label": "table", "asset_id": "old_asset"}])
+        downstream = card("downstream", status="accepted", inputs=[{"label": "table", "asset_id": "old_asset"}])
         snapshot = self._snapshot(
             [producer, downstream],
             [
@@ -97,15 +101,26 @@ class DependencyAttentionServiceTest(unittest.TestCase):
         self.assertEqual(["input_asset_outdated"], [issue["kind"] for issue in issues])
         self.assertEqual("new_asset", issues[0]["current_asset_id"])
 
+    def test_input_asset_alias_resolves_planned_asset_id(self) -> None:
+        producer = card("producer", status="accepted", outputs=[output("table", "new_asset")])
+        downstream = card("downstream", status="accepted", inputs=[{"label": "table", "asset_id": "planned_table"}])
+        snapshot = self._snapshot(
+            [producer, downstream],
+            [asset("new_asset", run_id="run_new", role="table")],
+            [run("run_new", "producer")],
+        )
+        snapshot["graph"].assets[0].metadata["planned_asset_id"] = "planned_table"
+        self.assertEqual([], self.service.analyze_project(snapshot)["issues"])
+
     def test_inactive_producer_card_warns_without_rebinding(self) -> None:
         producer = card("producer", status="cancelled", outputs=[output("table", "old_asset")])
-        downstream = card("downstream", inputs=[{"label": "table", "asset_id": "old_asset"}])
+        downstream = card("downstream", status="accepted", inputs=[{"label": "table", "asset_id": "old_asset"}])
         snapshot = self._snapshot([producer, downstream], [asset("old_asset", run_id="run_old", role="table")], [run("run_old", "producer")])
         self.assertIn("input_producer_card_inactive", self._kinds(snapshot))
 
     def test_producer_output_removed_warns(self) -> None:
         producer = card("producer", status="accepted", outputs=[output("other", "other_asset")])
-        downstream = card("downstream", inputs=[{"label": "table", "asset_id": "old_asset"}])
+        downstream = card("downstream", status="accepted", inputs=[{"label": "table", "asset_id": "old_asset"}])
         snapshot = self._snapshot([producer, downstream], [asset("old_asset", run_id="run_old", role="table")], [run("run_old", "producer")])
         self.assertIn("input_producer_output_removed", self._kinds(snapshot))
 
@@ -138,7 +153,7 @@ class DependencyAttentionServiceTest(unittest.TestCase):
         self.assertEqual([], self.service.analyze_project(snapshot)["issues"])
 
     def test_local_lineage_dfs_warns_for_invalid_upstream(self) -> None:
-        downstream = card("downstream", inputs=[{"label": "derived", "asset_id": "derived_asset"}])
+        downstream = card("downstream", status="accepted", inputs=[{"label": "derived", "asset_id": "derived_asset"}])
         snapshot = self._snapshot(
             [downstream],
             [
@@ -174,7 +189,7 @@ class DependencyAttentionServiceTest(unittest.TestCase):
 
     def test_inspect_source_downstream_returns_issues_and_upstream_first_order(self) -> None:
         producer = card("producer", status="accepted", outputs=[output("a", "new_a")])
-        middle = card("middle", inputs=[{"label": "a", "asset_id": "old_a"}])
+        middle = card("middle", status="accepted", inputs=[{"label": "a", "asset_id": "old_a"}])
         snapshot = self._snapshot(
             [producer, middle],
             [asset("old_a", run_id="run_old", role="a"), asset("new_a", run_id="run_new", role="a")],

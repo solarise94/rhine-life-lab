@@ -14,7 +14,7 @@ class DependencyAttentionService:
     VALID_INPUT_STATUSES = {"valid", "candidate"}
     ERROR_INPUT_STATUSES = {"rejected", "archived", "missing"}
     INACTIVE_PRODUCER_CARD_STATUSES = {"cancelled", "rejected", "superseded"}
-    INACTIVE_CARD_STATUSES = {"cancelled", "rejected", "superseded"}
+    ATTENTION_INPUT_ELIGIBLE_STATUSES = {"accepted", "failed", "stale", "needs_review", "superseded"}
     SYSTEM_OUTPUT_ROLE_SUFFIXES = ("run_summary", "run_preview")
 
     def analyze_project(self, snapshot: dict[str, Any], *, max_lineage_nodes: int = 200) -> dict[str, Any]:
@@ -204,12 +204,20 @@ class DependencyAttentionService:
         producer_card_by_asset: dict[str, str] = {}
         role_by_asset: dict[str, str] = {}
         for asset in graph.assets:
+            metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
             producer_card_id = run_card_by_id.get(asset.created_by_run or "")
             if producer_card_id:
                 producer_card_by_asset[asset.asset_id] = producer_card_id
-            role = str(asset.metadata.get("role") or "").strip()
+                planned_asset_id = str(metadata.get("planned_asset_id") or "").strip()
+                if planned_asset_id:
+                    producer_card_by_asset.setdefault(planned_asset_id, producer_card_id)
+                    asset_by_id.setdefault(planned_asset_id, asset)
+            role = str(metadata.get("role") or "").strip()
             if role:
                 role_by_asset[asset.asset_id] = role
+                planned_asset_id = str(metadata.get("planned_asset_id") or "").strip()
+                if planned_asset_id:
+                    role_by_asset.setdefault(planned_asset_id, role)
 
         return {
             "card_by_id": card_by_id,
@@ -230,8 +238,7 @@ class DependencyAttentionService:
         *,
         max_lineage_nodes: int,
     ) -> None:
-        # Skip inactive cards by default so abandoned branches do not inflate attention counts.
-        if card.status in self.INACTIVE_CARD_STATUSES:
+        if card.status not in self.ATTENTION_INPUT_ELIGIBLE_STATUSES:
             return
 
         asset_by_id: dict[str, Asset] = indexes["asset_by_id"]
@@ -547,9 +554,13 @@ class DependencyAttentionService:
         run_card_by_id = {run.run_id: run.card_id for run in runs}
         producer_by_asset: dict[str, str] = {}
         for asset in assets:
+            metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
             producer_card_id = run_card_by_id.get(asset.created_by_run or "")
             if producer_card_id:
                 producer_by_asset[asset.asset_id] = producer_card_id
+                planned_asset_id = str(metadata.get("planned_asset_id") or "").strip()
+                if planned_asset_id:
+                    producer_by_asset.setdefault(planned_asset_id, producer_card_id)
         for card in cards:
             for output in card.outputs:
                 if output.asset_id:

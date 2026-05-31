@@ -1,11 +1,13 @@
 from pathlib import Path
 import re
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from app.api.deps import (
     get_chat_job_service,
+    get_manager_auto_service,
     get_manager_service,
     get_patch_apply_service,
     get_project_service,
@@ -15,6 +17,7 @@ from app.models.chat import ChatRequest
 from app.models.graph import Asset
 from app.models.patches import GraphPatch
 from app.services.chat_job_service import ChatJobService
+from app.services.manager_auto_service import ManagerAutoService
 from app.services.manager_planner import ManagerPlanningError
 from app.services.manager_service import ManagerService
 from app.services.patch_apply import PatchApplyService
@@ -26,6 +29,10 @@ from app.services.utils import sha256_file, utc_now
 router = APIRouter(prefix="/projects/{project_id}", tags=["chat"])
 
 MAX_CHAT_UPLOAD_BYTES = 50 * 1024 * 1024
+
+
+class AcceptProposalRequest(BaseModel):
+    session_id: str | None = None
 
 
 @router.post("/chat", deprecated=True)
@@ -227,9 +234,11 @@ def _asset_type_for_upload(content_type: str | None, filename: str) -> str:
 def accept_proposal(
     project_id: str,
     proposal_id: str,
+    request: AcceptProposalRequest | None = Body(default=None),
     manager_service: ManagerService = Depends(get_manager_service),
     patch_apply_service: PatchApplyService = Depends(get_patch_apply_service),
     project_service: ProjectService = Depends(get_project_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
     try:
         proposal = manager_service.get_proposal(project_id, proposal_id)
@@ -250,6 +259,11 @@ def accept_proposal(
         proposal = manager_service.mark_proposal_status(project_id, proposal_id, "accepted")
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    session_id = request.session_id if request is not None else None
+    if session_id:
+        auto_state = manager_auto_service.get_state(project_id)
+        if auto_state.enabled and auto_state.owner_session_id == session_id and auto_state.consume_workboard:
+            manager_auto_service.evaluate_workboard_and_maybe_signal(project_id, session_id)
     return {"proposal": proposal, "apply_result": result, "snapshot": project_service.get_project_snapshot(project_id)}
 
 

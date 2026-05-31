@@ -15,13 +15,14 @@ from unittest.mock import patch
 from fastapi import HTTPException
 from pydantic import SecretStr, ValidationError
 
+from app.api.chat import AcceptProposalRequest, accept_proposal
 from app.core.config import Settings, get_settings
 from app.models.cards import Card
 from app.models.chat import ChatRequest, ChatSessionMessage
 from app.models.executor import ExecutorContext, ExecutorScriptAssetRequirement
 from app.models.graph import Asset, Claim, GraphState, Module, ModuleRef, RunRecord
 from app.models.manager_auto import ManagerWakeEvent
-from app.models.patches import GraphPatch, ValidationResult
+from app.models.patches import GraphPatch, PatchOp, Proposal, ValidationResult
 from app.models.runs import CreatedAsset, ExecutorValidationReport, ExpectedOutput, Manifest, TaskPacket
 from app.services.chat_session_service import ChatSessionService
 from app.services.chat_job_service import ChatJobService
@@ -647,7 +648,7 @@ class ManagerFlowTest(unittest.TestCase):
         )
         self.assertEqual("Updated source card", updated["card"]["summary"])
 
-    def test_review_replaces_planned_output_asset_ids_with_materialized_assets(self) -> None:
+    def test_review_replaces_planned_output_asset_ids_with_materialized_assets_and_backfills_alias(self) -> None:
         card = Card.model_validate(
             {
                 "card_id": "card_qc_replace_outputs",
@@ -665,7 +666,7 @@ class ManagerFlowTest(unittest.TestCase):
             status="valid",
             path="results/qc/run_001/filtered_counts.tsv",
             summary="Filtered counts output.",
-            metadata={"role": "filtered_counts", "planned_asset_id": "planned_filtered_counts"},
+            metadata={"role": "filtered_counts"},
         )
         manifest_asset = CreatedAsset.model_validate(
             {
@@ -691,6 +692,70 @@ class ManagerFlowTest(unittest.TestCase):
         output_asset_ids = [item.asset_id for item in card.outputs]
         self.assertNotIn("planned_filtered_counts", output_asset_ids)
         self.assertIn("asset_run_001_filtered_counts_1", output_asset_ids)
+        self.assertEqual("planned_filtered_counts", real_asset.metadata.get("planned_asset_id"))
+
+    def test_work_order_resolves_planned_input_asset_id_via_materialized_alias(self) -> None:
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        graph = store.load_graph()
+        cards.extend(
+            [
+                Card.model_validate(
+                    {
+                        "card_id": "card_alias_source",
+                        "card_type": "module",
+                        "title": "Alias Source",
+                        "status": "accepted",
+                        "step": 1,
+                        "summary": "Produces a materialized asset for a planned output id.",
+                        "outputs": [output_contract("filtered counts", role="filtered_counts", asset_id="planned_filtered_counts")],
+                        "linked_assets": ["asset_run_alias_filtered_counts_1"],
+                    }
+                ),
+                Card.model_validate(
+                    {
+                        "card_id": "card_alias_consumer",
+                        "card_type": "module",
+                        "title": "Alias Consumer",
+                        "status": "planned",
+                        "step": 2,
+                        "summary": "Consumes the logical planned asset id.",
+                        "inputs": [{"label": "counts", "asset_id": "planned_filtered_counts"}],
+                        "outputs": [output_contract("pca plot", role="pca_plot", artifact_class="figure")],
+                    }
+                ),
+            ]
+        )
+        graph.assets.append(
+            Asset(
+                asset_id="asset_run_alias_filtered_counts_1",
+                asset_type="table",
+                title="Filtered counts",
+                status="valid",
+                created_by_run="run_alias_source",
+                path="results/alias/filtered_counts.tsv",
+                summary="Materialized filtered counts.",
+                metadata={"role": "filtered_counts", "planned_asset_id": "planned_filtered_counts"},
+            )
+        )
+        graph.runs.append(
+            RunRecord(
+                run_id="run_alias_source",
+                card_id="card_alias_source",
+                status="reviewed",
+                title="alias source",
+                summary="alias source",
+                started_at="2026-05-28T00:00:00Z",
+            )
+        )
+        store.save_cards(cards)
+        store.save_graph(graph)
+
+        work_order = self.flow_service.get_work_order("test-project")
+        consumer = next(item for item in work_order["work_items"] if item["card_id"] == "card_alias_consumer")
+        self.assertTrue(consumer["can_start"])
+        self.assertNotIn("missing_required_assets", consumer["block_reasons"])
+        self.assertEqual(["planned_filtered_counts"], consumer["planned_input_asset_ids"])
 
     def test_dependency_attention_replaces_automatic_downstream_rebind(self) -> None:
         producer = Card.model_validate(
@@ -709,7 +774,7 @@ class ManagerFlowTest(unittest.TestCase):
                 "card_id": "card_pca",
                 "card_type": "module",
                 "title": "PCA",
-                "status": "planned",
+                "status": "accepted",
                 "summary": "PCA",
                 "inputs": [{"label": "counts", "asset_id": "asset_old_counts"}],
                 "linked_assets": ["asset_old_counts"],
@@ -981,6 +1046,13 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertEqual("处理完成", updated.messages[0].content)
 
     def test_auto_wake_persists_stream_timeline_for_visible_manager_process(self) -> None:
+        project_id = "wake-visible-project"
+        self.project_service.create_project(
+            project_id=project_id,
+            name="Wake Visible Project",
+            current_goal="Visible auto wake",
+            seed_demo=False,
+        )
         wake_service = ManagerWakeService(self.project_service)
         auto_service = ManagerAutoService(
             self.project_service,
@@ -988,12 +1060,22 @@ class ManagerFlowTest(unittest.TestCase):
             manager_wake_service=wake_service,
         )
         chat_session_service = ChatSessionService(self.project_service, auto_service)
-        session = chat_session_service.create_session("test-project")
-        auto_service.enable("test-project", session.session_id)
+        session = chat_session_service.create_session(project_id)
+        auto_service.enable(project_id, session.session_id)
+        self.manager.blueprint_tools.create_card(
+            project_id,
+            {
+                "title": "Wake Visible Ready Card",
+                "step": 2,
+                "summary": "Ensures the workboard still has actionable work.",
+                "inputs": [],
+                "outputs": [{"role": "wake_visible_output", "artifact_class": "table"}],
+            },
+        )
         wake_service.enqueue(
             ManagerWakeEvent(
                 wake_id="wake_visible",
-                project_id="test-project",
+                project_id=project_id,
                 kind="workboard_actionable",
                 source_type="workboard",
                 source_id="workboard:1",
@@ -1011,9 +1093,9 @@ class ManagerFlowTest(unittest.TestCase):
             manager_service,  # type: ignore[arg-type]
         )
 
-        processor._process_project("test-project")
+        processor._process_project(project_id)
 
-        fetched = chat_session_service.get_session("test-project", session.session_id)
+        fetched = chat_session_service.get_session(project_id, session.session_id)
         response = next(message for message in fetched.messages if message.id == "wake_response_wake_visible")
         self.assertEqual("done", response.state)
         self.assertEqual("我已经处理后台事件。", response.content)
@@ -1026,6 +1108,13 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertFalse(manager_service.chat_called)
 
     def test_auto_wake_stream_error_settles_partial_message(self) -> None:
+        project_id = "wake-broken-project"
+        self.project_service.create_project(
+            project_id=project_id,
+            name="Wake Broken Project",
+            current_goal="Broken auto wake",
+            seed_demo=False,
+        )
         wake_service = ManagerWakeService(self.project_service)
         auto_service = ManagerAutoService(
             self.project_service,
@@ -1033,12 +1122,22 @@ class ManagerFlowTest(unittest.TestCase):
             manager_wake_service=wake_service,
         )
         chat_session_service = ChatSessionService(self.project_service, auto_service)
-        session = chat_session_service.create_session("test-project")
-        auto_service.enable("test-project", session.session_id)
+        session = chat_session_service.create_session(project_id)
+        auto_service.enable(project_id, session.session_id)
+        self.manager.blueprint_tools.create_card(
+            project_id,
+            {
+                "title": "Wake Broken Ready Card",
+                "step": 2,
+                "summary": "Ensures the workboard still has actionable work.",
+                "inputs": [],
+                "outputs": [{"role": "wake_broken_output", "artifact_class": "table"}],
+            },
+        )
         wake_service.enqueue(
             ManagerWakeEvent(
                 wake_id="wake_broken",
-                project_id="test-project",
+                project_id=project_id,
                 kind="workboard_actionable",
                 source_type="workboard",
                 source_id="workboard:1",
@@ -1056,18 +1155,18 @@ class ManagerFlowTest(unittest.TestCase):
             manager_service,  # type: ignore[arg-type]
         )
 
-        processor._process_project("test-project")
+        processor._process_project(project_id)
 
-        fetched = chat_session_service.get_session("test-project", session.session_id)
+        fetched = chat_session_service.get_session(project_id, session.session_id)
         response = next(message for message in fetched.messages if message.id == "wake_response_wake_broken")
         self.assertEqual("error", response.state)
         self.assertTrue(response.timeline)
         self.assertTrue(all(item.status != "running" for item in response.timeline or []))
         self.assertTrue(any(message.id == "auto_stop_error" for message in fetched.messages))
-        wake = wake_service.list_recent("test-project")[0]
+        wake = wake_service.list_recent(project_id)[0]
         self.assertEqual("failed", wake.status)
         self.assertIn("stream interrupted", wake.error or "")
-        auto_state = auto_service.get_state("test-project")
+        auto_state = auto_service.get_state(project_id)
         self.assertFalse(auto_state.enabled)
         self.assertFalse(manager_service.chat_called)
 
@@ -1225,6 +1324,134 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertGreater(len(wakes), initial_wake_count)
         self.assertTrue(all(item.kind == "workboard_actionable" for item in wakes))
         self.assertEqual("active", auto_service.get_state("test-project").state)
+
+    def test_accept_proposal_in_auto_owner_session_reevaluates_workboard(self) -> None:
+        project_id = "accept-project"
+        self.project_service.create_project(
+            project_id=project_id,
+            name="Accept Project",
+            current_goal="Accept proposal workboard wake",
+            seed_demo=False,
+        )
+        wake_service = ManagerWakeService(self.project_service)
+        auto_service = ManagerAutoService(
+            self.project_service,
+            background_workboard_service=self.background_workboard_service,
+            manager_wake_service=wake_service,
+        )
+        auto_service.enable(project_id, "sess_auto")
+        baseline_wake_count = len(wake_service.list_recent(project_id))
+
+        patch = GraphPatch(
+            patch_id="patch_accept_ready_card",
+            patch_type="add_module",
+            source="manager",
+            reason="Add a ready card",
+            ops=[
+                PatchOp(
+                    op="create_card",
+                    payload={
+                        "card_id": "card_accept_ready",
+                        "card_type": "module",
+                        "title": "Accepted Ready Card",
+                        "status": "planned",
+                        "step": 1,
+                        "summary": "Ready after accept",
+                        "outputs": [output_contract("ready table", role="ready_table")],
+                    },
+                )
+            ],
+        )
+        proposal = Proposal(
+            proposal_id="proposal_accept_ready",
+            patch_id=patch.patch_id,
+            title="Add ready card",
+            summary="Adds a ready-to-start card.",
+            impact_summary="One new planned card.",
+            status="proposed",
+            created_at="2026-05-31T00:00:00Z",
+            updated_at="2026-05-31T00:00:00Z",
+        )
+        store = self.project_service.graph_store(project_id)
+        store.save_patch(patch.patch_id, patch.model_dump())
+        store.save_proposals([proposal])
+
+        response = accept_proposal(
+            project_id,
+            proposal.proposal_id,
+            AcceptProposalRequest(session_id="sess_auto"),
+            manager_service=self.manager,
+            patch_apply_service=self.apply,
+            project_service=self.project_service,
+            manager_auto_service=auto_service,
+        )
+
+        wakes = wake_service.list_recent(project_id)
+        self.assertGreater(len(wakes), baseline_wake_count)
+        self.assertEqual("accepted", response["proposal"].status)
+        self.assertEqual("active", auto_service.get_state(project_id).state)
+        self.assertEqual(["workboard_actionable"], [item.kind for item in wakes[baseline_wake_count:]])
+
+    def test_accept_proposal_outside_auto_does_not_enqueue_workboard_wake(self) -> None:
+        project_id = "accept-project-no-auto"
+        self.project_service.create_project(
+            project_id=project_id,
+            name="Accept Project No Auto",
+            current_goal="Accept proposal without auto wake",
+            seed_demo=False,
+        )
+        wake_service = ManagerWakeService(self.project_service)
+        auto_service = ManagerAutoService(
+            self.project_service,
+            background_workboard_service=self.background_workboard_service,
+            manager_wake_service=wake_service,
+        )
+        patch = GraphPatch(
+            patch_id="patch_accept_no_auto",
+            patch_type="add_module",
+            source="manager",
+            reason="Add a ready card",
+            ops=[
+                PatchOp(
+                    op="create_card",
+                    payload={
+                        "card_id": "card_accept_no_auto",
+                        "card_type": "module",
+                        "title": "Accepted Ready Card",
+                        "status": "planned",
+                        "step": 1,
+                        "summary": "Ready after accept",
+                        "outputs": [output_contract("ready table", role="ready_table")],
+                    },
+                )
+            ],
+        )
+        proposal = Proposal(
+            proposal_id="proposal_accept_no_auto",
+            patch_id=patch.patch_id,
+            title="Add ready card",
+            summary="Adds a ready-to-start card.",
+            impact_summary="One new planned card.",
+            status="proposed",
+            created_at="2026-05-31T00:00:00Z",
+            updated_at="2026-05-31T00:00:00Z",
+        )
+        store = self.project_service.graph_store(project_id)
+        store.save_patch(patch.patch_id, patch.model_dump())
+        store.save_proposals([proposal])
+
+        response = accept_proposal(
+            project_id,
+            proposal.proposal_id,
+            AcceptProposalRequest(session_id=None),
+            manager_service=self.manager,
+            patch_apply_service=self.apply,
+            project_service=self.project_service,
+            manager_auto_service=auto_service,
+        )
+
+        self.assertEqual("accepted", response["proposal"].status)
+        self.assertEqual([], wake_service.list_recent(project_id))
 
     def test_delete_chat_session_removes_persisted_thread(self) -> None:
         first = self.chat_session_service.create_session("test-project", "第一条")

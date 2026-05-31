@@ -629,7 +629,7 @@ export function ManagerChatPanel({
     },
   });
   const acceptProposalMutation = useMutation({
-    mutationFn: (proposalId: string) => api.acceptProposal(projectId, proposalId),
+    mutationFn: (proposalId: string) => api.acceptProposal(projectId, proposalId, sessionId),
   });
   const rejectProposalMutation = useMutation({
     mutationFn: (proposalId: string) => api.rejectProposal(projectId, proposalId),
