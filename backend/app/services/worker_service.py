@@ -775,6 +775,17 @@ class WorkerService:
             }
 
             # 1. Materialize run assets: reuse existing valid assets without demotion.
+            frozen_input_bindings = [
+                {
+                    "label": item.label,
+                    "requested_asset_id": item.requested_asset_id,
+                    "resolved_asset_id": item.resolved_asset_id,
+                    "resolved_by": item.resolved_by,
+                    "producer_card_id": item.producer_card_id,
+                    "producer_role": item.producer_role,
+                }
+                for item in task_packet.card_inputs
+            ]
             created_assets = self._materialize_run_assets(
                 graph=graph,
                 run_id=run_id,
@@ -782,6 +793,7 @@ class WorkerService:
                 created_assets=review_context.created_assets,
                 status="candidate",
                 input_asset_ids=[item.asset_id for item in task_packet.input_assets],
+                input_bindings=frozen_input_bindings,
             )
 
             # 2. Resolve output mappings deterministically.
@@ -2554,9 +2566,11 @@ class WorkerService:
         created_assets: list[dict],
         status: str,
         input_asset_ids: list[str],
+        input_bindings: list[dict] | None = None,
     ) -> list[Asset]:
         root_graph = graph
         assets: list[Asset] = []
+        frozen_bindings = list(input_bindings) if input_bindings else []
         for index, item in enumerate(created_assets, start=1):
             asset_id = f"asset_{run_id}_{item['role']}_{index}"
             existing = next((asset for asset in root_graph.assets if asset.asset_id == asset_id), None)
@@ -2577,6 +2591,7 @@ class WorkerService:
                     "format": item.get("format"),
                     "sha256": item.get("sha256"),
                     "size_bytes": item.get("size_bytes"),
+                    "input_bindings": frozen_bindings,
                 }
                 existing.report_selected = artifact_class == "document"
                 asset = existing
@@ -2596,6 +2611,7 @@ class WorkerService:
                         "format": item.get("format"),
                         "sha256": item.get("sha256"),
                         "size_bytes": item.get("size_bytes"),
+                        "input_bindings": frozen_bindings,
                     },
                     report_selected=artifact_class == "document",
                 )
