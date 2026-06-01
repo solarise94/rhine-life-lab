@@ -490,6 +490,13 @@ class ManagerBlueprintTools:
         snapshot = self.project_service.get_project_snapshot(project_id)
         timeline = self.asset_timeline_service.build(project_id, snapshot)
         materialized = {asset.asset_id: asset for asset in snapshot["graph"].assets}
+        materializations = snapshot["graph"].metadata.get("asset_materializations") or {}
+        # Build reverse index: current_asset_id -> logical planned_asset_id
+        logical_by_concrete: dict[str, str] = {}
+        for planned_id, binding in materializations.items():
+            current_id = binding.get("current_asset_id")
+            if current_id:
+                logical_by_concrete.setdefault(current_id, planned_id)
         query = self._normalize_query(request.query)
         output_contracts = self._output_contracts_by_asset(snapshot["cards"])
         matches: list[dict[str, Any]] = []
@@ -499,6 +506,14 @@ class ManagerBlueprintTools:
             compact = self._compact_asset_record(record, materialized.get(asset_id), contract)
             if not self._asset_matches(compact, query=query, request=request):
                 continue
+            # Enrich with materialization info
+            mat_asset = materialized.get(asset_id)
+            if mat_asset:
+                metadata = mat_asset.metadata if isinstance(mat_asset.metadata, dict) else {}
+                compact["planned_asset_id"] = metadata.get("planned_asset_id")
+            logical_for = logical_by_concrete.get(asset_id)
+            compact["current_for_logical"] = logical_for
+            compact["is_current_materialization"] = logical_for is not None
             matches.append(compact)
         limit = max(1, min(int(request.limit or 12), 50))
         return {

@@ -6,6 +6,7 @@ from typing import Any
 
 from app.models.cards import Card
 from app.models.graph import Asset, GraphState, RunRecord
+from app.services.asset_materialization_service import AssetMaterializationService
 from app.services.input_resolution_service import InputResolutionService
 
 
@@ -215,6 +216,17 @@ class DependencyAttentionService:
                 if planned_asset_id:
                     role_by_asset.setdefault(planned_asset_id, role)
 
+        # Build alias index by planned id for output analysis fallback
+        alias_assets_by_planned_id: dict[str, list[Asset]] = {}
+        for asset in graph.assets:
+            metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
+            planned = str(metadata.get("planned_asset_id") or "").strip()
+            if planned:
+                alias_assets_by_planned_id.setdefault(planned, []).append(asset)
+
+        materializations = graph.metadata.get("asset_materializations") if isinstance(graph.metadata, dict) else {}
+        materializations = materializations or {}
+
         return {
             "card_by_id": card_by_id,
             "asset_by_id": asset_by_id,
@@ -225,6 +237,8 @@ class DependencyAttentionService:
             "role_by_asset": role_by_asset,
             "input_resolution_service": resolution_service,
             "input_resolution_index": resolution_service.build_index(cards, graph),
+            "materializations": materializations,
+            "alias_assets_by_planned_id": alias_assets_by_planned_id,
         }
 
     def _analyze_card_inputs(
@@ -385,6 +399,7 @@ class DependencyAttentionService:
         if card.status != "accepted":
             return
         asset_by_id: dict[str, Asset] = indexes["asset_by_id"]
+        materializations: dict[str, dict] = indexes.get("materializations") or {}
         for output in card.outputs:
             if self._is_system_output_role(output.role):
                 continue
@@ -402,14 +417,28 @@ class DependencyAttentionService:
                 continue
             asset = asset_by_id.get(output.asset_id)
             if not asset:
+                # Try materialization binding for logical output ids.
+                binding = materializations.get(output.asset_id)
+                if binding:
+                    current_asset_id = binding.get("current_asset_id")
+                    if current_asset_id:
+                        asset = asset_by_id.get(current_asset_id)
+                if not asset:
+                    # Check if the output.asset_id is a planned alias with candidates.
+                    planned_assets = indexes.get("alias_assets_by_planned_id", {}).get(output.asset_id, [])
+                    if planned_assets:
+                        valid_assets = [a for a in planned_assets if a.status == "valid"]
+                        if valid_assets:
+                            asset = sorted(valid_assets, key=lambda a: a.created_by_run or "", reverse=True)[0]
+            if not asset:
                 issues.append(
                     self._issue(
-                        kind="output_asset_not_valid",
+                        kind="output_materialization_missing",
                         severity="error",
                         card=card,
                         asset_id=output.asset_id,
                         producer_role=output.role,
-                        message=f"Accepted card output {output.role or output.label} points to missing asset {output.asset_id}.",
+                        message=f"Accepted card output {output.role or output.label} has no current materialization for {output.asset_id}.",
                     )
                 )
                 continue

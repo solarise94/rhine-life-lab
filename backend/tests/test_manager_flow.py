@@ -697,9 +697,10 @@ class ManagerFlowTest(unittest.TestCase):
         )
 
         output_asset_ids = [item.asset_id for item in card.outputs]
-        self.assertNotIn("planned_filtered_counts", output_asset_ids)
-        self.assertIn("asset_run_001_filtered_counts_1", output_asset_ids)
+        # Logical output ids are now preserved; materialization binding is in graph metadata.
+        self.assertIn("planned_filtered_counts", output_asset_ids)
         self.assertEqual("planned_filtered_counts", real_asset.metadata.get("planned_asset_id"))
+        self.assertEqual("valid", card.outputs[0].status)
 
     def test_work_order_resolves_planned_input_asset_id_via_materialized_alias(self) -> None:
         store = self.project_service.graph_store("test-project")
@@ -762,7 +763,11 @@ class ManagerFlowTest(unittest.TestCase):
         consumer = next(item for item in work_order["work_items"] if item["card_id"] == "card_alias_consumer")
         self.assertTrue(consumer["can_start"])
         self.assertNotIn("missing_required_assets", consumer["block_reasons"])
-        self.assertEqual(["planned_filtered_counts"], consumer["planned_input_asset_ids"])
+        # Binding-first resolution: logical id resolves via materialization_binding (not virtual).
+        resolutions = consumer.get("input_resolutions", [])
+        self.assertTrue(any(r["resolved_by"] == "materialization_binding" for r in resolutions),
+                        f"Expected materialization_binding resolution, got: {resolutions}")
+        self.assertEqual([], consumer["planned_input_asset_ids"])
 
     def test_task_packet_resolves_planned_input_asset_id_to_materialized_asset(self) -> None:
         store = self.project_service.graph_store("test-project")

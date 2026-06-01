@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from app.models.cards import Card
 from app.models.graph import Asset, GraphState
+from app.services.asset_materialization_service import AssetMaterializationService
 from app.services.asset_timeline_service import AssetTimelineService
 
 
@@ -34,6 +35,7 @@ class InputResolutionIndex:
     current_output_by_card_role: dict[tuple[str, str], Asset]
     run_order_by_id: dict[str, int]
     run_card_by_id: dict[str, str]
+    materializations: dict[str, dict]
 
 
 class InputResolutionService:
@@ -83,6 +85,9 @@ class InputResolutionService:
                 if resolved is not None:
                     current_output_by_card_role[(card.card_id, output.role)] = resolved
 
+        materializations = graph.metadata.get("asset_materializations") if isinstance(graph.metadata, dict) else {}
+        materializations = materializations or {}
+
         return InputResolutionIndex(
             asset_by_id=asset_by_id,
             producer_by_asset=producer_by_asset,
@@ -92,6 +97,7 @@ class InputResolutionService:
             current_output_by_card_role=current_output_by_card_role,
             run_order_by_id=run_order_by_id,
             run_card_by_id=run_card_by_id,
+            materializations=materializations,
         )
 
     def resolve_input(self, requested_asset_id: str | None, index: InputResolutionIndex) -> InputResolution:
@@ -127,6 +133,26 @@ class InputResolutionService:
                 is_virtual=False,
                 asset=direct_asset,
             )
+
+        # Binding-first: resolve logical id through explicit materialization map
+        binding = index.materializations.get(requested)
+        if binding:
+            current_asset_id = binding.get("current_asset_id")
+            if current_asset_id:
+                bound_asset = index.asset_by_id.get(current_asset_id)
+                if bound_asset is not None:
+                    return InputResolution(
+                        requested_asset_id=requested,
+                        resolved_asset_id=bound_asset.asset_id,
+                        resolved_path=bound_asset.path,
+                        resolved_by="materialization_binding",
+                        producer_card_id=binding.get("producer_card_id"),
+                        producer_role=binding.get("producer_role"),
+                        status=bound_asset.status,
+                        current_asset_id=bound_asset.asset_id,
+                        is_virtual=False,
+                        asset=bound_asset,
+                    )
 
         producer_card_id = index.producer_by_asset.get(requested)
         producer_role = index.role_by_asset.get(requested)

@@ -304,7 +304,7 @@ class ManagerAutoService:
                 clear_active_run=clear_active_run,
                 clear_active_job=clear_active_job,
             )
-        return self.evaluate_workboard_and_maybe_signal(project_id, owner_session_id)
+        return self.evaluate_workboard_and_maybe_signal(project_id, owner_session_id, from_turn_settlement=True)
 
     def pending_directives(self, project_id: str) -> list[ManagerAutoDirective]:
         state = self.get_state(project_id)

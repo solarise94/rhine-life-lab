@@ -176,8 +176,11 @@ class RemediationTestCase(unittest.TestCase):
             {"role": "deg_table", "asset_id": "planned_deg", "path": "results/deg.tsv"}
         ]
         WorkerService._sync_card_outputs(card, assets, manifest_created_assets=manifest_assets)
-        self.assertEqual(card.outputs[0].asset_id, "real_deg_001")
+        # Logical output id is preserved; status tracks materialization.
+        self.assertEqual(card.outputs[0].asset_id, "planned_deg")
         self.assertEqual(card.outputs[0].status, "valid")
+        # Alias backfill should still happen
+        self.assertEqual(assets[0].metadata.get("planned_asset_id"), "planned_deg")
 
     def test_sync_card_outputs_out_of_order(self) -> None:
         card = Card(
@@ -203,8 +206,11 @@ class RemediationTestCase(unittest.TestCase):
             {"role": "a", "asset_id": "planned_a", "path": "a.tsv"},
         ]
         WorkerService._sync_card_outputs(card, assets, manifest_created_assets=manifest_assets)
-        self.assertEqual(card.outputs[0].asset_id, "real_a")
-        self.assertEqual(card.outputs[1].asset_id, "real_b")
+        # Logical ids preserved; statuses updated.
+        self.assertEqual(card.outputs[0].asset_id, "planned_a")
+        self.assertEqual(card.outputs[0].status, "valid")
+        self.assertEqual(card.outputs[1].asset_id, "planned_b")
+        self.assertEqual(card.outputs[1].status, "valid")
 
     def test_sync_card_outputs_duplicate_role_disambiguates_by_planned_id(self) -> None:
         card = Card(
@@ -231,7 +237,8 @@ class RemediationTestCase(unittest.TestCase):
         ]
         # planned_asset_id in metadata resolves the duplicate role correctly.
         unmapped = WorkerService._sync_card_outputs(card, assets, manifest_created_assets=manifest_assets)
-        self.assertEqual(card.outputs[0].asset_id, "real_1")
+        # Logical id preserved; binding resolved to real_1 via planned_asset_id.
+        self.assertEqual(card.outputs[0].asset_id, "planned_dup")
         self.assertEqual(unmapped, [])
 
     def test_backfill_planned_asset_alias_recovers_logical_id_from_concrete_chain(self) -> None:
@@ -291,7 +298,8 @@ class RemediationTestCase(unittest.TestCase):
         ]
         unmapped = WorkerService._sync_card_outputs(card, assets, manifest_created_assets=manifest_assets)
         # Path fallback resolves to real_1 because manifest path is "1.tsv".
-        self.assertEqual(card.outputs[0].asset_id, "real_1")
+        # Logical id preserved; binding resolved via path.
+        self.assertEqual(card.outputs[0].asset_id, "planned_dup")
         self.assertEqual(unmapped, [])
 
     def test_sync_card_outputs_duplicate_role_and_path_stays_ambiguous(self) -> None:
@@ -352,6 +360,8 @@ class RemediationTestCase(unittest.TestCase):
             {"role": "summary_table", "path": "summary.tsv"},
         ]
         unmapped = WorkerService._sync_card_outputs(card, assets, manifest_created_assets=manifest_assets)
+        # When output has no asset_id, role-based resolution fills it.
+        # Since there is no planned id, the concrete asset_id is used.
         self.assertEqual(card.outputs[0].asset_id, "real_summary")
         self.assertEqual(card.outputs[0].status, "valid")
         self.assertEqual(unmapped, [])
@@ -1172,7 +1182,8 @@ class RemediationTestCase(unittest.TestCase):
         self.assertTrue(result["accepted"], result)
         updated_card = next(c for c in store.load_cards() if c.card_id == card.card_id)
         self.assertEqual("accepted", updated_card.status)
-        self.assertNotEqual("planned_out", updated_card.outputs[0].asset_id)
+        # All logical output ids are preserved; materialization bindings are written.
+        self.assertEqual("planned_out", updated_card.outputs[0].asset_id)
         self.assertEqual("planned_summary", updated_card.outputs[1].asset_id)
         self.assertEqual("planned_preview", updated_card.outputs[2].asset_id)
 

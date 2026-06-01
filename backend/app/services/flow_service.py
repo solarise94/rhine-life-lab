@@ -61,6 +61,18 @@ class FlowService:
                 for item in input_resolutions
                 if item.resolved_asset_id is None
             ]
+            logical_missing_asset_ids = [
+                item.requested_asset_id
+                for item in input_resolutions
+                if item.resolved_asset_id is None
+                and item.resolved_by is None
+            ]
+            materialization_missing_asset_ids = [
+                item.requested_asset_id
+                for item in input_resolutions
+                if item.resolved_asset_id is None
+                and item.resolved_by is not None
+            ]
             nonvalid_asset_ids = [
                 item.resolved_asset_id or item.requested_asset_id
                 for item in input_resolutions
@@ -88,6 +100,8 @@ class FlowService:
                 unmet_dependency_ids,
                 missing_script_binding_ids,
                 runtime_dependency_blocker,
+                logical_missing_asset_ids=logical_missing_asset_ids,
+                materialization_missing_asset_ids=materialization_missing_asset_ids,
             )
             card_attention = attention_by_card.get(card.card_id, [])
             work_items.append(
@@ -104,6 +118,9 @@ class FlowService:
                     "blocked_by_asset_ids": missing_asset_ids + nonvalid_asset_ids,
                     "blocked_by_job_ids": [runtime_dependency_blocker["job_id"]] if runtime_dependency_blocker else [],
                     "missing_script_asset_requirement_ids": missing_script_binding_ids,
+                    "logical_missing_asset_ids": logical_missing_asset_ids,
+                    "materialization_missing_asset_ids": materialization_missing_asset_ids,
+                    "nonlaunchable_materialized_asset_ids": nonvalid_asset_ids,
                     "planned_input_asset_ids": [
                         item.requested_asset_id
                         for item in input_resolutions
@@ -234,6 +251,9 @@ class FlowService:
         unmet_dependency_ids: list[str],
         missing_script_binding_ids: list[str],
         runtime_dependency_blocker: dict | None,
+        *,
+        logical_missing_asset_ids: list[str] | None = None,
+        materialization_missing_asset_ids: list[str] | None = None,
     ) -> list[str]:
         reasons: list[str] = []
         if card.status == "proposed":
@@ -242,7 +262,11 @@ class FlowService:
             reasons.append(f"terminal_status:{card.status}")
         elif card.status not in {"planned", "failed", "stale", "superseded"}:
             reasons.append(f"not_startable_status:{card.status}")
-        if missing_asset_ids:
+        if logical_missing_asset_ids:
+            reasons.append("logical_dependency_missing")
+        elif materialization_missing_asset_ids:
+            reasons.append("input_materialization_missing")
+        elif missing_asset_ids:
             reasons.append("missing_required_assets")
         if nonvalid_asset_ids:
             reasons.append("required_assets_not_valid")

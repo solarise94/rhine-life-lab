@@ -46,6 +46,7 @@ from app.models.runs import (
 from app.services.app_config_service import AppConfigService
 from app.services.artifact_format_service import default_format_for_artifact_class
 from app.services.background_task_service import BackgroundTaskService
+from app.services.asset_materialization_service import AssetMaterializationService
 from app.services.flow_service import FlowService
 from app.services.executor_validation_service import ExecutorValidationService
 from app.services.input_resolution_service import InputResolutionService, VALID_LAUNCHABLE_INPUT_STATUSES
@@ -741,6 +742,7 @@ class WorkerService:
         )
         stage_label = "reviewed" if final_accepted or result.get("failure_reason") == "explicit_reject" else "needs_review"
         self._commit_run_stage(project_id, run_id, stage_label)
+        self._notify_background_terminal(project_id, run_id=run_id)
         return {
             "run_id": run_id,
             "accepted": final_accepted,
@@ -812,7 +814,24 @@ class WorkerService:
                     if asset.asset_id in created_asset_ids:
                         asset.status = "valid"
 
-                # Bind outputs on the copy.
+                # Supersede previous outputs on the copy FIRST so recovery can see superseded assets.
+                for asset in graph_copy.assets:
+                    if (
+                        asset.asset_id in previous_output_asset_ids
+                        and asset.created_by_run
+                        and asset.created_by_run != run_id
+                        and asset.status == "valid"
+                    ):
+                        asset.status = "superseded"
+                stale_assets = {a.asset_id for a in graph_copy.assets if a.status == "superseded"}
+                for claim in graph_copy.claims:
+                    if stale_assets.intersection(claim.depends_on_assets) and claim.status == "valid":
+                        claim.status = "superseded"
+
+                # Recover logical ids for outputs pointing to superseded concrete assets (legacy compat).
+                WorkerService._recover_logical_output_ids_from_superseded(card_copy, graph_copy.assets)
+
+                # Bind outputs on the copy: preserve logical output ids, write materialization binding.
                 asset_by_id_copy = {a.asset_id: a for a in graph_copy.assets}
                 for output_index, real_asset in planned_bindings_for_commit:
                     out = card_copy.outputs[output_index]
@@ -823,9 +842,19 @@ class WorkerService:
                             out.asset_id,
                             asset_lookup=asset_by_id_copy,
                         )
-                    out.asset_id = real_asset.asset_id
-                    # Use the promoted asset status from graph_copy, not the original candidate status.
+                    # Preserve logical output id when one exists; otherwise bind to concrete id.
+                    if out.asset_id is None:
+                        out.asset_id = real_asset.asset_id
                     out.status = promoted_asset.status if promoted_asset else real_asset.status
+                    if out.asset_id:
+                        AssetMaterializationService.set_current(
+                            graph_copy,
+                            planned_asset_id=out.asset_id,
+                            concrete_asset=promoted_asset or real_asset,
+                            producer_card_id=card_copy.card_id,
+                            producer_role=out.role,
+                            producer_run_id=run_id,
+                        )
 
                 # Attach assets.
                 for asset in created_assets:
@@ -846,20 +875,6 @@ class WorkerService:
                             report_selected=True,
                         )
                     )
-
-                # Supersede previous outputs on the copy.
-                for asset in graph_copy.assets:
-                    if (
-                        asset.asset_id in previous_output_asset_ids
-                        and asset.created_by_run
-                        and asset.created_by_run != run_id
-                        and asset.status == "valid"
-                    ):
-                        asset.status = "superseded"
-                stale_assets = {a.asset_id for a in graph_copy.assets if a.status == "superseded"}
-                for claim in graph_copy.claims:
-                    if stale_assets.intersection(claim.depends_on_assets) and claim.status == "valid":
-                        claim.status = "superseded"
 
                 # Report item on the copy.
                 graph_copy.report_items = [item for item in graph_copy.report_items if item.item_id != f"report_{run_id}"]
@@ -899,23 +914,6 @@ class WorkerService:
                     # All checks passed: commit the accepted side effects atomically.
                     for asset in created_assets:
                         asset.status = "valid"
-                    asset_by_id = {asset.asset_id: asset for asset in graph.assets}
-                    for output_index, real_asset in planned_bindings_for_commit:
-                        out = card.outputs[output_index]
-                        self._backfill_planned_asset_alias(
-                            real_asset,
-                            out.asset_id,
-                            asset_lookup=asset_by_id,
-                        )
-                        out.asset_id = real_asset.asset_id
-                        out.status = real_asset.status
-                    new_claim_ids = self._materialize_claims(
-                        graph, run_id, review_context.key_findings, [asset.asset_id for asset in created_assets]
-                    )
-                    card.status = "accepted"
-                    card.progress_note = None
-                    card.manager_review = "Reviewer 已验收执行器代码、manifest 和输出资产，结果已自动接受。" if source == "reviewer" else "结果已通过 manifest 校验并被 Manager 接受。"
-                    card.key_findings = review_context.key_findings or ["结果已生成并完成审核。"]
                     self._attach_assets_to_card(card, created_assets)
                     self._supersede_previous_outputs(
                         card,
@@ -924,6 +922,38 @@ class WorkerService:
                         run_id,
                         previous_asset_ids=previous_output_asset_ids,
                     )
+                    # Recover logical ids for outputs pointing to superseded concrete assets (legacy compat).
+                    WorkerService._recover_logical_output_ids_from_superseded(card, graph.assets)
+                    # Write materialization bindings after recovery so bindings use correct logical ids.
+                    asset_by_id = {asset.asset_id: asset for asset in graph.assets}
+                    for output_index, real_asset in planned_bindings_for_commit:
+                        out = card.outputs[output_index]
+                        planned_asset_id = out.asset_id
+                        self._backfill_planned_asset_alias(
+                            real_asset,
+                            planned_asset_id,
+                            asset_lookup=asset_by_id,
+                        )
+                        # Preserve logical output id when one exists; otherwise bind to concrete id.
+                        if planned_asset_id is None:
+                            out.asset_id = real_asset.asset_id
+                        out.status = real_asset.status
+                        if out.asset_id:
+                            AssetMaterializationService.set_current(
+                                graph,
+                                planned_asset_id=out.asset_id,
+                                concrete_asset=real_asset,
+                                producer_card_id=card.card_id,
+                                producer_role=out.role,
+                                producer_run_id=run_id,
+                            )
+                    new_claim_ids = self._materialize_claims(
+                        graph, run_id, review_context.key_findings, [asset.asset_id for asset in created_assets]
+                    )
+                    card.status = "accepted"
+                    card.progress_note = None
+                    card.manager_review = "Reviewer 已验收执行器代码、manifest 和输出资产，结果已自动接受。" if source == "reviewer" else "结果已通过 manifest 校验并被 Manager 接受。"
+                    card.key_findings = review_context.key_findings or ["结果已生成并完成审核。"]
                     graph.report_items = [item for item in graph.report_items if item.item_id != f"report_{run_id}"]
                     graph.report_items.append(
                         ReportItem(
@@ -2303,24 +2333,35 @@ class WorkerService:
         """Return a list of error messages if an accepted card violates the acceptance contract.
 
         Contract:
-        - every accepted card.outputs[].asset_id exists in graph.assets
-        - each accepted output asset has status == "valid"
+        - every accepted card.outputs[].asset_id has a current materialization
+          (either as a concrete asset in graph.assets, or via asset_materializations binding)
+        - each current materialization asset has status == "valid"
         - card.outputs[].status agrees with the real asset status
         """
         errors: list[str] = []
         asset_by_id = {a.asset_id: a for a in graph.assets}
+        materializations = graph.metadata.get("asset_materializations") if isinstance(graph.metadata, dict) else {}
+        materializations = materializations or {}
         for output in WorkerService._card_declared_outputs(card):
             if output.asset_id is None:
                 errors.append(
                     f"Accepted card {card.card_id} output {output.role or output.label} has no asset_id."
                 )
                 continue
+            # Try direct concrete asset lookup first (legacy or intentional concrete binding)
             asset = asset_by_id.get(output.asset_id)
             if asset is None:
-                errors.append(
-                    f"Accepted card {card.card_id} output {output.role or output.label} points to missing asset {output.asset_id}."
-                )
-                continue
+                # Logical id: resolve through materialization binding
+                binding = materializations.get(output.asset_id)
+                if binding:
+                    current_asset_id = binding.get("current_asset_id")
+                    if current_asset_id:
+                        asset = asset_by_id.get(current_asset_id)
+                if asset is None:
+                    errors.append(
+                        f"Accepted card {card.card_id} output {output.role or output.label} points to missing asset {output.asset_id} (no current materialization)."
+                    )
+                    continue
             if asset.status != "valid":
                 errors.append(
                     f"Accepted card {card.card_id} output {output.role or output.label} points to {asset.status} asset {asset.asset_id}."
@@ -2612,11 +2653,16 @@ class WorkerService:
     def _sync_card_outputs(
         card: Card,
         assets: list[Asset],
+        graph: GraphState | None = None,
         *,
         manifest_created_assets: list[object] | None = None,
         expected_outputs: list[object] | None = None,
     ) -> list[str]:
-        """Bind card output placeholders to real produced assets."""
+        """Bind card output placeholders to real produced assets.
+
+        Preserves logical output ids in card.outputs[].asset_id. Writes the
+        materialization binding to graph.metadata when graph is provided.
+        """
         bindings, unmapped = WorkerService._resolve_output_bindings(
             card,
             assets,
@@ -2626,9 +2672,21 @@ class WorkerService:
         asset_lookup = {asset.asset_id: asset for asset in assets}
         for output_index, real_asset in bindings:
             output = card.outputs[output_index]
-            WorkerService._backfill_planned_asset_alias(real_asset, output.asset_id, asset_lookup=asset_lookup)
-            output.asset_id = real_asset.asset_id
+            planned_asset_id = output.asset_id
+            WorkerService._backfill_planned_asset_alias(real_asset, planned_asset_id, asset_lookup=asset_lookup)
+            # Preserve logical id when one exists; otherwise bind to concrete id.
+            if planned_asset_id is None:
+                output.asset_id = real_asset.asset_id
             output.status = real_asset.status
+            if graph is not None and output.asset_id is not None:
+                AssetMaterializationService.set_current(
+                    graph,
+                    planned_asset_id=output.asset_id,
+                    concrete_asset=real_asset,
+                    producer_card_id=card.card_id,
+                    producer_role=output.role,
+                    producer_run_id=real_asset.created_by_run or "",
+                )
         return unmapped
 
     @staticmethod
@@ -2704,6 +2762,29 @@ class WorkerService:
         for claim in claims:
             if stale_assets.intersection(claim.depends_on_assets) and claim.status == "valid":
                 claim.status = "superseded"
+
+    @staticmethod
+    def _recover_logical_output_ids_from_superseded(
+        card: Card,
+        assets: list[Asset],
+    ) -> None:
+        """Recover logical planned ids for outputs that point to superseded concrete assets.
+
+        Legacy compatibility: older projects may have card.outputs[].asset_id set to a
+        concrete asset id. After superseding that asset on a new accept, this recovers
+        the logical id from the asset's metadata.planned_asset_id so validation passes.
+        """
+        asset_by_id = {a.asset_id: a for a in assets}
+        for out in card.outputs:
+            if not out.asset_id:
+                continue
+            asset = asset_by_id.get(out.asset_id)
+            if asset is None or asset.status != "superseded":
+                continue
+            metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
+            logical_id = str(metadata.get("planned_asset_id") or "").strip()
+            if logical_id and logical_id != out.asset_id:
+                out.asset_id = logical_id
 
     def _resolve_worker_type(self, worker_type: str | None) -> str:
         candidate = worker_type or self.project_service.settings.default_worker_type

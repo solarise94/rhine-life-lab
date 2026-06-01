@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
 from app.models.graph import Asset
+from app.services.asset_materialization_service import AssetMaterializationService
 from app.services.project_service import ProjectService
 from app.services.utils import resolve_within
 
@@ -19,6 +20,13 @@ class ResultAssetService:
     def get_asset(self, project_id: str, asset_id: str) -> Asset:
         graph = self.project_service.graph_store(project_id).load_graph()
         asset = next((item for item in graph.assets if item.asset_id == asset_id), None)
+        if asset is None:
+            # Resolve logical id through materialization binding
+            binding = AssetMaterializationService.current_for_logical(graph, asset_id)
+            if binding:
+                current_id = binding.get("current_asset_id")
+                if current_id:
+                    asset = next((item for item in graph.assets if item.asset_id == current_id), None)
         if asset is None:
             raise HTTPException(status_code=404, detail=f"Result asset not found: {asset_id}")
         return asset

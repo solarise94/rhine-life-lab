@@ -26,6 +26,7 @@ from app.models.cards import Card, CardAssetRef
 from app.models.graph import Asset, Claim, GraphState, Module, ModuleRef, ReportItem
 from app.models.output_contracts import CardOutputSpec
 from app.models.project import ProjectRuntimePreferences, ProjectState, ProjectSummary
+from app.services.asset_materialization_service import AssetMaterializationService
 from app.services.git_service import GitService
 from app.services.graph_store import GraphStore
 from app.services.utils import atomic_write_json, utc_now
@@ -462,6 +463,10 @@ class ProjectService:
         project = self._project_state_with_runtime_preferences(store)
         cards = store.load_cards()
         graph = store.load_graph()
+        # Lazy bootstrap materialization bindings for legacy projects
+        if not (graph.metadata.get("asset_materializations") if isinstance(graph.metadata, dict) else {}):
+            AssetMaterializationService.bootstrap_from_aliases(graph, cards)
+            store.save_graph(graph)
         summary = ProjectSummary(
             **project.model_dump(),
             card_counts=self._count_by(cards, "status"),
