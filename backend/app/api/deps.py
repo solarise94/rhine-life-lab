@@ -185,3 +185,13 @@ def get_diagnostic_bundle_service() -> DiagnosticBundleService:
         get_project_service(),
         get_app_config_service(),
     )
+
+
+@lru_cache
+def get_manager_command_service():
+    from app.services.manager_command_service import ManagerCommandService
+    return ManagerCommandService(
+        manager_auto_service=get_manager_auto_service(),
+        manager_wake_service=get_manager_wake_service(),
+        chat_session_service=get_chat_session_service(),
+    )

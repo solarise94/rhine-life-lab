@@ -352,6 +352,7 @@ export const api = {
     signal?: AbortSignal,
     context: ChatRequestContext = {},
     sessionId?: string | null,
+    messageId?: string | null,
   ) {
     const response = await fetch(`${API_BASE}/projects/${projectId}/chat-stream`, {
       method: "POST",
@@ -363,6 +364,7 @@ export const api = {
         thinking_effort: thinkingEffort,
         messages,
         session_messages: sessionMessages,
+        message_id: messageId ?? null,
       }),
       cache: "no-store",
       signal,

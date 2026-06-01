@@ -46,3 +46,24 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def parse_slash_command(message: str) -> tuple[bool, str | None, str | None]:
+    import re
+    normalized = message.strip()
+    match = re.match(r"^/auto(?:[ \t]+([^\r\n]*))?$", normalized)
+    if not match:
+        return False, None, None
+    arg = match.group(1)
+    if arg:
+        arg = arg.strip()
+    if not arg:
+        return True, "bare", None
+    if arg in {"off", "stop"}:
+        return True, "stop", arg
+    elif arg == "status":
+        return True, "status", arg
+    elif arg == "once":
+        return True, "once", arg
+    else:
+        return True, "enable", arg

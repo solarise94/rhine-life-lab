@@ -12,6 +12,7 @@ from app.api.deps import (
     get_patch_apply_service,
     get_project_service,
     get_runtime_dependency_job_service,
+    get_manager_command_service,
 )
 from app.models.chat import ChatRequest
 from app.models.graph import Asset
@@ -24,7 +25,7 @@ from app.services.patch_apply import PatchApplyService
 from app.services.project_service import ProjectService
 from app.services.provider_errors import ProviderAPIError
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
-from app.services.utils import sha256_file, utc_now
+from app.services.utils import parse_slash_command, sha256_file, utc_now
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["chat"])
 
@@ -47,7 +48,25 @@ def chat(project_id: str, request: ChatRequest, manager_service: ManagerService 
 
 
 @router.post("/chat-stream")
-def chat_stream(project_id: str, request: ChatRequest, manager_service: ManagerService = Depends(get_manager_service)) -> StreamingResponse:
+def chat_stream(
+    project_id: str,
+    request: ChatRequest,
+    manager_service: ManagerService = Depends(get_manager_service),
+    manager_command_service = Depends(get_manager_command_service),
+) -> StreamingResponse:
+    is_cmd, cmd_type, obj = parse_slash_command(request.message)
+    if is_cmd:
+        return StreamingResponse(
+            manager_command_service.handle_auto_command_stream(
+                project_id, request, cmd_type, obj
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     try:
         stream = manager_service.stream_chat(project_id, request)
     except ProviderAPIError as exc:

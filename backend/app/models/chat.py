@@ -23,6 +23,7 @@ class ChatHistoryMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    message_id: str | None = None
     session_id: str | None = None
     context: ChatContext = Field(default_factory=ChatContext)
     thinking_effort: Literal["low", "medium", "high"] = "medium"

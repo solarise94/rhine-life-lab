@@ -87,7 +87,41 @@ class ManagerService:
             raise ManagerPlanningError("Pi manager stream ended without a final response.")
         return ChatResponse.model_validate(response_payload)
 
+    def _sanitize_chat_request_messages(self, chat_request: ChatRequest) -> None:
+        # Collect exact contents of all command messages to filter simplified history,
+        # then filter out command messages from session_messages.
+        command_contents = set()
+        filtered_session_messages = []
+        for msg in chat_request.session_messages:
+            is_cmd = msg.id.startswith("cmd_")
+            if not is_cmd and msg.timeline:
+                for item in msg.timeline:
+                    if getattr(item, "kind", "") == "command":
+                        is_cmd = True
+                        break
+            if is_cmd:
+                if msg.content:
+                    command_contents.add(msg.content.strip())
+            else:
+                filtered_session_messages.append(msg)
+        chat_request.session_messages = filtered_session_messages
+
+        # Filter simplified history messages by matching exact content of command messages.
+        # Fall back to using the authoritative parse_slash_command parser for user commands.
+        from app.services.utils import parse_slash_command
+        filtered_messages = []
+        for item in chat_request.messages:
+            stripped = item.content.strip()
+            if stripped in command_contents:
+                continue
+            is_cmd, _, _ = parse_slash_command(stripped)
+            if is_cmd:
+                continue
+            filtered_messages.append(item)
+        chat_request.messages = filtered_messages
+
     def stream_chat(self, project_id: str, chat_request: ChatRequest) -> Iterator[bytes]:
+        self._sanitize_chat_request_messages(chat_request)
         if self.settings.manager_backend != "pi":
             raise ManagerPlanningError("Only BLUEPRINT_MANAGER_BACKEND=pi is supported.")
         token = self.settings.internal_tool_token.get_secret_value() if self.settings.internal_tool_token else ""
@@ -141,6 +175,7 @@ class ManagerService:
         return iterator()
 
     def compact_chat_session(self, project_id: str, chat_request: ChatRequest) -> dict:
+        self._sanitize_chat_request_messages(chat_request)
         if self.settings.manager_backend != "pi":
             raise ManagerPlanningError("Only BLUEPRINT_MANAGER_BACKEND=pi is supported.")
         token = self.settings.internal_tool_token.get_secret_value() if self.settings.internal_tool_token else ""

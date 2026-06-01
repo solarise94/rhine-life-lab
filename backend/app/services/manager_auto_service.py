@@ -12,6 +12,9 @@ from app.models.manager_auto import ManagerWakeEvent
 from app.services.background_workboard_service import BackgroundWorkboardService
 from app.services.manager_wake_service import ManagerWakeService
 from app.services.project_event_service import ProjectEventService
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from app.services.chat_session_service import ChatSessionService
 from app.services.project_service import ProjectService
 from app.services.utils import utc_now
 
@@ -53,6 +56,77 @@ class ManagerAutoService:
         is_owner = bool(state.enabled and session_id and state.owner_session_id == session_id)
         btw_mode = bool(state.enabled and session_id and state.owner_session_id and state.owner_session_id != session_id)
         return ManagerAutoView(state=state, is_owner=is_owner, btw_mode=btw_mode)
+
+    def enable_auto_flow(
+        self,
+        project_id: str,
+        session_id: str,
+        chat_session_service: ChatSessionService,
+        manager_wake_service: ManagerWakeService,
+        *,
+        mode: str = "continuous",
+        directive_text: str | None = None,
+        message_id: str | None = None,
+        trigger_wake: bool = True,
+    ) -> tuple[ManagerAutoState, ManagerAutoDirective | None, ManagerWakeEvent | None]:
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id is required to enable auto mode.")
+        try:
+            chat_session_service.get_session(project_id, session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        directive_text = str(directive_text or "").strip()
+        current_state = self.get_state(project_id)
+        if (
+            directive_text
+            and current_state.enabled
+            and current_state.owner_session_id == session_id
+            and (
+                any(item.status == "pending" for item in current_state.pending_directives)
+                or current_state.state not in {"completed", "cancelled", "stopped"}
+            )
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "A scoped workboard continuation is already active for this session. "
+                    "Stop it first or append steering through the directives path."
+                ),
+            )
+
+        state = self.enable(
+            project_id,
+            session_id,
+            mode=mode,
+            scope_objective=directive_text or None,
+        )
+        directive = None
+        wake_event = None
+        if directive_text:
+            directive = self.add_directive(
+                project_id,
+                session_id,
+                text=directive_text,
+                message_id=message_id,
+            )
+            if trigger_wake:
+                if self.should_trigger_directive_wake(project_id):
+                    wake_event = ManagerWakeEvent(
+                        wake_id=f"wake_{directive.id}",
+                        project_id=project_id,
+                        kind="directive_received",
+                        source_type="directive",
+                        source_id=directive.id,
+                        severity="info",
+                        message=f"收到新的 auto 指令：{directive.text}",
+                        payload_summary={"directive_id": directive.id},
+                        idempotency_key=f"directive:{directive.id}",
+                        created_at=utc_now(),
+                    )
+                    manager_wake_service.enqueue(wake_event)
+            state = self.get_state(project_id)
+        return state, directive, wake_event
 
     def enable(self, project_id: str, session_id: str, *, mode: str = "continuous", scope_objective: str | None = None) -> ManagerAutoState:
         if not session_id:

@@ -26,7 +26,7 @@ import { Attachment, EMPTY_ATTACHMENTS, useWorkspaceUiStore } from "@/lib/stores
 
 type ThinkingEffort = "low" | "medium" | "high";
 type ToolState = "running" | "done" | "error";
-type TimelineItemKind = "thinking" | "tool" | "text" | "compact";
+type TimelineItemKind = "thinking" | "tool" | "text" | "compact" | "command";
 
 interface ToolUseState {
   id: string;
@@ -256,6 +256,27 @@ function timelineItemId(kind: TimelineItemKind, index: number | undefined, fallb
   return `${kind}_${turnPrefix}${index ?? fallback}`;
 }
 
+function parseSlashCommand(message: string): { isCmd: boolean; cmdType?: string; objective?: string } {
+  const normalized = message.trim();
+  const match = normalized.match(/^\/auto(?:[ \t]+([^\r\n]*))?$/);
+  if (!match) {
+    return { isCmd: false };
+  }
+  const arg = match[1]?.trim();
+  if (!arg) {
+    return { isCmd: true, cmdType: "bare" };
+  }
+  if (arg === "off" || arg === "stop") {
+    return { isCmd: true, cmdType: "stop", objective: arg };
+  } else if (arg === "status") {
+    return { isCmd: true, cmdType: "status", objective: arg };
+  } else if (arg === "once") {
+    return { isCmd: true, cmdType: "once", objective: arg };
+  } else {
+    return { isCmd: true, cmdType: "enable", objective: arg };
+  }
+}
+
 function lastTimelineIndex(timeline: MessageTimelineItem[], predicate: (item: MessageTimelineItem) => boolean) {
   for (let index = timeline.length - 1; index >= 0; index -= 1) {
     if (predicate(timeline[index])) return index;
@@ -393,7 +414,9 @@ function mergeChatMessagesById(current: ChatMessage[], incoming: ChatMessage[]):
 }
 
 function serializeSessionMessages(messages: ChatMessage[]): ChatSessionMessageRecord[] {
-  return messages.filter((message) => !isEmptyPendingManagerMessage(message)).map((message) => ({
+  return messages
+    .filter((message) => !isEmptyPendingManagerMessage(message))
+    .map((message) => ({
     id: message.id,
     role: message.role,
     content: message.content,
@@ -988,6 +1011,7 @@ export function ManagerChatPanel({
   function buildChatHistory(sourceMessages: ChatMessage[]): ChatHistoryMessage[] {
     return sourceMessages
       .filter((message) => message.role === "user" || message.role === "manager")
+      .filter((message) => !message.id.startsWith("cmd_") && !message.timeline?.some((item) => (item.kind as string) === "command"))
       .map((message) => ({
         role: message.role,
         content: toHistoryContent(message),
@@ -1299,12 +1323,13 @@ export function ManagerChatPanel({
           }
         case "text_delta":
           {
+            const isCmd = messageId.startsWith("cmd_");
             const itemId =
               event.content_index !== undefined
-                ? timelineItemId("text", event.content_index, `${timeline.length}`, event.assistant_turn_index)
-                : timeline[timeline.length - 1]?.kind === "text"
+                ? timelineItemId(isCmd ? "command" : "text", event.content_index, `${timeline.length}`, event.assistant_turn_index)
+                : (timeline[timeline.length - 1]?.kind === "text" || timeline[timeline.length - 1]?.kind === "command")
                   ? timeline[timeline.length - 1].id
-                  : timelineItemId("text", undefined, `${timeline.length}`);
+                  : timelineItemId(isCmd ? "command" : "text", undefined, `${timeline.length}`);
             const existingContent = timeline.find((item) => item.id === itemId)?.content ?? "";
             return {
               ...current,
@@ -1314,7 +1339,7 @@ export function ManagerChatPanel({
                 timeline,
                 {
                   id: itemId,
-                  kind: "text",
+                  kind: isCmd ? "command" : "text",
                   content: `${existingContent}${event.delta || ""}`,
                   status: "running",
                 },
@@ -1480,7 +1505,9 @@ export function ManagerChatPanel({
                   }
                 }
                 if (event.response?.message) {
-                  const runningTextIndex = lastTimelineIndex(nextTimeline, (item) => item.kind === "text" && item.status === "running");
+                  const isCmd = messageId.startsWith("cmd_");
+                  const targetKind = isCmd ? "command" : "text";
+                  const runningTextIndex = lastTimelineIndex(nextTimeline, (item) => item.kind === targetKind && item.status === "running");
                   if (runningTextIndex >= 0) {
                     const item = nextTimeline[runningTextIndex];
                     nextTimeline = upsertTimelineItem(
@@ -1492,10 +1519,10 @@ export function ManagerChatPanel({
                       },
                       (candidate) => candidate.id === item.id,
                     );
-                  } else if (!nextTimeline.some((item) => item.kind === "text" && item.content)) {
+                  } else if (!nextTimeline.some((item) => item.kind === targetKind && item.content)) {
                     nextTimeline.push({
                       id: "text_final",
-                      kind: "text",
+                      kind: targetKind,
                       content: event.response.message,
                       status: "done",
                     });
@@ -1520,14 +1547,28 @@ export function ManagerChatPanel({
             thinkingState: current.thinkingState === "running" ? "done" : current.thinkingState,
             timeline: settleRunningTimelineItems(timeline, "done"),
           };
-        case "error":
+        case "error": {
+          const detail = event.detail || current.content || "请求失败。";
+          const isCmd = messageId.startsWith("cmd_");
           return {
             ...current,
             state: "error",
             thinkingState: current.thinkingState === "running" ? "error" : current.thinkingState,
-            content: current.content || "请求失败。",
-            timeline: settleRunningTimelineItems(timeline, "error"),
+            content: detail,
+            timeline: isCmd
+              ? upsertTimelineItem(
+                  settleRunningTimelineItems(timeline, "error"),
+                  {
+                    id: `${messageId}_text`,
+                    kind: "command",
+                    content: detail,
+                    status: "error",
+                  },
+                  (item) => item.id === `${messageId}_text` || item.kind === "command",
+                )
+              : settleRunningTimelineItems(timeline, "error"),
           };
+        }
         default:
           return current;
       }
@@ -1583,14 +1624,6 @@ export function ManagerChatPanel({
   async function submit() {
     if (!draft.trim() || busy || !sessionId) return;
     const text = draft.trim();
-    if (text === "/auto" || text.startsWith("/auto ")) {
-      await handleAutoCommand(text);
-      return;
-    }
-    if (text === "/auto once" || text === "/auto status" || text === "/auto off" || text === "/auto stop") {
-      await handleDeprecatedAutoCommand(text);
-      return;
-    }
     if (text === "/compact") {
       await runManualCompaction();
       return;
@@ -1606,19 +1639,21 @@ export function ManagerChatPanel({
       python_runtime: runtimeForChatContext(globalPythonRuntime),
       r_runtime: runtimeForChatContext(globalRRuntime),
     };
-    const userMessageId = createMessageId();
-    const managerMessageId = createMessageId();
+    const isSlashCommand = parseSlashCommand(text).isCmd;
+    const suffix = createMessageId().replace("msg_", "");
+    const userMessageId = isSlashCommand ? `cmd_usr_${suffix}` : createMessageId();
+    const managerMessageId = isSlashCommand ? `cmd_mgr_${suffix}` : createMessageId();
     setMessages((prev) => [
       ...prev,
       {
         id: userMessageId,
         role: "user",
         content: text,
-        attachments: messageAttachments,
+        attachments: isSlashCommand ? [] : messageAttachments,
         state: "done",
-        timeline: [{ id: `${userMessageId}_text`, kind: "text", content: text, status: "done" }],
+        timeline: [{ id: `${userMessageId}_text`, kind: isSlashCommand ? "command" : "text", content: text, status: "done" }],
       },
-      ...(isAutoOwnerSession && effectiveManagerAuto?.enabled
+      ...(isAutoOwnerSession && effectiveManagerAuto?.enabled && !isSlashCommand
         ? []
         : [{ id: managerMessageId, role: "manager" as const, content: "", thinking: "", thinkingState: "idle" as const, tools: [], state: "thinking" as const, timeline: [] }]),
     ]);
@@ -1629,7 +1664,7 @@ export function ManagerChatPanel({
     setBusy(true);
     setError(null);
     stopRequestedRef.current = false;
-    if (isAutoOwnerSession && effectiveManagerAuto?.enabled) {
+    if (isAutoOwnerSession && effectiveManagerAuto?.enabled && !isSlashCommand) {
       try {
         const response = await api.addManagerAutoDirective(projectId, sessionId, text, userMessageId);
         applyManagerAutoState(response.state);
@@ -1660,7 +1695,7 @@ export function ManagerChatPanel({
       let streamError: string | null = null;
       await api.streamChat(
         projectId,
-        context,
+        isSlashCommand ? text : context,
         thinkingEffort,
         history,
         serializeSessionMessages(priorMessages),
@@ -1721,6 +1756,7 @@ export function ManagerChatPanel({
         abortController.signal,
         chatContext,
         sessionId,
+        userMessageId,
       );
       if (streamError) {
         throw new Error(streamError);
@@ -1761,13 +1797,29 @@ export function ManagerChatPanel({
       }
       const message = nextError instanceof Error ? nextError.message : "Chat failed.";
       setError(message);
-      updateMessage(managerMessageId, (current) => ({
-        ...current,
-        state: "error",
-        thinkingState: current.thinkingState === "running" ? "error" : current.thinkingState,
-        content: current.content || "请求失败。",
-        thinking: current.thinking,
-      }));
+      const isCmd = managerMessageId.startsWith("cmd_");
+      updateMessage(managerMessageId, (current) => {
+        const detail = current.content || message || "请求失败。";
+        return {
+          ...current,
+          state: "error",
+          thinkingState: current.thinkingState === "running" ? "error" : current.thinkingState,
+          content: detail,
+          thinking: current.thinking,
+          timeline: isCmd
+            ? upsertTimelineItem(
+                settleRunningTimelineItems(current.timeline ?? [], "error"),
+                {
+                  id: `${managerMessageId}_text`,
+                  kind: "command",
+                  content: detail,
+                  status: "error",
+                },
+                (item) => item.id === `${managerMessageId}_text` || item.kind === "command",
+              )
+            : settleRunningTimelineItems(current.timeline ?? [], "error"),
+        };
+      });
     } finally {
       activeStreamControllerRef.current = null;
       stopRequestedRef.current = false;
@@ -1798,112 +1850,7 @@ export function ManagerChatPanel({
     }
   }
 
-  function parseAutoObjective(command: string): string | null {
-    if (!command.startsWith("/auto")) {
-      return null;
-    }
-    const objective = command.slice(5).trim();
-    return objective || null;
-  }
 
-  async function handleAutoCommand(command: string) {
-    if (!sessionId) return;
-    const objective = parseAutoObjective(command);
-    const userMessageId = createMessageId();
-    const managerMessageId = createMessageId();
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: userMessageId,
-        role: "user",
-        content: command,
-        state: "done",
-        timeline: [{ id: `${userMessageId}_text`, kind: "text", content: command, status: "done" }],
-      },
-    ]);
-    setDraft("");
-    setBusy(true);
-    setError(null);
-    try {
-      if (!objective) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: managerMessageId,
-            role: "manager",
-            content: "请直接使用 `/auto <目标>`。例如：`/auto 继续推进 ready_to_start 的卡片，直到出现需要我决定的阻塞。`",
-            state: "done",
-            timeline: [],
-          },
-        ]);
-        return;
-      }
-      if (autoScopedActive) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: managerMessageId,
-            role: "manager",
-            content: "当前会话的后台继续执行权限仍在生效。先停止，再提交新的 `/auto <目标>`。",
-            state: "done",
-            timeline: [],
-          },
-        ]);
-        return;
-      }
-      const response = await api.enableManagerAuto(projectId, sessionId, "continuous", objective, userMessageId);
-      applyManagerAutoState(response.state);
-      const directiveId = typeof response.directive === "object" && response.directive && "id" in response.directive
-        ? String((response.directive as { id?: unknown }).id ?? "")
-        : "";
-      const wakeId = response.wake_event && typeof response.wake_event === "object" && "wake_id" in response.wake_event
-        ? String((response.wake_event as { wake_id?: unknown }).wake_id ?? "")
-        : "";
-      const ackSuffix = [directiveId ? `directive=${directiveId}` : "", wakeId ? `wake=${wakeId}` : ""]
-        .filter(Boolean)
-        .join(" · ");
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: managerMessageId,
-          role: "manager",
-          content: `已允许当前会话继续消费 workboard 并在后台唤醒。目标：${objective}${ackSuffix ? `\n${ackSuffix}` : ""}`,
-          state: "done",
-          timeline: [],
-        },
-      ]);
-      await onRefresh();
-    } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "`/auto <目标>` 命令失败。");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleDeprecatedAutoCommand(command: string) {
-    if ((command === "/auto stop" || command === "/auto off") && autoScopedActive && sessionId) {
-      await stopAutoFromComposer();
-      return;
-    }
-    const message =
-      command === "/auto stop" || command === "/auto off"
-        ? "当前没有正在运行的后台继续执行会话。"
-        : command === "/auto status"
-          ? "旧的 `/auto status` 输入入口已收起。当前 auto 状态请直接看会话和项目状态面板。"
-          : "旧的 `/auto once` 输入入口已收起。请直接使用 `/auto <目标>`。";
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: createMessageId(),
-        role: "manager",
-        content: message,
-        state: "done",
-        timeline: [{ id: `${createMessageId()}_text`, kind: "text", content: message, status: "done" }],
-      },
-    ]);
-    setDraft("");
-    setError(null);
-  }
 
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
