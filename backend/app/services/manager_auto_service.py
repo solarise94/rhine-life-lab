@@ -149,12 +149,23 @@ class ManagerAutoService:
             next_state.state = "idle"
             next_state.view_workboard = True
             next_state.consume_workboard = True
-            next_state.last_signaled_board_revision = None
+            is_new_auto_scope = (
+                not state.enabled
+                or state.owner_session_id != session_id
+                or state.scope_objective != scope_objective
+            )
+            if is_new_auto_scope:
+                next_state.last_signaled_board_revision = None
+                next_state.last_signaled_workboard_fingerprint = None
+                next_state.last_signaled_workboard_fingerprint_at = None
+                next_state.chain_count = 0
+                next_state.auto_scope_id = f"scope_{uuid4().hex[:12]}"
+            else:
+                next_state.chain_count = state.chain_count
             next_state.started_at = next_state.started_at or now
             next_state.stopped_at = None
             next_state.stop_reason = None
             next_state.stop_message = None
-            next_state.chain_count = 0 if state.owner_session_id != session_id else state.chain_count
             next_state.active_run_id = None
             next_state.active_job_id = None
             next_state.chain_limit_basis = limit_basis
@@ -253,6 +264,8 @@ class ManagerAutoService:
                 created_at=utc_now(),
             )
             state.pending_directives.append(directive)
+            # Reset chain count on new user directive because fresh intent was supplied
+            state.chain_count = 0
             graph.metadata["manager_auto"] = state.model_dump()
             store.save_graph(graph)
             self._emit_auto_event(project_id, state)
@@ -381,6 +394,17 @@ class ManagerAutoService:
                 return state
             if state.state in {"running", "thinking"} and not from_turn_settlement:
                 return state
+
+            # Chain budget guard: stop before any further enqueue
+            if state.chain_count >= state.max_chain_count:
+                next_state = self.stop(
+                    project_id,
+                    session_id,
+                    reason="auto_chain_budget_exceeded",
+                    message=f"自动运行已暂停：连续唤醒次数达到安全上限 {state.max_chain_count} 次。如需继续，请重新发送 /auto <目标>。",
+                )
+                return next_state
+
             if snapshot["has_actionable"]:
                 next_state_value = "active"
             elif snapshot["has_running"]:
@@ -390,13 +414,33 @@ class ManagerAutoService:
             else:
                 next_state_value = "completed"
             state.state = next_state_value  # type: ignore[assignment]
-            if (
+
+            fingerprint = snapshot.get("fingerprint", "")
+            actionability = snapshot.get("actionability", {})
+
+            should_enqueue = (
                 snapshot["has_actionable"]
                 and self.manager_wake_service is not None
                 and state.consume_workboard
                 and next_state_value not in {"running", "thinking"}
-                and state.last_signaled_board_revision != snapshot["revision"]
-            ):
+            )
+
+            if should_enqueue and fingerprint and fingerprint == state.last_signaled_workboard_fingerprint:
+                should_enqueue = False
+
+            if should_enqueue and from_turn_settlement:
+                # Settlement requeue guard: require new frontier or newly unhandled manager blocker
+                has_new_frontier = actionability.get("has_startable_frontier", False)
+                has_new_manager_blocker = actionability.get("has_manager_actionable", False)
+                if not has_new_frontier and not has_new_manager_blocker:
+                    should_enqueue = False
+
+            # Defensive: empty fingerprint means no semantic action units; do not enqueue
+            if should_enqueue and not fingerprint:
+                should_enqueue = False
+
+            if should_enqueue:
+                scope_id = state.auto_scope_id or "legacy"
                 signal = ManagerWakeEvent(
                     wake_id=f"wake_workboard_{uuid4().hex[:12]}",
                     project_id=project_id,
@@ -408,16 +452,29 @@ class ManagerAutoService:
                     payload_summary={
                         "counts": snapshot["counts"],
                         "revision": snapshot["revision"],
+                        "fingerprint": fingerprint,
+                        "actionability": actionability,
                         "from_turn_settlement": from_turn_settlement,
                     },
-                    idempotency_key=f"workboard:{project_id}:{snapshot['revision']}",
+                    idempotency_key=f"workboard:{project_id}:{scope_id}:{fingerprint}",
                     created_at=utc_now(),
                 )
-                state.last_wake_id = signal.wake_id
-                state.last_signaled_board_revision = snapshot["revision"]
+                # fingerprint / last_wake_id are written after successful enqueue so that
+                # enqueue failures do not suppress subsequent retries.
             graph.metadata["manager_auto"] = state.model_dump()
             store.save_graph(graph)
         if signal is not None:
-            self.manager_wake_service.enqueue(signal)
+            enqueued = self.manager_wake_service.enqueue(signal)
+            # Record signaled state only after successful enqueue
+            with lock:
+                store = self.project_service.graph_store(project_id)
+                graph = store.load_graph()
+                state = ManagerAutoState.model_validate(graph.metadata.get("manager_auto") or {})
+                state.last_wake_id = enqueued.wake_id
+                state.last_signaled_workboard_fingerprint = fingerprint
+                state.last_signaled_workboard_fingerprint_at = utc_now()
+                state.last_signaled_board_revision = snapshot["revision"]
+                graph.metadata["manager_auto"] = state.model_dump()
+                store.save_graph(graph)
         self._emit_auto_event(project_id, state)
         return state

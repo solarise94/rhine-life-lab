@@ -88,25 +88,26 @@ class ManagerService:
         return ChatResponse.model_validate(response_payload)
 
     def _sanitize_chat_request_messages(self, chat_request: ChatRequest) -> None:
-        # Collect exact contents of all command messages to filter simplified history,
-        # then filter out command messages from session_messages.
+        # Collect exact contents of all command and wake-notice messages to filter simplified history,
+        # then filter out command/wake-notice messages from session_messages.
         command_contents = set()
         filtered_session_messages = []
         for msg in chat_request.session_messages:
             is_cmd = msg.id.startswith("cmd_")
+            is_wake_notice = msg.id.startswith("wake_notice_")
             if not is_cmd and msg.timeline:
                 for item in msg.timeline:
                     if getattr(item, "kind", "") == "command":
                         is_cmd = True
                         break
-            if is_cmd:
+            if is_cmd or is_wake_notice:
                 if msg.content:
                     command_contents.add(msg.content.strip())
             else:
                 filtered_session_messages.append(msg)
         chat_request.session_messages = filtered_session_messages
 
-        # Filter simplified history messages by matching exact content of command messages.
+        # Filter simplified history messages by matching exact content of command/wake-notice messages.
         # Fall back to using the authoritative parse_slash_command parser for user commands.
         from app.services.utils import parse_slash_command
         filtered_messages = []

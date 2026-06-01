@@ -42,6 +42,9 @@ class ManagerAutoState(BaseModel):
     view_workboard: bool = False
     consume_workboard: bool = False
     last_signaled_board_revision: int | None = None
+    last_signaled_workboard_fingerprint: str | None = None
+    last_signaled_workboard_fingerprint_at: str | None = None
+    auto_scope_id: str | None = None
     stopped_at: str | None = None
     stop_reason: ManagerAutoStopReason | None = None
     stop_message: str | None = None

@@ -64,6 +64,7 @@ class WorkboardItemRecord(BaseModel):
 class BackgroundWorkboardState(BaseModel):
     items: dict[str, WorkboardItemRecord] = Field(default_factory=dict)
     last_revision: int = 0
+    handled_coalescing_keys: dict[str, str] = Field(default_factory=dict)
 
 
 class BackgroundWorkboardView(BaseModel):

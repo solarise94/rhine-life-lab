@@ -72,6 +72,22 @@ class ManagerWakeProcessor:
         if not auto_state.wake_allowed or not owner_session_id:
             self.manager_wake_service.mark_skipped(project_id, wake_event.wake_id, "Auto mode is disabled.")
             return
+        # Chain budget guard for stale queued wakes
+        if auto_state.chain_count >= auto_state.max_chain_count:
+            message = f"自动运行已暂停：连续唤醒次数达到安全上限 {auto_state.max_chain_count} 次。如需继续，请重新发送 /auto <目标>。"
+            self.manager_auto_service.stop(
+                project_id,
+                owner_session_id,
+                reason="auto_chain_budget_exceeded",
+                message=message,
+            )
+            self.chat_session_service.append_messages(
+                project_id,
+                owner_session_id,
+                [self._system_message(f"auto_stop_budget_{wake_event.wake_id}", message)],
+            )
+            self.manager_wake_service.mark_skipped(project_id, wake_event.wake_id, "Auto chain budget exceeded.")
+            return
         if self._is_provider_api_failure_wake(wake_event):
             message = (
                 f"因外部 API 错误，自动运行已停止，等待服务商或网络恢复后再继续。"

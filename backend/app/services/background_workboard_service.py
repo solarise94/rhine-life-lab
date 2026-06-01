@@ -38,7 +38,7 @@ class BackgroundWorkboardService:
             changed = self._release_expired_claims(state)
             if changed:
                 self._save_state(project_id, state)
-            derived = self._derived_items(project_id)
+            derived = self._derived_items(project_id, state=state)
             merged = self._merge_items(derived, state.items)
             view = self._build_view(project_id, merged, session_id=session_id)
             state.last_revision = view.revision
@@ -160,7 +160,7 @@ class BackgroundWorkboardService:
         with self._lock_for(project_id):
             state = self._load_state(project_id)
             changed = self._release_expired_claims(state)
-            derived_items = self._derived_items(project_id)
+            derived_items = self._derived_items(project_id, state=state)
             merged_items = self._merge_items(derived_items, state.items)
             view = self._build_view(project_id, merged_items, session_id=session_id)
             if changed:
@@ -288,21 +288,86 @@ class BackgroundWorkboardService:
 
     def signal_snapshot(self, project_id: str, *, session_id: str | None = None) -> dict[str, Any]:
         view = self.get_workboard(project_id, session_id=session_id)
+        return self._semantic_wake_snapshot_from_view(view)
+
+    @staticmethod
+    def _semantic_wake_snapshot_from_view(view: BackgroundWorkboardView) -> dict[str, Any]:
         counts = view.counts
-        actionable = (
-            sum(1 for item in view.todo if item.get("status") != "processing")
-            + len(view.needs_manager)
-            + sum(1 for item in view.completed if self._completed_item_is_actionable(item))
-            + len(view.ready_to_start)
-        )
+
+        # Filter ready projections: only truly fresh pending frontier
+        running_card_ids = {
+            str(item.get("card_id") or "")
+            for item in view.running
+            if item.get("card_id")
+        }
+        filtered_ready = [
+            item for item in view.ready_to_start
+            if item.get("status") == "pending"
+            and str(item.get("card_id") or "") not in running_card_ids
+        ]
+
+        todo_actionable = [item for item in view.todo if item.get("status") != "processing"]
+        needs_manager_items = view.needs_manager
+        completed_actionable = [item for item in view.completed if BackgroundWorkboardService._completed_item_is_actionable(item)]
+
+        # Build fingerprint from normalized action units
+        # 1. startable frontier: ready cards that are truly fresh
+        ready_units: list[str] = []
+        for item in filtered_ready:
+            card_id = str(item.get("card_id") or "")
+            if card_id:
+                ready_units.append(f"ready:{card_id}")
+            else:
+                ready_units.append(f"ready:{item.get('item_id')}")
+
+        # 2. manager attention: semantic keys, not item_ids.
+        #    Exclude items whose coalescing_key has already been handled.
+        manager_units: set[str] = set()
+        for item in needs_manager_items:
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            if payload.get("coalescing_handled"):
+                continue
+            kind = str(item.get("kind") or "")
+            card_id = str(item.get("card_id") or "")
+            run_id = str(item.get("run_id") or "")
+            if kind == "runtime_dependency_install_failed":
+                ckey = payload.get("coalescing_key") or f"dep:{run_id or card_id or 'unknown'}"
+                manager_units.add(f"manager:{ckey}")
+            elif run_id:
+                manager_units.add(f"manager:run:{run_id}:{kind}")
+            elif card_id:
+                manager_units.add(f"manager:{kind}:{card_id}")
+            else:
+                manager_units.add(f"manager:{kind}:{item.get('item_id')}")
+
+        # 3. todo items do NOT enter fingerprint (they are intermediate state, not fresh work)
+        # 4. completed items do NOT enter fingerprint (receipts, not wake fuel)
+        fingerprint_items = sorted(ready_units) + sorted(manager_units)
+        fingerprint = sha1(json.dumps(fingerprint_items, ensure_ascii=False).encode("utf-8")).hexdigest() if fingerprint_items else ""
+
+        has_manager_actionable = bool(manager_units)
+        has_startable_frontier = bool(ready_units)
+        has_only_blocked_for_user = bool(counts.get("blocked_for_user", 0) > 0 and not has_manager_actionable and not has_startable_frontier)
+        has_only_running = bool(counts.get("running", 0) > 0 and not has_manager_actionable and not has_startable_frontier and not has_only_blocked_for_user)
+        has_only_housekeeping = bool(completed_actionable and not has_manager_actionable and not has_startable_frontier and not has_only_blocked_for_user and not has_only_running)
+
         running = int(counts.get("running", 0))
         blocked = int(counts.get("blocked_for_user", 0))
         return {
             "revision": view.revision,
             "counts": counts,
-            "has_actionable": actionable > 0,
+            "has_actionable": has_manager_actionable or has_startable_frontier,
             "has_running": running > 0,
             "has_blocked_for_user": blocked > 0,
+            "actionability": {
+                "has_manager_actionable": has_manager_actionable,
+                "has_startable_frontier": has_startable_frontier,
+                "has_only_blocked_for_user": has_only_blocked_for_user,
+                "has_only_running": has_only_running,
+                "has_only_housekeeping": has_only_housekeeping,
+            },
+            "fingerprint": f"sha1:{fingerprint}" if fingerprint else "",
+            "fingerprint_items": fingerprint_items,
         }
 
     def _update_item_status(
@@ -344,6 +409,22 @@ class BackgroundWorkboardService:
                 updated.claimed_by_session_id = None
                 updated.claimed_at = None
                 updated.claim_expires_at = None
+                # Mark coalescing as handled when user/supervisor resolves the blocker
+                payload = updated.payload if isinstance(updated.payload, dict) else {}
+                coalescing_key = payload.get("coalescing_key")
+                if coalescing_key and not payload.get("coalescing_handled"):
+                    updated.payload = {**payload, "coalescing_handled": True}
+                    state.handled_coalescing_keys[str(coalescing_key)] = utc_now()
+                    # Batch-mark all other persisted items with the same coalescing_key
+                    for other_id, other in list(state.items.items()):
+                        other_payload = other.payload if isinstance(other.payload, dict) else {}
+                        if other_payload.get("coalescing_key") == coalescing_key and not other_payload.get("coalescing_handled"):
+                            state.items[other_id] = other.model_copy(
+                                update={
+                                    "payload": {**other_payload, "coalescing_handled": True},
+                                    "updated_at": utc_now(),
+                                }
+                            )
             state.items[item_id] = updated
             self._save_state(project_id, state)
             return updated
@@ -356,10 +437,10 @@ class BackgroundWorkboardService:
         session_id: str | None,
         state: BackgroundWorkboardState,
     ) -> dict[str, Any] | None:
-        view = self._build_view(project_id, self._merge_items(self._derived_items(project_id), state.items), session_id=session_id)
+        view = self._build_view(project_id, self._merge_items(self._derived_items(project_id, state=state), state.items), session_id=session_id)
         return self._view_index(view).get(item_id)
 
-    def _derived_items(self, project_id: str) -> dict[str, WorkboardItemRecord]:
+    def _derived_items(self, project_id: str, state: BackgroundWorkboardState | None = None) -> dict[str, WorkboardItemRecord]:
         graph_store = self.project_service.graph_store(project_id)
         graph = graph_store.load_graph()
         cards = graph_store.load_cards()
@@ -477,6 +558,8 @@ class BackgroundWorkboardService:
                         updated_at=str(item.get("finished_at") or item.get("created_at") or utc_now()),
                     )
                 elif status == "failed":
+                    coalescing_key = self._coalescing_key_for_dependency_item(result, source)
+                    handled = (state is not None and coalescing_key in state.handled_coalescing_keys)
                     derived[f"workboard_item:{job_id}:runtime_dependency_install_failed"] = WorkboardItemRecord(
                         item_id=f"workboard_item:{job_id}:runtime_dependency_install_failed",
                         lane="needs_manager",
@@ -488,7 +571,7 @@ class BackgroundWorkboardService:
                         status="pending",
                         recommended_action="inspect_runtime_dependency_install",
                         summary=str(result.get("message") or item.get("error") or "Dependency installation failed."),
-                        payload=result,
+                        payload={**result, "coalescing_key": coalescing_key, "coalescing_handled": handled},
                         updated_at=str(item.get("finished_at") or item.get("created_at") or utc_now()),
                     )
                 elif status in ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES:
@@ -679,6 +762,17 @@ class BackgroundWorkboardService:
         return int(digest, 16)
 
     @staticmethod
+    def _coalescing_key_for_dependency_item(result: dict[str, Any], source: dict[str, Any]) -> str:
+        runtime = str(source.get("runtime") or result.get("runtime") or "unknown")
+        packages = source.get("packages")
+        if isinstance(packages, list):
+            pkg_str = ",".join(sorted(str(p) for p in packages))
+        else:
+            pkg_str = str(packages or "")
+        error_code = str(result.get("error_code") or result.get("reason_code") or "unknown")
+        return f"dep:{runtime}:{pkg_str}:{error_code}"
+
+    @staticmethod
     def _parallel_group_for_card(parallel_batches: Any, card_id: str) -> str | None:
         if not isinstance(parallel_batches, list):
             return None
@@ -702,9 +796,7 @@ class BackgroundWorkboardService:
     @staticmethod
     def _completed_item_is_actionable(item: dict[str, Any]) -> bool:
         payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-        if "actionable_wake" in payload:
-            return bool(payload.get("actionable_wake"))
-        return str(item.get("kind") or "") != "runtime_dependency_install_succeeded"
+        return bool(payload.get("actionable_wake"))
 
     def _path(self, project_id: str) -> Path:
         return self.project_service.project_path(project_id) / "chat" / "background_workboard_state.json"

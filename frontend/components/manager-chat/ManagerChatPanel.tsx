@@ -1012,6 +1012,7 @@ export function ManagerChatPanel({
     return sourceMessages
       .filter((message) => message.role === "user" || message.role === "manager")
       .filter((message) => !message.id.startsWith("cmd_") && !message.timeline?.some((item) => (item.kind as string) === "command"))
+      .filter((message) => !message.id.startsWith("wake_notice_"))
       .map((message) => ({
         role: message.role,
         content: toHistoryContent(message),
@@ -2176,6 +2177,14 @@ export function ManagerChatPanel({
         ) : null}
 
         <div className="manager-composer-shell">
+          {!effectiveManagerAuto?.enabled && effectiveManagerAuto?.stop_reason === "auto_chain_budget_exceeded" ? (
+            <div className="manager-auto-budget-notice">
+              <AlertTriangle size={14} />
+              <span>
+                {effectiveManagerAuto?.stop_message || "AUTO 已暂停：连续唤醒达到安全上限。请重新发送 /auto <目标> 继续。"}
+              </span>
+            </div>
+          ) : null}
           {slashCommandState && slashCommandOptions.length ? (
             <div className="manager-slash-hint">
               {slashCommandOptions.map((option, index) => (
