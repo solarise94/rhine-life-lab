@@ -1217,6 +1217,133 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertEqual(1, len(updated.messages))
         self.assertEqual("处理完成", updated.messages[0].content)
 
+    def test_module4_workboard_processing_item_lease_not_expired(self) -> None:
+        project_id = "lease-test-project"
+        self.project_service.create_project(
+            project_id=project_id,
+            name="Lease Test Project",
+            current_goal="Test workboard processing items lease",
+        )
+        from app.models.background import BackgroundWorkboardState, WorkboardItemRecord
+        from app.services.utils import utc_now
+        
+        workboard_service = self.manager.blueprint_tools.background_workboard_service
+        state = workboard_service._load_state(project_id)
+        
+        # 1. 验证对于 processing 状态且 claim_expires_at 为 None 的项，_release_expired_claims 不会将其释放为 pending
+        item1_id = "todo:sess1:ready_card:card_1"
+        state.items[item1_id] = WorkboardItemRecord(
+            item_id=item1_id,
+            lane="todo",
+            kind="start_ready_card",
+            title="Card 1",
+            card_id="card_1",
+            status="processing",
+            claimed_by_session_id="sess1",
+            claimed_at=utc_now(),
+            claim_expires_at=None,
+            updated_at=utc_now(),
+        )
+        
+        # 2. 验证对于 claimed 状态且 claim_expires_at 已过期的项，_release_expired_claims 会将其释放为 pending
+        item2_id = "todo:sess1:ready_card:card_2"
+        state.items[item2_id] = WorkboardItemRecord(
+            item_id=item2_id,
+            lane="todo",
+            kind="start_ready_card",
+            title="Card 2",
+            card_id="card_2",
+            status="claimed",
+            claimed_by_session_id="sess1",
+            claimed_at="2026-01-01T00:00:00Z",
+            claim_expires_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        
+        changed = workboard_service._release_expired_claims(state)
+        self.assertTrue(changed)
+        
+        # item1 (processing, claim_expires_at=None) 应该依旧是 processing
+        self.assertEqual(state.items[item1_id].status, "processing")
+        self.assertIsNone(state.items[item1_id].claim_expires_at)
+        
+        # item2 (claimed, expired) 应该被释放为 pending
+        self.assertEqual(state.items[item2_id].status, "pending")
+        self.assertIsNone(state.items[item2_id].claim_expires_at)
+        self.assertIsNone(state.items[item2_id].claimed_by_session_id)
+
+    def test_module4_stop_auto_does_not_cancel_run_and_supersedes_directives(self) -> None:
+        project_id = "stop-test-project"
+        self.project_service.create_project(
+            project_id=project_id,
+            name="Stop Test Project",
+            current_goal="Test stop auto and directives cleanup",
+        )
+        
+        wake_service = ManagerWakeService(self.project_service)
+        auto_service = ManagerAutoService(
+            self.project_service,
+            background_workboard_service=self.background_workboard_service,
+            manager_wake_service=wake_service,
+        )
+        
+        # 1. 开启 auto 并添加 directive
+        auto_service.enable(project_id, "sess1", mode="continuous", scope_objective="Goal X")
+        directive = auto_service.add_directive(project_id, "sess1", text="Steer X")
+        
+        state = auto_service.get_state(project_id)
+        self.assertTrue(state.enabled)
+        self.assertTrue(state.wake_allowed)
+        self.assertEqual(state.scope_objective, "Goal X")
+        self.assertEqual(len(state.pending_directives), 1)
+        self.assertEqual(state.pending_directives[0].status, "pending")
+        
+        # 2. 模拟停止 auto，验证 wake_allowed = False, pending directives 变为 superseded，且不抛异常或影响外部
+        stopped_state = auto_service.stop(project_id, "sess1", reason="user_stop", message="Stopped by user")
+        
+        self.assertFalse(stopped_state.enabled)
+        self.assertFalse(stopped_state.wake_allowed)
+        self.assertEqual(len(stopped_state.pending_directives), 1)
+        self.assertEqual(stopped_state.pending_directives[0].status, "superseded")
+        self.assertEqual(stopped_state.pending_directives[0].resolution_note, "Auto session stopped.")
+
+    def test_module4_legacy_envelope_migration_on_load(self) -> None:
+        from app.models.manager_auto import ManagerAutoState
+        
+        # 1. 模拟 legacy metadata payload (有 enabled=True, 没有 wake_allowed)
+        legacy_payload = {
+            "enabled": True,
+            "mode": "continuous",
+            "owner_session_id": "sess_legacy",
+            "state": "idle",
+        }
+        
+        # 验证在反序列化时，wake_allowed 会被迁移回填为 True
+        state = ManagerAutoState.model_validate(legacy_payload)
+        self.assertTrue(state.enabled)
+        self.assertTrue(state.wake_allowed)
+        
+        # 2. 模拟普通 legacy metadata payload (enabled=False, 没有 wake_allowed)
+        legacy_payload_disabled = {
+            "enabled": False,
+            "mode": "continuous",
+            "state": "idle",
+        }
+        state_disabled = ManagerAutoState.model_validate(legacy_payload_disabled)
+        self.assertFalse(state_disabled.enabled)
+        self.assertFalse(state_disabled.wake_allowed)
+        
+        # 3. 模拟含有全新 wake_allowed=False 的 metadata 载入 (不应被覆盖)
+        new_payload = {
+            "enabled": True,
+            "wake_allowed": False,
+            "mode": "continuous",
+            "state": "idle",
+        }
+        state_new = ManagerAutoState.model_validate(new_payload)
+        self.assertTrue(state_new.enabled)
+        self.assertFalse(state_new.wake_allowed)
+
     def test_auto_wake_persists_stream_timeline_for_visible_manager_process(self) -> None:
         project_id = "wake-visible-project"
         self.project_service.create_project(

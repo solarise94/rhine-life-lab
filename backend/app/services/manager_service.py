@@ -210,7 +210,15 @@ class ManagerService:
 
     def _auto_payload(self, project_id: str, session_id: str | None) -> dict:
         if self.manager_auto_service is None:
-            return {"enabled": False, "owner_session_id": None, "btw_mode": False, "state": "idle"}
+            return {
+                "enabled": False,
+                "owner_session_id": None,
+                "btw_mode": False,
+                "state": "idle",
+                "wake_allowed": False,
+                "scope_objective": None,
+                "expires_at": None,
+            }
         view = self.manager_auto_service.get_view(project_id, session_id)
         return {
             "enabled": view.state.enabled,
@@ -221,6 +229,9 @@ class ManagerService:
             "view_workboard": view.state.view_workboard,
             "consume_workboard": view.state.consume_workboard,
             "pending_directives": [item.model_dump() for item in view.state.pending_directives if item.status == "pending"],
+            "wake_allowed": view.state.wake_allowed,
+            "scope_objective": view.state.scope_objective,
+            "expires_at": view.state.expires_at,
         }
 
     def _save_or_answer(self, project_id: str, snapshot: dict, draft: ManagerPlanDraft) -> ChatResponse:

@@ -214,6 +214,7 @@ class BackgroundWorkboardService:
                 state.items[item_id] = item.model_copy(
                     update={
                         "status": "processing",
+                        "claim_expires_at": None,
                         "message": None,
                         "updated_at": utc_now(),
                     }

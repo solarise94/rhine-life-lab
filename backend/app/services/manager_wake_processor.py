@@ -69,7 +69,7 @@ class ManagerWakeProcessor:
             return
         auto_state = self.manager_auto_service.get_state(project_id)
         owner_session_id = auto_state.owner_session_id
-        if not auto_state.enabled or not owner_session_id:
+        if not auto_state.wake_allowed or not owner_session_id:
             self.manager_wake_service.mark_skipped(project_id, wake_event.wake_id, "Auto mode is disabled.")
             return
         if self._is_provider_api_failure_wake(wake_event):

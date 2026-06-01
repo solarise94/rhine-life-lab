@@ -297,6 +297,9 @@ export interface ManagerAutoState {
   stop_reason?: string | null;
   stop_message?: string | null;
   pending_directives: ManagerAutoDirective[];
+  scope_objective?: string | null;
+  wake_allowed: boolean;
+  expires_at?: string | null;
 }
 
 export interface ExecutionFileEntry {

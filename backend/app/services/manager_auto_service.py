@@ -54,7 +54,7 @@ class ManagerAutoService:
         btw_mode = bool(state.enabled and session_id and state.owner_session_id and state.owner_session_id != session_id)
         return ManagerAutoView(state=state, is_owner=is_owner, btw_mode=btw_mode)
 
-    def enable(self, project_id: str, session_id: str, *, mode: str = "continuous") -> ManagerAutoState:
+    def enable(self, project_id: str, session_id: str, *, mode: str = "continuous", scope_objective: str | None = None) -> ManagerAutoState:
         if not session_id:
             raise HTTPException(status_code=400, detail="session_id is required to enable auto mode.")
         lock = self.project_service.lock_for(project_id)
@@ -68,6 +68,8 @@ class ManagerAutoService:
             limit_basis = self._chain_limit_basis(store.load_cards())
             next_state = state.model_copy(deep=True)
             next_state.enabled = True
+            next_state.wake_allowed = True
+            next_state.scope_objective = scope_objective
             next_state.mode = "once" if mode == "once" else "continuous"
             next_state.owner_session_id = session_id
             next_state.state = "idle"
@@ -102,12 +104,22 @@ class ManagerAutoService:
                 raise HTTPException(status_code=409, detail="Only the auto owner session may stop auto mode.")
             next_state = state.model_copy(deep=True)
             next_state.enabled = False
+            next_state.wake_allowed = False
             next_state.state = "cancelled" if reason == "user_stop" else "stopped"
             next_state.active_run_id = None
             next_state.active_job_id = None
             next_state.stopped_at = utc_now()
             next_state.stop_reason = reason
             next_state.stop_message = message
+            
+            # Directive Cleanup: 将所有 pending directives 标为 superseded
+            now = utc_now()
+            for directive in next_state.pending_directives:
+                if directive.status == "pending":
+                    directive.status = "superseded"
+                    directive.resolved_at = now
+                    directive.resolution_note = "Auto session stopped."
+            
             graph.metadata["manager_auto"] = next_state.model_dump()
             store.save_graph(graph)
             self._emit_auto_event(project_id, next_state)
@@ -291,7 +303,7 @@ class ManagerAutoService:
             store = self.project_service.graph_store(project_id)
             graph = store.load_graph()
             state = ManagerAutoState.model_validate(graph.metadata.get("manager_auto") or {})
-            if not state.enabled or state.owner_session_id != session_id:
+            if not state.wake_allowed or state.owner_session_id != session_id:
                 return state
             if state.state in {"running", "thinking"} and not from_turn_settlement:
                 return state

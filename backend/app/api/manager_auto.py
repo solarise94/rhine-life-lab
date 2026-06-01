@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.api.deps import get_chat_session_service, get_manager_auto_service, get_manager_wake_service, get_worker_service
+from app.api.deps import get_chat_session_service, get_manager_auto_service, get_manager_wake_service
 from app.models.manager_auto import ManagerAutoState
 from app.services.chat_session_service import ChatSessionService
 from app.services.manager_auto_service import ManagerAutoService
@@ -89,7 +89,12 @@ def enable_manager_auto(
                 "Stop it first or append steering through the directives path."
             ),
         )
-    state = manager_auto_service.enable(project_id, request.session_id, mode=request.mode)
+    state = manager_auto_service.enable(
+        project_id,
+        request.session_id,
+        mode=request.mode,
+        scope_objective=directive_text or None,
+    )
     directive = None
     wake_event = None
     if directive_text:
@@ -130,14 +135,7 @@ def stop_manager_auto(
     project_id: str,
     request: StopManagerAutoRequest,
     manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
-    worker_service: WorkerService = Depends(get_worker_service),
 ) -> dict:
-    prior_state = manager_auto_service.get_state(project_id)
-    if request.reason == "user_stop" and prior_state.active_run_id:
-        try:
-            worker_service.cancel_run(project_id, prior_state.active_run_id, "Run cancelled by /auto stop.")
-        except Exception:
-            pass
     state = manager_auto_service.stop(
         project_id,
         request.session_id,

@@ -8,11 +8,12 @@ Date: 2026-06-01
 
 Recent OAA-2 and NMF runs exposed several related bugs across graph dependency identity, workboard auto control, runtime dependency repair, and executor terminal reporting.
 
-This document consolidates the latest scattered notes into three implementation modules:
+This document consolidates the latest scattered notes into four implementation modules:
 
 1. Graph/Input Resolution
 2. Auto/Workboard Control
 3. Executor Terminal Contract
+4. Auto Permission Envelope Consolidation
 
 `docs/35_oaa2_plan_accept_workboard_bug_review.md` remains the detailed OAA-2 evidence/root-cause document. This file is the execution-oriented repair index.
 
@@ -522,7 +523,7 @@ each manifest repair provider command uses manifest_repair_timeout_seconds
 repair timeout stops that repair attempt cleanly instead of relying on backend SIGKILL
 ```
 
-These values should be backend Settings values, not hardcoded constants. If exposed through deployment config, update the managed deploy env whitelist in `scripts/deploy_user_systemd.sh` together with the Settings model.
+These values should be backend Settings values, not hardcoded constants. Note that `manifest_repair_timeout_seconds` is managed purely through in-app settings (persisted in `_app_settings.json` via settings API) and is not exposed in the deployment config (`.env`) or the systemd environment whitelist.
 
 Timeout accounting should be explicit:
 
@@ -598,6 +599,305 @@ Keep it as a future option only if:
 - manifest candidate misses required role and expected file is absent: validation fails with clear missing-file/manifest error;
 - Settings values appear in generated backend env when deployment exposes them.
 
+## Module 4: Auto Permission Envelope Consolidation
+
+### Purpose
+
+Modules 1-3 stabilize correctness: graph identity, workboard readiness, runtime dependency gating, scoped `/auto <prompt>`, and executor terminal recovery.
+
+Module 4 is the structural follow-up. Its goal is to remove "auto mode" as a parallel execution concept and reduce it to a permission envelope over the same Workboard path.
+
+This is not another prompt-polish pass. It is a control-surface simplification:
+
+```text
+before:
+  non-auto request -> sometimes direct Manager execution
+  auto request -> workboard/session/wake path
+
+after:
+  all frontier/batch/continue execution -> workboard claim/submit path
+  auto -> only permission to wake/continue after async boundary
+```
+
+### Problems
+
+Even after Module 2, the product and code can still imply that "auto" is a separate execution mode:
+
+- `ManagerAutoService` still owns state that partly overlaps with workboard/background-task facts;
+- API and UI naming still frame `/auto` as an operating mode instead of a scoped continuation permission;
+- some code paths still treat "auto enabled" as a prerequisite for workboard-driven continuation instead of just a wake permission;
+- stop/cancel/ownership semantics are harder to reason about when work acquisition and wake permission are mixed in one concept.
+
+This causes long-term drift:
+
+- users think turning auto off also turns workboard off;
+- backend code keeps duplicating run/job/session state between auto state and workboard/background registries;
+- future control features risk being added twice, once under "auto" and once under "workboard".
+
+### Target Model
+
+Blueprint and Workboard remain unchanged:
+
+```text
+Blueprint = durable facts
+Workboard = executable projection and claim surface
+```
+
+What changes is only the role of Auto:
+
+```text
+Auto = permission envelope for autonomous continuation
+```
+
+Suggested envelope fields:
+
+```text
+owner_session_id
+scope_objective
+wake_allowed
+consume_workboard
+state: idle | active | blocked | completed | cancelled
+expires_at
+stop_reason / stopped_at / stop_message
+```
+
+Interpretation:
+
+- `owner_session_id`: which chat/session owns wake-driven continuation;
+- `scope_objective`: the bounded objective created by `/auto <prompt>`;
+- `wake_allowed`: whether background events may wake Manager again;
+- `consume_workboard`: whether that owner session may continue claiming workboard items after async boundaries;
+- `stop_reason` / `stopped_at` / `stop_message`: stop metadata for the envelope itself;
+- state fields describe the permission envelope itself, not run/job truth.
+
+Run/job truth must live elsewhere:
+
+- active runs belong to runs/background task state;
+- runtime dependency jobs belong to runtime dependency job state;
+- claims/leases belong to workboard state;
+- card readiness belongs to Flow/workboard derivation.
+
+### Current Implementation Inventory
+
+Several Module 4 building blocks already exist in code, but they are still split between "auto mode" naming and workboard/background state:
+
+- `ManagerAutoState` already persists:
+  - `owner_session_id`;
+  - `state`;
+  - `view_workboard`;
+  - `consume_workboard`;
+  - `pending_directives`;
+  - `last_signaled_board_revision`;
+  - `started_at` / `stopped_at` / `stop_reason` / `stop_message`;
+  - compatibility fields `active_run_id` and `active_job_id`.
+- Enabling `/manager-auto` already behaves like creating an owner-scoped continuation session:
+  - sets `owner_session_id`;
+  - enables `view_workboard` and `consume_workboard`;
+  - clears `last_signaled_board_revision`;
+  - resets compatibility runtime fields.
+- `/auto <goal>` in the frontend already behaves like a scoped continuation entry:
+  - the goal text is stored as a pending directive;
+  - a `directive_received` wake may be enqueued;
+  - repeated `/auto <goal>` submissions from the same active owner session are rejected.
+- Workboard wake emission already has two dedupe layers:
+  - `BackgroundWorkboardService.signal_snapshot` computes a board `revision`;
+  - `ManagerAutoState.last_signaled_board_revision` suppresses repeated actionable wakes for the same revision;
+  - `ManagerWakeService.enqueue` dedupes persisted wake events by `idempotency_key`.
+- Wake processing already skips stale actionable wakes:
+  - if a claimed `workboard_actionable` wake reaches the processor but the current workboard snapshot is no longer actionable, the wake is marked done without running another Manager turn.
+- Workboard item claiming already has a basic lease:
+  - `claim_workboard_item(..., lease_seconds=300)` records `claimed_by_session_id`, `claimed_at`, and `claim_expires_at`;
+  - expired claims are released back to `pending` by `_release_expired_claims`.
+
+This means Module 4 is not starting from zero. The code already approximates a permission envelope; the remaining work is to make that approximation explicit, remove duplicated truth, and tighten stop/cancel semantics.
+
+### Current Field Classification
+
+Current `ManagerAutoState` fields should be grouped as follows.
+
+Envelope fields that already match the target model:
+
+- `owner_session_id`;
+- `state`;
+- `view_workboard`;
+- `consume_workboard`;
+- `pending_directives`;
+- `started_at`;
+- `stopped_at`;
+- `stop_reason`;
+- `stop_message`.
+
+Internal coordination fields that may remain but are not user-level permission semantics:
+
+- `last_wake_id`;
+- `last_signaled_board_revision`;
+- `chain_count`;
+- `max_chain_count`;
+- `chain_limit_basis`;
+- `mode` as a compatibility field while API still exposes `continuous` / `once`.
+
+Compatibility fields that should be treated as derived/deprecated in Module 4:
+
+- `active_run_id`;
+- `active_job_id`.
+
+Target envelope fields that are still only implicit or missing:
+
+- `scope_objective`: currently approximated by pending directive text, but not persisted as one canonical field;
+- `wake_allowed`: currently conflated with `enabled`;
+- `expires_at`: currently absent.
+
+Do not introduce `stop_requested` as a new field by default. Current stop metadata already uses:
+
+- `stop_reason`;
+- `stopped_at`;
+- `stop_message`.
+
+Only add a distinct `stop_requested` field if Module 4 later needs a true intermediate state such as "stop requested but current wake/run handoff has not settled yet".
+
+So the concrete Module 4 migration is:
+
+```text
+current:
+  enabled + owner_session_id + consume_workboard + pending_directives + compatibility runtime fields
+
+target:
+  wake_allowed + owner_session_id + scope_objective + consume_workboard + stop/cancel metadata
+  with active_run_id / active_job_id derived from background state instead of stored as primary truth
+```
+
+### Required Product Semantics
+
+After Module 4, these statements must all be true:
+
+- workboard is available in both non-auto and auto flows;
+- disabling auto only disables future wake/resume after an async boundary;
+- non-auto "continue / run next / run ready cards / resume" still goes through workboard for one decision cycle;
+- auto "continue until done" means the same workboard path, plus permission to wake the owner session again;
+- stop/cancel acts on the permission envelope and wake behavior, not on already-running jobs unless the user explicitly cancels those jobs too.
+
+The simplified user mental model should be:
+
+```text
+/auto <goal> = let the same workboard loop keep waking itself for this goal
+/auto off or stop = stop wake-driven continuation
+manual continue = user-triggered one-turn workboard consumption
+```
+
+### Migration Plan
+
+#### 4A: Normalize Backend State Ownership
+
+Reduce `ManagerAutoService` responsibility so it no longer acts like a second scheduler.
+
+Move or keep ownership as follows:
+
+- work selection, claim, and running status stay in workboard/background-task services;
+- runtime dependency repair status stays in runtime dependency job state;
+- permission envelope state stays in the current auto service/storage layer.
+
+Do not add new fields to auto state that duplicate:
+
+- `active_run_id`;
+- `active_job_id`;
+- ready/todo/completed workboard lanes;
+- runtime dependency repair job facts.
+
+Those may continue to exist temporarily for compatibility, but Module 4 should introduce a deprecation direction: derive them from workboard/background state instead of treating them as primary truth.
+
+Current code status:
+
+- `active_run_id` and `active_job_id` are still written by wake processing and manager-tool launch wrappers;
+- they are currently used by `/auto stop` and by directive-wake throttling;
+- they should be retained only as temporary compatibility/cache fields until stop/cancel and wake gating no longer depend on them as authoritative truth.
+
+#### 4B: Unify Manager Execution Entry
+
+Make one rule explicit across backend tools and prompts:
+
+```text
+frontier / batch / continue / resume / run-next
+  -> get workboard
+  -> optionally promote
+  -> claim
+  -> submit
+```
+
+The only remaining direct-launch path should be explicit low-level single-card actions such as:
+
+- direct `start_card_run` on a named card;
+- explicit rerun of a named card/run;
+- explicit cancellation/review actions.
+
+Manager should not have a parallel "auto execution" channel. Auto only changes whether the workboard loop may wake again later.
+
+#### 4C: Simplify API Semantics
+
+Keep the existing API surface if needed for compatibility, but redefine it semantically:
+
+- enable auto = create/update permission envelope;
+- disable auto = revoke wake permission / mark envelope stopped;
+- directive text = scoped objective for the envelope owner session;
+- wake events = requests to resume the same workboard consumption loop.
+
+Compatibility rule:
+
+- existing `ManagerAutoService` names may remain during migration;
+- new behavior should be documented and implemented as permission-envelope semantics, not mode semantics.
+
+If future API cleanup is desired, a later pass can rename endpoints and payloads. Module 4 itself does not require a breaking rename.
+
+Current code status:
+
+- `POST /manager-auto` already behaves like "create/update scoped continuation ownership";
+- `directive_text` already behaves like "append scoped objective/steering";
+- `POST /manager-auto/stop` still partly mixes envelope stop with run cancellation by cancelling `active_run_id` on `user_stop`;
+- no equivalent dependency-job cancel API exists yet, so stop behavior is currently asymmetric between runs and jobs.
+
+#### 4D: Simplify Frontend UX
+
+Frontend language should reinforce the new model:
+
+- `/auto <goal>` starts scoped continuation for a goal;
+- while active, composer/UI should present stop/cancel semantics, not "switch mode" semantics;
+- manual workboard actions remain available outside auto;
+- turning auto off should read like "stop autonomous continuation", not "leave the workboard system".
+
+Do not make the UI imply there are two schedulers. There is one scheduler/work acquisition path, with optional wake permission layered on top.
+
+### Non-Goals
+
+Module 4 should not:
+
+- revisit Module 1 resolver/alias correctness;
+- re-open Module 2 dependency gating or workboard actionable-signal scope;
+- introduce a new executor supervisor or terminal-report framework;
+- rename every `auto` symbol in one pass.
+
+This is a semantic consolidation and ownership cleanup, not a wide churn refactor.
+
+Detailed follow-up protocol design for claim/lease, wake dedupe, and stop/cancel semantics lives in `docs/37_workboard_claim_wake_stop_design.md`.
+
+### Implementation Tasks
+
+- Document auto state as permission-envelope state, not execution-mode state.
+- Audit `ManagerAutoService` fields and mark duplicated run/job state as derived/deprecated.
+- Ensure all Manager "continue/resume/run-next/batch" flows enter through workboard regardless of auto state.
+- Ensure non-auto flows stop after one decision cycle or async boundary.
+- Ensure auto flows may resume only when `wake_allowed` is true for the owner session envelope.
+- Align stop/cancel behavior so stopping auto revokes continuation permission without mutating workboard truth.
+- Update UI copy and command help so `/auto` is described as scoped continuation permission.
+- Add migration notes for eventual endpoint/field renaming after behavior is stable.
+
+### Tests
+
+- non-auto "run next" consumes workboard once and does not self-wake after async boundary;
+- auto scoped session consumes the same workboard path and may self-wake only for its owner session;
+- disabling auto stops future wakes but does not hide workboard lanes or cancel unrelated running jobs;
+- direct single-card start still works without requiring auto;
+- duplicated run/job truth in auto state is not required for correct continuation behavior;
+- frontend copy and command affordances describe auto as continuation permission rather than a separate execution mode.
+
 ## Priority Order
 
 Recommended next implementation order:
@@ -609,5 +909,6 @@ Recommended next implementation order:
 5. Module 2B: distinguish Manager-actionable completed items from housekeeping completed items.
 6. Module 3A/3B: split main/repair timeouts and add backend manifest auto-patch fallback.
 7. Module 2C: implement scoped `/auto <prompt>` and frontend/prompt polish.
+8. Module 4: collapse auto into a permission envelope over the same workboard execution path.
 
 Do not start by polishing Manager prompt alone. The current failures are primarily backend state-machine and resolver issues.

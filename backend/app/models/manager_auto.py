@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 ManagerAutoMode = Literal["continuous", "once"]
@@ -46,6 +46,17 @@ class ManagerAutoState(BaseModel):
     stop_reason: ManagerAutoStopReason | None = None
     stop_message: str | None = None
     pending_directives: list[ManagerAutoDirective] = Field(default_factory=list)
+    scope_objective: str | None = None
+    wake_allowed: bool = False
+    expires_at: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if data.get("enabled") is True and "wake_allowed" not in data:
+                data["wake_allowed"] = True
+        return data
 
 
 class ManagerWakeSource(BaseModel):
