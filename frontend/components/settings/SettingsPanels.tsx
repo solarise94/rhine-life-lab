@@ -276,7 +276,8 @@ export function SettingsPanels({
     library_summarizer: { provider_id: "deepseek" },
   });
   const [defaultWorkerType, setDefaultWorkerType] = useState("pi");
-  const [workerTimeoutSeconds, setWorkerTimeoutSeconds] = useState("900");
+  const [workerTimeoutSeconds, setWorkerTimeoutSeconds] = useState("1800");
+  const [manifestRepairTimeoutSeconds, setManifestRepairTimeoutSeconds] = useState("180");
   const [webSearchEnabled, setWebSearchEnabled] = useState(appSettingsQuery.data?.web_search.enabled ?? false);
   const [tavilyBaseUrl, setTavilyBaseUrl] = useState(appSettingsQuery.data?.web_search.base_url ?? "https://api.tavily.com");
   const [scriptPreference, setScriptPreference] = useState<ScriptPreference>(project.runtime_preferences.script_preference);
@@ -302,6 +303,7 @@ export function SettingsPanels({
     setProviderBindings(appSettingsQuery.data.provider_bindings);
     setDefaultWorkerType(appSettingsQuery.data.default_worker_type);
     setWorkerTimeoutSeconds(String(appSettingsQuery.data.worker_timeout_seconds));
+    setManifestRepairTimeoutSeconds(String(appSettingsQuery.data.manifest_repair_timeout_seconds));
     setProviderKeys({});
     setClearProviderKeys({});
     setEditingProviderId(null);
@@ -323,6 +325,16 @@ export function SettingsPanels({
       if (!Number.isFinite(parsedWorkerTimeout) || parsedWorkerTimeout < 1) {
         throw new Error("运行超时时间必须是大于等于 1 的整数秒。");
       }
+
+      const trimmedRepairTimeout = manifestRepairTimeoutSeconds.trim();
+      if (!trimmedRepairTimeout) {
+        throw new Error("修复超时时间不能为空。");
+      }
+      const parsedRepairTimeout = Number.parseInt(trimmedRepairTimeout, 10);
+      if (!Number.isFinite(parsedRepairTimeout) || parsedRepairTimeout < 1) {
+        throw new Error("修复超时时间必须是大于等于 1 的整数秒。");
+      }
+
       const apiProviderKeys = Object.fromEntries(
         Object.entries(providerKeys)
           .map(([providerId, value]) => [providerId, value.trim()])
@@ -337,6 +349,7 @@ export function SettingsPanels({
         provider_bindings: providerBindings,
         default_worker_type: defaultWorkerType,
         worker_timeout_seconds: parsedWorkerTimeout,
+        manifest_repair_timeout_seconds: parsedRepairTimeout,
         manager_websearch_enabled: webSearchEnabled,
         tavily_api_key: tavilyKey || null,
         clear_tavily_api_key: clearTavilyKey,
@@ -346,6 +359,7 @@ export function SettingsPanels({
       setProviderBindings(saved.provider_bindings);
       setDefaultWorkerType(saved.default_worker_type);
       setWorkerTimeoutSeconds(String(saved.worker_timeout_seconds));
+      setManifestRepairTimeoutSeconds(String(saved.manifest_repair_timeout_seconds));
       setProviderTestResults(testResultsFromProfiles(saved.api_provider_profiles));
       setEditingProviderId(null);
       setDraftProviderIds({});
@@ -914,6 +928,31 @@ export function SettingsPanels({
               </label>
               <div className="settings-inline-help">
                 当前设置会写入应用级配置，并覆盖默认的 `BLUEPRINT_WORKER_TIMEOUT_SECONDS` 运行时值。
+              </div>
+            </div>
+          </div>
+
+          <div className="settings-provider-card">
+            <div className="settings-provider-card-header">
+              <div>
+                <strong>修复超时</strong>
+                <span>Manifest 校验失败后，重启 executor 进行修复的单次超时上限，单位秒。</span>
+              </div>
+              <em>{manifestRepairTimeoutSeconds || "—"}s</em>
+            </div>
+            <div className="settings-form-grid compact">
+              <label className="settings-field">
+                <span>超时时间（秒）</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={manifestRepairTimeoutSeconds}
+                  onChange={(event) => setManifestRepairTimeoutSeconds(event.target.value)}
+                />
+              </label>
+              <div className="settings-inline-help">
+                当前设置会写入应用级配置，并覆盖默认的 `BLUEPRINT_MANIFEST_REPAIR_TIMEOUT_SECONDS` 运行时值。
               </div>
             </div>
           </div>

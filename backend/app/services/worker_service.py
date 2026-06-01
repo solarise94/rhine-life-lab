@@ -1067,8 +1067,16 @@ class WorkerService:
             reader = Thread(target=pump_stdout, daemon=True)
             reader.start()
             timed_out = False
+            worker_timeout = self.project_service.settings.worker_timeout_seconds
+            adapter = self.registry.get(worker_type)
+            if adapter is not None and getattr(adapter, "wrapper_module", None) == "app.workers.agent_cli_executor":
+                from app.workers.agent_cli_executor import MAX_MANIFEST_REPAIR_ATTEMPTS
+                repair_timeout = getattr(self.project_service.settings, "manifest_repair_timeout_seconds", 180)
+                wrapper_wait_timeout = worker_timeout + MAX_MANIFEST_REPAIR_ATTEMPTS * repair_timeout + 60
+            else:
+                wrapper_wait_timeout = worker_timeout
             try:
-                return_code = process.wait(timeout=self.project_service.settings.worker_timeout_seconds)
+                return_code = process.wait(timeout=wrapper_wait_timeout)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 self._terminate_process_group(run_id, process)
@@ -1195,10 +1203,19 @@ class WorkerService:
                     self._apply_failure_report(project_id, run_id, card_id, failure)
                     return
 
-            # Migration compatibility: legacy executors may still exit 0 without a terminal report.
-            # If they produced a valid canonical/legacy manifest, keep accepting that path until the
-            # terminal helper contract is universal across built-in and user-configured executors.
             valid, errors = self.manifest_service.validate_manifest(project_id, run_id)
+            if not valid:
+                if self.manifest_service.attempt_auto_patch_manifest(project_id, run_id):
+                    valid, errors = self.manifest_service.validate_manifest(project_id, run_id)
+                    if valid:
+                        recovered_from_timeout = True
+                        self._append_event(
+                            project_id,
+                            run_id,
+                            card_id,
+                            event_type="timeout_manifest_recovered" if timed_out else "manifest_recovered",
+                            message="Backend automatically patched missing required manifest declarations for files already present on disk.",
+                        )
             if not valid:
                 message = "Manifest 校验失败：" + "; ".join(errors)
                 failure = self._synthesize_executor_failure(

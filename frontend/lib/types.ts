@@ -450,6 +450,7 @@ export interface AppSettings {
   provider_bindings: ProviderBindings;
   default_worker_type: string;
   worker_timeout_seconds: number;
+  manifest_repair_timeout_seconds: number;
   available_executors: string[];
 }
 
@@ -495,6 +496,7 @@ export interface UpdateAppSettingsPayload {
   provider_bindings?: ProviderBindings | null;
   default_worker_type?: string | null;
   worker_timeout_seconds?: number | null;
+  manifest_repair_timeout_seconds?: number | null;
 }
 
 export interface TestApiProviderPayload {

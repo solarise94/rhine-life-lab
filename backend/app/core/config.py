@@ -70,7 +70,8 @@ class Settings(BaseSettings):
     backend_api_base_url: str = "http://127.0.0.1:18001/api"
     internal_tool_token: SecretStr | None = None
     default_worker_type: str = "pi"
-    worker_timeout_seconds: int = 900
+    worker_timeout_seconds: int = 1800
+    manifest_repair_timeout_seconds: int = 180
     executor_sandbox_mode: str = "bwrap"
     executor_max_concurrent_runs: int = 3
     executor_conda_base: Path = Field(default_factory=default_conda_base)

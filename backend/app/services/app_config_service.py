@@ -87,6 +87,7 @@ class AppConfigService:
                 config.get("default_worker_type") or self.settings.default_worker_type
             ),
             "worker_timeout_seconds": self._effective_worker_timeout_seconds(config),
+            "manifest_repair_timeout_seconds": self._effective_manifest_repair_timeout_seconds(config),
             "available_executors": self._available_executors(),
         }
 
@@ -125,6 +126,15 @@ class AppConfigService:
             if value < 1:
                 raise HTTPException(status_code=400, detail="worker_timeout_seconds must be at least 1 second.")
             config["worker_timeout_seconds"] = value
+
+        if "manifest_repair_timeout_seconds" in payload and payload["manifest_repair_timeout_seconds"] is not None:
+            try:
+                value = int(payload["manifest_repair_timeout_seconds"])
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="manifest_repair_timeout_seconds must be an integer.") from exc
+            if value < 1:
+                raise HTTPException(status_code=400, detail="manifest_repair_timeout_seconds must be at least 1 second.")
+            config["manifest_repair_timeout_seconds"] = value
 
         if payload.get("clear_deepseek_api_key"):
             config.pop("deepseek_api_key", None)
@@ -263,6 +273,7 @@ class AppConfigService:
             "api_provider_profiles": providers,
             "provider_bindings": self._public_provider_bindings(config, provider_profiles=self._public_api_provider_profiles(config)),
             "worker_timeout_seconds": self._effective_worker_timeout_seconds(config),
+            "manifest_repair_timeout_seconds": self._effective_manifest_repair_timeout_seconds(config),
         }
 
     def _load(self) -> dict[str, Any]:
@@ -304,6 +315,8 @@ class AppConfigService:
             self.settings.default_worker_type = str(config["default_worker_type"])
         if config.get("worker_timeout_seconds") is not None:
             self.settings.worker_timeout_seconds = self._effective_worker_timeout_seconds(config)
+        if config.get("manifest_repair_timeout_seconds") is not None:
+            self.settings.manifest_repair_timeout_seconds = self._effective_manifest_repair_timeout_seconds(config)
         if config.get("deepseek_api_base_url"):
             self.settings.deepseek_api_base_url = str(config["deepseek_api_base_url"])
         if config.get("pi_deepseek_base_url"):
@@ -338,6 +351,14 @@ class AppConfigService:
             parsed = int(value)
         except (TypeError, ValueError):
             return int(self.settings.worker_timeout_seconds)
+        return max(1, parsed)
+
+    def _effective_manifest_repair_timeout_seconds(self, config: dict[str, Any]) -> int:
+        value = config.get("manifest_repair_timeout_seconds")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return int(getattr(self.settings, "manifest_repair_timeout_seconds", 180))
         return max(1, parsed)
 
     def _apply_provider_binding_overrides(self, config: dict[str, Any]) -> None:

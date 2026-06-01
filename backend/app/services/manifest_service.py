@@ -338,3 +338,70 @@ class ManifestService:
         )
         atomic_write_json(root / "runs" / run_id / "review_context.json", context.model_dump())
         return context
+
+    def attempt_auto_patch_manifest(self, project_id: str, run_id: str) -> bool:
+        root = self.project_service.project_path(project_id)
+        run_dir = root / "runs" / run_id
+        manifest_path = run_dir / "manifest.json"
+        
+        if not manifest_path.exists():
+            candidate_path = run_dir / "manifest.candidate.json"
+            if not candidate_path.exists():
+                return False
+            try:
+                payload = read_json(candidate_path, {})
+                manifest = self.normalize_manifest_payload(payload, run_id=run_id)
+            except Exception:
+                return False
+        else:
+            try:
+                manifest = self.load_manifest(project_id, run_id)
+            except Exception:
+                return False
+                
+        task_packet = self.load_task_packet(project_id, run_id)
+        
+        patched = False
+        created_assets = list(manifest.created_assets)
+        existing_roles = {asset.role for asset in created_assets}
+        
+        from app.models.output_contracts import CreatedAssetRecord
+        
+        for expected in task_packet.expected_outputs:
+            if expected.required and expected.role not in existing_roles:
+                found_path_hint = None
+                found_abs_path = None
+                for hint in expected.allowed_path_hints():
+                    try:
+                        abs_path = resolve_within(root, hint)
+                        if abs_path.exists() and abs_path.is_file():
+                            found_path_hint = hint
+                            found_abs_path = abs_path
+                            break
+                    except ValueError:
+                        continue
+                
+                if found_abs_path is not None and found_path_hint is not None:
+                    detected_class = detect_artifact_class(found_abs_path) or expected.artifact_class
+                    detected_format = detect_artifact_format(found_abs_path) or expected.preferred_format
+                    if not detected_format and expected.accepted_formats:
+                        detected_format = expected.accepted_formats[0]
+                        
+                    new_asset = CreatedAssetRecord(
+                        role=expected.role,
+                        path=found_path_hint,
+                        label=expected.role.replace("_", " ").title(),
+                        asset_id=expected.asset_id,
+                        description=f"Auto-patched missing expected output {expected.role}.",
+                        artifact_class=detected_class,
+                        format=detected_format,
+                    )
+                    created_assets.append(new_asset)
+                    patched = True
+                    
+        if patched:
+            manifest.created_assets = created_assets
+            atomic_write_json(manifest_path, manifest.model_dump(exclude_none=True))
+            return True
+            
+        return False

@@ -164,6 +164,7 @@ def _make_settings(**overrides) -> SimpleNamespace:
         "manager_max_tokens": 2400,
         "manager_timeout_seconds": 600,
         "worker_timeout_seconds": 900,
+        "manifest_repair_timeout_seconds": 180,
         "anthropic_api_key": SimpleNamespace(get_secret_value=lambda: "sk-ant-test-key-456"),
         "anthropic_api_base_url": "https://api.anthropic.com",
         "openai_api_key": None,
@@ -960,15 +961,18 @@ class TestExecutorProfileResolution(unittest.TestCase):
 
     def test_update_settings_persists_worker_timeout_seconds(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            settings = _make_settings(data_root=tmp_dir, worker_timeout_seconds=900)
+            settings = _make_settings(data_root=tmp_dir, worker_timeout_seconds=900, manifest_repair_timeout_seconds=180)
             service = AppConfigService(settings)
 
-            public = service.update_settings({"worker_timeout_seconds": 1800})
+            public = service.update_settings({"worker_timeout_seconds": 1800, "manifest_repair_timeout_seconds": 360})
 
             self.assertEqual(1800, public["worker_timeout_seconds"])
             self.assertEqual(1800, settings.worker_timeout_seconds)
+            self.assertEqual(360, public["manifest_repair_timeout_seconds"])
+            self.assertEqual(360, settings.manifest_repair_timeout_seconds)
             saved = json.loads((Path(tmp_dir) / "_app_settings.json").read_text(encoding="utf-8"))
             self.assertEqual(1800, saved["worker_timeout_seconds"])
+            self.assertEqual(360, saved["manifest_repair_timeout_seconds"])
 
 
 if __name__ == "__main__":

@@ -104,8 +104,12 @@ class AgentCliWorkerAdapter(CommandTemplateWorkerAdapter):
         launch_argv_template = self.resolve_launch_argv_template(settings)
         if not launch_template and not launch_argv_template:
             return {}
+        worker_timeout = getattr(settings, "worker_timeout_seconds", 1800)
+        repair_timeout = getattr(settings, "manifest_repair_timeout_seconds", 180)
         env = {
             "BLUEPRINT_AGENT_PROVIDER": self.provider,
+            "BLUEPRINT_WORKER_TIMEOUT_SECONDS": str(worker_timeout),
+            "BLUEPRINT_MANIFEST_REPAIR_TIMEOUT_SECONDS": str(repair_timeout),
         }
         # Prefer structured argv template over string template
         if launch_argv_template:

@@ -348,6 +348,7 @@ def _run_provider_command(
     attempt: int,
     packet: dict,
     trace_started_monotonic: float,
+    timeout: float | None = None,
 ) -> int:
     started = time.monotonic()
     attempt_record: dict[str, Any] = {
@@ -378,6 +379,7 @@ def _run_provider_command(
         metadata={"command": _redact_command(command)},
     )
     try:
+        import os
         process = subprocess.Popen(
             command,
             cwd=project_root,
@@ -386,6 +388,7 @@ def _run_provider_command(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
     except OSError as exc:
         print(f"[wrapper] failed to launch provider command: {exc}", flush=True)
@@ -409,64 +412,104 @@ def _run_provider_command(
         )
         return 2
     last_line_monotonic = started
-    if process.stdout is not None:
-        for raw_line in process.stdout:
-            line = raw_line.rstrip("\n")
-            if line:
-                forwarded_line, truncated = _stdout_preview(line)
-                print(forwarded_line, flush=True)
-                line_seen_monotonic = time.monotonic()
-                now = _utc_now()
-                attempt_record["stdout_line_count"] += 1
-                if attempt_record["first_output_at"] is None:
-                    attempt_record["first_output_at"] = now
-                attempt_record["last_output_at"] = now
-                kind = _classify_output_line(line)
-                if kind == "bp_event":
-                    attempt_record["bp_event_count"] += 1
-                _record_output_kind(attempt_record, kind, line)
-                _append_output_timeline_event(
-                    run_dir,
-                    trace_started_monotonic=trace_started_monotonic,
-                    phase=phase,
-                    attempt=attempt,
-                    event_type="stdout_line",
-                    kind=kind,
-                    text=forwarded_line,
-                    line_number=attempt_record["stdout_line_count"],
-                    gap_since_previous_seconds=round(line_seen_monotonic - last_line_monotonic, 3),
-                    metadata={"truncated": truncated, "original_char_count": len(line)} if truncated else {},
-                )
-                last_line_monotonic = line_seen_monotonic
-                lines = attempt_record["last_output_lines"]
-                lines.append(_redact_text(line)[:1000])
-                del lines[:-TRACE_LINE_LIMIT]
-                if attempt_record["stdout_line_count"] == 1 or attempt_record["stdout_line_count"] % 25 == 0:
-                    trace["file_timeline"] = _collect_file_timeline(
-                        project_root, run_dir, packet, started_monotonic=trace_started_monotonic
+    
+    from threading import Thread
+    
+    def pump_stdout():
+        nonlocal last_line_monotonic
+        if process.stdout is not None:
+            for raw_line in process.stdout:
+                line = raw_line.rstrip("\n")
+                if line:
+                    forwarded_line, truncated = _stdout_preview(line)
+                    print(forwarded_line, flush=True)
+                    line_seen_monotonic = time.monotonic()
+                    now = _utc_now()
+                    attempt_record["stdout_line_count"] += 1
+                    if attempt_record["first_output_at"] is None:
+                        attempt_record["first_output_at"] = now
+                    attempt_record["last_output_at"] = now
+                    kind = _classify_output_line(line)
+                    if kind == "bp_event":
+                        attempt_record["bp_event_count"] += 1
+                    _record_output_kind(attempt_record, kind, line)
+                    _append_output_timeline_event(
+                        run_dir,
+                        trace_started_monotonic=trace_started_monotonic,
+                        phase=phase,
+                        attempt=attempt,
+                        event_type="stdout_line",
+                        kind=kind,
+                        text=forwarded_line,
+                        line_number=attempt_record["stdout_line_count"],
+                        gap_since_previous_seconds=round(line_seen_monotonic - last_line_monotonic, 3),
+                        metadata={"truncated": truncated, "original_char_count": len(line)} if truncated else {},
                     )
-                    _write_trace(run_dir, trace)
-    return_code = process.wait()
+                    last_line_monotonic = line_seen_monotonic
+                    lines = attempt_record["last_output_lines"]
+                    lines.append(_redact_text(line)[:1000])
+                    del lines[:-TRACE_LINE_LIMIT]
+                    if attempt_record["stdout_line_count"] == 1 or attempt_record["stdout_line_count"] % 25 == 0:
+                        trace["file_timeline"] = _collect_file_timeline(
+                            project_root, run_dir, packet, started_monotonic=trace_started_monotonic
+                        )
+                        _write_trace(run_dir, trace)
+
+    reader = Thread(target=pump_stdout, daemon=True)
+    reader.start()
+    
+    timed_out = False
+    try:
+        return_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        attempt_record["timed_out"] = True
+        print(f"[wrapper] provider command timed out after {timeout} seconds during {phase}.", flush=True)
+        try:
+            pgid = os.getpgid(process.pid)
+            import signal
+            os.killpg(pgid, signal.SIGKILL)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        return_code = process.wait()
+        
+    reader.join(timeout=2)
+    if process.stdout is not None:
+        try:
+            process.stdout.close()
+        except Exception:
+            pass
+
     attempt_record["finished_at"] = _utc_now()
     attempt_record["duration_seconds"] = round(time.monotonic() - started, 3)
     attempt_record["exit_code"] = return_code
     attempt_record["final_silence_seconds"] = round(max(0.0, time.monotonic() - last_line_monotonic), 3)
     trace["file_timeline"] = _collect_file_timeline(project_root, run_dir, packet, started_monotonic=trace_started_monotonic)
     if return_code != 0:
-        _record_observation(trace, "provider_nonzero_exit", f"{phase} attempt {attempt} exited with {return_code}.", severity="error")
-    if attempt_record["duration_seconds"] and attempt_record["duration_seconds"] > 120:
+        if timed_out:
+            _record_observation(trace, "provider_timeout", f"{phase} attempt {attempt} timed out after {timeout} seconds.", severity="error")
+        else:
+            _record_observation(trace, "provider_nonzero_exit", f"{phase} attempt {attempt} exited with {return_code}.", severity="error")
+    if attempt_record["duration_seconds"] and attempt_record["duration_seconds"] > 120 and not timed_out:
         _record_observation(trace, "slow_provider_attempt", f"{phase} attempt {attempt} took {attempt_record['duration_seconds']} seconds.", severity="warning")
     _write_trace(run_dir, trace)
+    
+    event_type = "process_timeout" if timed_out else "process_exit"
     _append_output_timeline_event(
         run_dir,
         trace_started_monotonic=trace_started_monotonic,
         phase=phase,
         attempt=attempt,
-        event_type="process_exit",
+        event_type=event_type,
         kind="system_event",
-        metadata={"exit_code": return_code, "duration_seconds": attempt_record["duration_seconds"]},
+        metadata={"exit_code": return_code, "duration_seconds": attempt_record["duration_seconds"], "timed_out": timed_out},
         gap_since_previous_seconds=attempt_record["final_silence_seconds"],
     )
+    if timed_out:
+        return 124
     return return_code
 
 
@@ -729,6 +772,9 @@ def _run_provider_with_repair_loop(
     completion_message: str,
     completion_metadata: dict[str, Any],
 ) -> int:
+    worker_timeout = float(os.environ.get("BLUEPRINT_WORKER_TIMEOUT_SECONDS", "1800"))
+    repair_timeout = float(os.environ.get("BLUEPRINT_MANIFEST_REPAIR_TIMEOUT_SECONDS", "180"))
+
     return_code = _run_provider_command(
         command,
         project_root=project_root,
@@ -739,6 +785,7 @@ def _run_provider_with_repair_loop(
         attempt=1,
         packet=packet,
         trace_started_monotonic=trace_started_monotonic,
+        timeout=worker_timeout,
     )
 
     terminal_failure_reason = _terminal_failure_reason(run_dir)
@@ -784,70 +831,98 @@ def _run_provider_with_repair_loop(
     if terminal_report.get("terminal_kind") == "report_complete":
         return_code = 0
 
-    if return_code == 0:
+    initial_timed_out = (return_code == 124)
+    candidate_exists = (run_dir / "manifest.candidate.json").exists()
+
+    if return_code == 0 or (initial_timed_out and candidate_exists):
         validation_errors = _promote_candidate_manifest(run_dir=run_dir)
-        trace.setdefault("manifest_validation", []).append(
-            {
-                "phase": "initial_provider",
-                "attempt": 1,
-                "checked_at": _utc_now(),
-                "status": "failed" if validation_errors else "passed",
-                "errors": validation_errors[:10],
-            }
-        )
-        if validation_errors:
-            _record_observation(trace, "manifest_validation_failed", "Initial manifest candidate failed schema validation.", severity="warning")
-        trace["file_timeline"] = _collect_file_timeline(project_root, run_dir, packet, started_monotonic=started)
-        _write_trace(run_dir, trace)
-
-        for attempt in range(1, MAX_MANIFEST_REPAIR_ATTEMPTS + 1):
-            if not validation_errors:
-                break
-            repair_prompt_path = _write_manifest_repair_prompt(run_dir=run_dir, packet=packet, errors=validation_errors, attempt=attempt)
-            repair_command = command
-            repair_env = {
-                **env,
-                "BLUEPRINT_EXECUTOR_PROMPT": str(repair_prompt_path),
-                "BLUEPRINT_MANIFEST_REPAIR_PROMPT": str(repair_prompt_path),
-            }
-            if repair_command_factory is not None:
-                try:
-                    repair_command, repair_env = repair_command_factory(repair_prompt_path, repair_env)
-                except Exception as exc:
-                    print(f"[wrapper] repair command factory failed: {exc}, using original command", flush=True)
-
-            repair_code = _run_provider_command(
-                repair_command,
-                project_root=project_root,
-                env=repair_env,
-                run_dir=run_dir,
-                trace=trace,
-                phase="manifest_repair",
-                attempt=attempt,
-                packet=packet,
-                trace_started_monotonic=trace_started_monotonic,
-            )
-            if repair_code != 0:
-                return_code = repair_code
-                break
-            validation_errors = _promote_candidate_manifest(run_dir=run_dir)
+        
+        if initial_timed_out:
             trace.setdefault("manifest_validation", []).append(
                 {
-                    "phase": "manifest_repair",
-                    "attempt": attempt,
+                    "phase": "initial_provider_timeout",
+                    "attempt": 1,
                     "checked_at": _utc_now(),
                     "status": "failed" if validation_errors else "passed",
                     "errors": validation_errors[:10],
                 }
             )
+            trace["timeout_phase"] = "main_provider"
+            if not validation_errors:
+                return_code = 0
+                trace["repaired_after_main_timeout"] = True
+                _record_observation(trace, "repaired_after_main_timeout", "Main analysis timed out, but candidate manifest was successfully validated/promoted.", severity="info")
             trace["file_timeline"] = _collect_file_timeline(project_root, run_dir, packet, started_monotonic=started)
             _write_trace(run_dir, trace)
-        if return_code == 0 and validation_errors:
-            print("[wrapper] manifest schema validation failed after repair attempts:", flush=True)
-            for error in validation_errors:
-                print(f"[wrapper] - {error}", flush=True)
-            return_code = 1
-            _record_observation(trace, "manifest_repair_exhausted", "Manifest schema validation failed after repair attempts.", severity="error")
+        else:
+            trace.setdefault("manifest_validation", []).append(
+                {
+                    "phase": "initial_provider",
+                    "attempt": 1,
+                    "checked_at": _utc_now(),
+                    "status": "failed" if validation_errors else "passed",
+                    "errors": validation_errors[:10],
+                }
+            )
+            if validation_errors:
+                _record_observation(trace, "manifest_validation_failed", "Initial manifest candidate failed schema validation.", severity="warning")
+            trace["file_timeline"] = _collect_file_timeline(project_root, run_dir, packet, started_monotonic=started)
+            _write_trace(run_dir, trace)
+
+            for attempt in range(1, MAX_MANIFEST_REPAIR_ATTEMPTS + 1):
+                if not validation_errors:
+                    break
+                repair_prompt_path = _write_manifest_repair_prompt(run_dir=run_dir, packet=packet, errors=validation_errors, attempt=attempt)
+                repair_command = command
+                repair_env = {
+                    **env,
+                    "BLUEPRINT_EXECUTOR_PROMPT": str(repair_prompt_path),
+                    "BLUEPRINT_MANIFEST_REPAIR_PROMPT": str(repair_prompt_path),
+                }
+                if repair_command_factory is not None:
+                    try:
+                        repair_command, repair_env = repair_command_factory(repair_prompt_path, repair_env)
+                    except Exception as exc:
+                        print(f"[wrapper] repair command factory failed: {exc}, using original command", flush=True)
+
+                repair_code = _run_provider_command(
+                    repair_command,
+                    project_root=project_root,
+                    env=repair_env,
+                    run_dir=run_dir,
+                    trace=trace,
+                    phase="manifest_repair",
+                    attempt=attempt,
+                    packet=packet,
+                    trace_started_monotonic=trace_started_monotonic,
+                    timeout=repair_timeout,
+                )
+                if repair_code == 124:
+                    trace["timeout_phase"] = "repair_provider"
+                    _record_observation(trace, "manifest_repair_timeout", f"Manifest repair attempt {attempt} timed out.", severity="error")
+                    return_code = 124
+                    break
+                if repair_code != 0:
+                    return_code = repair_code
+                    break
+                validation_errors = _promote_candidate_manifest(run_dir=run_dir)
+                trace.setdefault("manifest_validation", []).append(
+                    {
+                        "phase": "manifest_repair",
+                        "attempt": attempt,
+                        "checked_at": _utc_now(),
+                        "status": "failed" if validation_errors else "passed",
+                        "errors": validation_errors[:10],
+                    }
+                )
+                trace["file_timeline"] = _collect_file_timeline(project_root, run_dir, packet, started_monotonic=started)
+                _write_trace(run_dir, trace)
+            if return_code == 0 and validation_errors:
+                print("[wrapper] manifest schema validation failed after repair attempts:", flush=True)
+                for error in validation_errors:
+                    print(f"[wrapper] - {error}", flush=True)
+                return_code = 1
+                _record_observation(trace, "manifest_repair_exhausted", "Manifest schema validation failed after repair attempts.", severity="error")
 
     trace["status"] = "success" if return_code == 0 else "failed"
     trace["current_phase"] = "complete"

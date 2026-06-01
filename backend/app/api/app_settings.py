@@ -34,6 +34,7 @@ class UpdateAppSettingsRequest(BaseModel):
     provider_bindings: dict[str, dict[str, str | None]] | None = None
     default_worker_type: str | None = None
     worker_timeout_seconds: int | None = None
+    manifest_repair_timeout_seconds: int | None = None
 
 
 class TestApiProviderRequest(BaseModel):
