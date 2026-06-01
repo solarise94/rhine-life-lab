@@ -959,11 +959,11 @@ class ManagerBlueprintTools:
         payload["project_id"] = project_id
         return payload
 
-    def install_runtime_dependencies(self, project_id: str, payload: dict) -> dict:
+    def install_runtime_dependencies(self, project_id: str, payload: dict, session_id: str | None = None) -> dict:
         if self.runtime_dependency_job_service is None:
             raise ManagerPlanningError("runtime dependency job service is unavailable.")
         try:
-            request_payload = self._validated_runtime_dependency_payload(payload)
+            request_payload = self._validated_runtime_dependency_payload(project_id, payload, session_id=session_id)
         except DependencyResolutionError as exc:
             return {
                 "ok": False,
@@ -1138,7 +1138,7 @@ class ManagerBlueprintTools:
             "finished_at": utc_now(),
         }
 
-    def _validated_runtime_dependency_payload(self, payload: dict) -> dict[str, Any]:
+    def _validated_runtime_dependency_payload(self, project_id: str, payload: dict, *, session_id: str | None = None) -> dict[str, Any]:
         request = InstallRuntimeDependenciesPayload.model_validate(payload)
         ecosystem = self._normalize_dependency_ecosystem(request.ecosystem)
         packages = self._validate_dependency_packages(ecosystem, request.packages)
@@ -1146,12 +1146,26 @@ class ManagerBlueprintTools:
         if not runtime or runtime == "__system__":
             raise ManagerPlanningError("install_runtime_dependencies requires a selected non-system runtime.")
         timeout = max(30, min(int(request.timeout_seconds or 600), 1800))
+        source = dict(request.source or {})
+        run_id = str(source.get("run_id") or "").strip()
+        card_id = str(source.get("card_id") or "").strip()
+        if run_id and not card_id:
+            graph = self.project_service.graph_store(project_id).load_graph()
+            run = next((item for item in graph.runs if item.run_id == run_id), None)
+            if run is not None:
+                card_id = run.card_id
+        if card_id:
+            source["card_id"] = card_id
+        if run_id:
+            source["run_id"] = run_id
+        if session_id:
+            source["session_id"] = session_id
         return {
             "ecosystem": ecosystem,
             "runtime": runtime,
             "packages": packages,
             "timeout_seconds": timeout,
-            "source": dict(request.source or {}),
+            "source": source,
         }
 
     def start_card_run(self, project_id: str, payload: dict) -> dict:
@@ -1174,6 +1188,10 @@ class ManagerBlueprintTools:
                     "message": detail.get("message") if isinstance(detail, dict) else str(exc.detail),
                     "pending_approvals": [],
                     "rejected_approvals": [],
+                    "error_code": detail.get("error_code") if isinstance(detail, dict) else None,
+                    "card_id": detail.get("card_id") if isinstance(detail, dict) else request.card_id,
+                    "job_id": detail.get("job_id") if isinstance(detail, dict) else None,
+                    "retry_after_signal": detail.get("retry_after_signal") if isinstance(detail, dict) else None,
                     "block_reasons": block_details.get("block_reasons") if isinstance(block_details, dict) else [],
                     "block_details": block_details,
                 }

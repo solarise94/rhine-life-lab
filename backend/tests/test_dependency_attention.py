@@ -4,6 +4,7 @@ from app.models.cards import Card
 from app.models.graph import Asset, GraphState, RunRecord
 from app.models.output_contracts import CardOutputSpec
 from app.services.dependency_attention_service import DependencyAttentionService
+from app.services.input_resolution_service import InputResolutionService
 
 
 def output(role: str, asset_id: str | None = None) -> CardOutputSpec:
@@ -59,6 +60,7 @@ def run(run_id: str, card_id: str) -> RunRecord:
 class DependencyAttentionServiceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.service = DependencyAttentionService()
+        self.input_resolution_service = InputResolutionService()
 
     def _snapshot(self, cards: list[Card], assets: list[Asset], runs: list[RunRecord]) -> dict:
         return {"cards": cards, "graph": GraphState(assets=assets, runs=runs)}
@@ -111,6 +113,35 @@ class DependencyAttentionServiceTest(unittest.TestCase):
         )
         snapshot["graph"].assets[0].metadata["planned_asset_id"] = "planned_table"
         self.assertEqual([], self.service.analyze_project(snapshot)["issues"])
+
+    def test_virtual_input_issue_reports_requested_and_resolved_ids(self) -> None:
+        producer = card("producer", status="cancelled", outputs=[output("table", "new_asset")])
+        downstream = card("downstream", status="accepted", inputs=[{"label": "table", "asset_id": "planned_table"}])
+        snapshot = self._snapshot(
+            [producer, downstream],
+            [asset("new_asset", run_id="run_new", role="table")],
+            [run("run_new", "producer")],
+        )
+        snapshot["graph"].assets[0].metadata["planned_asset_id"] = "planned_table"
+        issues = self.service.analyze_project(snapshot)["issues"]
+        self.assertEqual(["input_producer_card_inactive"], [issue["kind"] for issue in issues])
+        self.assertEqual("planned_table", issues[0]["requested_asset_id"])
+        self.assertEqual("new_asset", issues[0]["resolved_asset_id"])
+        self.assertEqual("planned_asset_alias", issues[0]["resolved_by"])
+
+    def test_virtual_input_without_materialized_asset_has_no_resolved_by(self) -> None:
+        producer = card("producer", status="accepted", outputs=[output("table", "planned_table")])
+        downstream = card("downstream", status="accepted", inputs=[{"label": "table", "asset_id": "planned_table"}])
+        snapshot = self._snapshot([producer, downstream], [], [])
+        index = self.input_resolution_service.build_index(snapshot["cards"], snapshot["graph"])
+
+        resolution = self.input_resolution_service.resolve_input("planned_table", index)
+
+        self.assertTrue(resolution.is_virtual)
+        self.assertEqual("missing", resolution.status)
+        self.assertIsNone(resolution.resolved_asset_id)
+        self.assertIsNone(resolution.resolved_by)
+        self.assertEqual("producer", resolution.producer_card_id)
 
     def test_inactive_producer_card_warns_without_rebinding(self) -> None:
         producer = card("producer", status="cancelled", outputs=[output("table", "old_asset")])

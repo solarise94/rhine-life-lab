@@ -27,7 +27,7 @@ from app.models.executor import (
     ManagerReportingContract,
     RuntimeBindings,
 )
-from app.models.graph import Asset, Claim, Module, ReportItem, RunRecord
+from app.models.graph import Asset, Claim, GraphState, Module, ReportItem, RunRecord
 from app.models.output_contracts import CardOutputSpec
 from app.models.runs import (
     ExecutorCompletionReport,
@@ -48,12 +48,14 @@ from app.services.artifact_format_service import default_format_for_artifact_cla
 from app.services.background_task_service import BackgroundTaskService
 from app.services.flow_service import FlowService
 from app.services.executor_validation_service import ExecutorValidationService
+from app.services.input_resolution_service import InputResolutionService, VALID_LAUNCHABLE_INPUT_STATUSES
 from app.services.library_registry_service import LibraryRegistryService
 from app.services.manifest_service import ManifestService
 from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.project_event_service import ProjectEventService
 from app.services.project_service import ProjectService
 from app.services.runtime_approval_service import RuntimeApprovalService
+from app.services.runtime_dependency_state_service import ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES
 from app.services.utils import atomic_write_json, utc_now
 from app.workers import build_worker_registry
 
@@ -153,6 +155,7 @@ class WorkerService:
             project_service.settings,
         )
         self.flow_service = FlowService(project_service)
+        self.input_resolution_service = InputResolutionService()
         self.executor_validation_service = ExecutorValidationService(project_service)
         self.registry = build_worker_registry()
         self._threads: dict[str, Thread] = {}
@@ -270,6 +273,23 @@ class WorkerService:
             if card is None:
                 raise HTTPException(status_code=404, detail=f"Card not found: {card_id}")
             work_item = self._get_work_item(project_id, card_id)
+            runtime_dependency_blocker = work_item.get("runtime_dependency_blocker")
+            if (
+                isinstance(runtime_dependency_blocker, dict)
+                and str(runtime_dependency_blocker.get("status") or "") in ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "ok": False,
+                        "message": f"Card {card_id} is waiting for runtime dependency repair to finish.",
+                        "error_code": "runtime_dependency_repair_in_progress",
+                        "card_id": card_id,
+                        "job_id": runtime_dependency_blocker.get("job_id"),
+                        "retry_after_signal": "runtime_dependency_install_terminal",
+                        "block_details": work_item,
+                    },
+                )
             if not work_item["can_start"]:
                 raise HTTPException(
                     status_code=409,
@@ -297,6 +317,8 @@ class WorkerService:
                 profile_id=profile_id,
                 python_runtime=python_runtime,
                 r_runtime=r_runtime,
+                cards=cards,
+                runs=graph.runs,
             )
             atomic_write_json(run_dir / "task_packet.json", packet.model_dump())
             try:
@@ -796,7 +818,11 @@ class WorkerService:
                     out = card_copy.outputs[output_index]
                     promoted_asset = asset_by_id_copy.get(real_asset.asset_id)
                     if promoted_asset is not None:
-                        self._backfill_planned_asset_alias(promoted_asset, out.asset_id)
+                        self._backfill_planned_asset_alias(
+                            promoted_asset,
+                            out.asset_id,
+                            asset_lookup=asset_by_id_copy,
+                        )
                     out.asset_id = real_asset.asset_id
                     # Use the promoted asset status from graph_copy, not the original candidate status.
                     out.status = promoted_asset.status if promoted_asset else real_asset.status
@@ -873,9 +899,14 @@ class WorkerService:
                     # All checks passed: commit the accepted side effects atomically.
                     for asset in created_assets:
                         asset.status = "valid"
+                    asset_by_id = {asset.asset_id: asset for asset in graph.assets}
                     for output_index, real_asset in planned_bindings_for_commit:
                         out = card.outputs[output_index]
-                        self._backfill_planned_asset_alias(real_asset, out.asset_id)
+                        self._backfill_planned_asset_alias(
+                            real_asset,
+                            out.asset_id,
+                            asset_lookup=asset_by_id,
+                        )
                         out.asset_id = real_asset.asset_id
                         out.status = real_asset.status
                     new_claim_ids = self._materialize_claims(
@@ -1614,31 +1645,94 @@ class WorkerService:
         profile_id: str | None = None,
         python_runtime: str | None = None,
         r_runtime: str | None = None,
+        cards: list[Card] | None = None,
+        runs: list[RunRecord] | None = None,
     ) -> TaskPacket:
-        asset_map = {asset.asset_id: asset for asset in assets}
-        input_asset_ids = list(dict.fromkeys([item.asset_id for item in card.inputs if item.asset_id]))
-        input_assets = [
-            TaskPacketAsset(
-                asset_id=asset.asset_id,
-                path=asset.path,
-                type=asset.asset_type,
-                title=asset.title,
-                status=asset.status,
-            )
-            for asset_id in input_asset_ids
-            for asset in [asset_map.get(asset_id)]
-            if asset is not None
-        ]
-        card_inputs = [
-            TaskPacketCardInput(
-                label=item.label,
-                asset_id=item.asset_id,
-                asset_path=asset_map[item.asset_id].path if item.asset_id and item.asset_id in asset_map else None,
-                asset_type=asset_map[item.asset_id].asset_type if item.asset_id and item.asset_id in asset_map else None,
-                status=asset_map[item.asset_id].status if item.asset_id and item.asset_id in asset_map else "missing",
-            )
+        if cards is None or runs is None:
+            snapshot = self.project_service.get_project_snapshot(project_id)
+            cards = cards or snapshot["cards"]
+            runs = runs or snapshot["graph"].runs
+        resolution_index = self.input_resolution_service.build_index(
+            cards,
+            GraphState(assets=assets, runs=runs),
+        )
+        blocking_resolutions = [
+            resolution
             for item in card.inputs
+            if item.asset_id
+            for resolution in [self.input_resolution_service.resolve_input(item.asset_id, resolution_index)]
+            if resolution.resolved_asset_id is None or resolution.status not in VALID_LAUNCHABLE_INPUT_STATUSES
         ]
+        if blocking_resolutions:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": f"Card {card.card_id} has unresolved or non-launchable inputs.",
+                    "error_code": "input_resolution_failed",
+                    "card_id": card.card_id,
+                    "inputs": [
+                        {
+                            "requested_asset_id": item.requested_asset_id,
+                            "resolved_asset_id": item.resolved_asset_id,
+                            "resolved_by": item.resolved_by,
+                            "producer_card_id": item.producer_card_id,
+                            "producer_role": item.producer_role,
+                            "status": item.status,
+                        }
+                        for item in blocking_resolutions
+                    ],
+                },
+            )
+
+        input_assets_by_id: dict[str, TaskPacketAsset] = {}
+        card_inputs: list[TaskPacketCardInput] = []
+        for item in card.inputs:
+            resolution = self.input_resolution_service.resolve_input(item.asset_id, resolution_index) if item.asset_id else None
+            if resolution is None or resolution.asset is None:
+                card_inputs.append(
+                    TaskPacketCardInput(
+                        label=item.label,
+                        asset_id=item.asset_id,
+                        requested_asset_id=item.asset_id,
+                        resolved_asset_id=None,
+                        resolved_by=None,
+                        producer_card_id=None,
+                        producer_role=None,
+                        asset_path=None,
+                        asset_type=None,
+                        status="missing",
+                    )
+                )
+                continue
+            input_assets_by_id.setdefault(
+                resolution.asset.asset_id,
+                TaskPacketAsset(
+                    asset_id=resolution.asset.asset_id,
+                    path=resolution.asset.path,
+                    type=resolution.asset.asset_type,
+                    title=resolution.asset.title,
+                    status=resolution.asset.status,
+                    requested_asset_id=resolution.requested_asset_id,
+                    resolved_by=resolution.resolved_by,
+                    producer_card_id=resolution.producer_card_id,
+                    producer_role=resolution.producer_role,
+                ),
+            )
+            card_inputs.append(
+                TaskPacketCardInput(
+                    label=item.label,
+                    asset_id=resolution.asset.asset_id,
+                    requested_asset_id=resolution.requested_asset_id,
+                    resolved_asset_id=resolution.asset.asset_id,
+                    resolved_by=resolution.resolved_by,
+                    producer_card_id=resolution.producer_card_id,
+                    producer_role=resolution.producer_role,
+                    asset_path=resolution.asset.path,
+                    asset_type=resolution.asset.asset_type,
+                    status=resolution.asset.status,
+                )
+            )
+        input_assets = list(input_assets_by_id.values())
         output_refs = list(card.outputs)
         if not output_refs:
             raise HTTPException(
@@ -2512,20 +2606,39 @@ class WorkerService:
             manifest_created_assets=manifest_created_assets,
             expected_outputs=expected_outputs,
         )
+        asset_lookup = {asset.asset_id: asset for asset in assets}
         for output_index, real_asset in bindings:
             output = card.outputs[output_index]
-            WorkerService._backfill_planned_asset_alias(real_asset, output.asset_id)
+            WorkerService._backfill_planned_asset_alias(real_asset, output.asset_id, asset_lookup=asset_lookup)
             output.asset_id = real_asset.asset_id
             output.status = real_asset.status
         return unmapped
 
     @staticmethod
-    def _backfill_planned_asset_alias(asset: Asset, planned_asset_id: str | None) -> None:
-        alias = str(planned_asset_id or "").strip()
+    def _recover_stable_planned_asset_alias(
+        candidate_id: str | None,
+        asset_lookup: dict[str, Asset] | None = None,
+    ) -> str | None:
+        alias = str(candidate_id or "").strip()
         if not alias:
             return
+        if not asset_lookup:
+            return alias
+        return InputResolutionService.recover_stable_planned_asset_alias(alias, asset_lookup)
+
+    @staticmethod
+    def _backfill_planned_asset_alias(
+        asset: Asset,
+        planned_asset_id: str | None,
+        *,
+        asset_lookup: dict[str, Asset] | None = None,
+    ) -> None:
         metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
-        if str(metadata.get("planned_asset_id") or "").strip():
+        current_alias = str(metadata.get("planned_asset_id") or "").strip()
+        stable_current_alias = WorkerService._recover_stable_planned_asset_alias(current_alias, asset_lookup)
+        stable_incoming_alias = WorkerService._recover_stable_planned_asset_alias(planned_asset_id, asset_lookup)
+        alias = stable_current_alias or stable_incoming_alias
+        if not alias:
             if asset.metadata is not metadata:
                 asset.metadata = metadata
             return

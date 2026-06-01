@@ -6,13 +6,15 @@ Date: 2026-05-31
 
 ## Summary
 
-OAA-2 exposed two blocking issues in the plan/accept/workboard path.
+OAA-2 exposed three blocking issues in the plan/accept/workboard path.
 
 The first issue is dependency identity drift: when an upstream card run is accepted, the backend replaces the card's planned output asset id with the concrete run output asset id. Downstream planned cards still reference the original planned asset ids, so their dependencies become missing even though the upstream result exists.
 
 The second issue is missing workboard continuation: after a plan/proposal is accepted, the workboard is not re-evaluated through the Manager auto signaler, so Manager is not woken to continue consuming ready work or resolve new blockers.
 
-These are separate bugs. The first corrupts the ready frontier. The second prevents the autonomous session from resuming when the frontier changes.
+The third issue is virtual input resolution drift: workboard readiness and Dependency ATTENTION may treat a planned/virtual input id as resolvable through `planned_asset_id`, while run startup still snapshots `card.inputs[].asset_id` directly into the executor task packet. This can make a card appear ready while the executor receives a stale, missing, or ambiguous input.
+
+These are separate bugs. The first corrupts the ready frontier. The second prevents the autonomous session from resuming when the frontier changes. The third makes readiness, diagnostics, and executor launch disagree about what asset a card will actually consume.
 
 ## Current OAA-2 Evidence
 
@@ -151,6 +153,110 @@ This keeps historical recovery separate from normal runtime behavior.
 ### Important Boundary
 
 This bug is not merely a Dependency ATTENTION issue. Even if attention is hidden, the ready frontier is still broken because `FlowService` sees `missing_required_assets`.
+
+## Bug 1B: Virtual Input Resolution Is Not Shared By Run Startup
+
+### Root Cause
+
+The near-term alias fix makes planned output ids resolvable through concrete asset metadata:
+
+```text
+card input asset_sample_metadata
+  -> Asset.metadata["planned_asset_id"] == "asset_sample_metadata"
+  -> concrete asset asset_run_..._sample_metadata_1
+```
+
+That is useful for plan/frontier reasoning, but it creates a new consistency requirement: every backend surface that answers "what does this input mean?" must use the same resolver.
+
+Today the relevant paths are not guaranteed to be equivalent:
+
+- `FlowService.get_work_order` can treat a missing concrete asset id as satisfied if it appears in `timeline["producer_by_asset"]`.
+- `DependencyAttentionService` builds an alias-aware index by registering `planned_asset_id` against concrete assets.
+- `WorkerService._task_packet` snapshots `card.inputs[].asset_id` and looks it up directly in `graph.assets`.
+
+The last path is the execution path. If a downstream card stores a virtual planned input id, `task_packet` may not include the resolved concrete asset path even though workboard marked the card as ready.
+
+### Why This Matters
+
+There are two valid input modes:
+
+1. Concrete execution input:
+
+   ```text
+   inputs[].asset_id = asset_run_..._sample_metadata_1
+   ```
+
+   Dependency Attention can compare the saved concrete asset against the producer card's current output and emit `input_asset_outdated` when needed.
+
+2. Virtual planned input:
+
+   ```text
+   inputs[].asset_id = asset_sample_metadata
+   ```
+
+   This is a logical dependency on the producer's current materialized output. It should not be treated as an old concrete asset, but it must resolve to a concrete valid asset before executor launch.
+
+If a binding tool replaces concrete inputs with virtual ids, the old concrete `input_asset_outdated` signal may disappear. That is acceptable only if the runtime resolver can prove which concrete asset will be used and exposes that resolved id in diagnostics. Otherwise the system can hide a stale dependency while still launching with the wrong or missing file.
+
+### Expected Behavior
+
+Introduce one shared input resolution contract used by:
+
+- `FlowService.get_work_order`;
+- `DependencyAttentionService`;
+- `WorkerService._task_packet`;
+- direct `start_card_run`;
+- `rerun_card`;
+- workboard `submit_claimed_workboard_items`;
+- any future input rebinding tool.
+
+Suggested resolver output:
+
+```json
+{
+  "requested_asset_id": "asset_sample_metadata",
+  "resolved_asset_id": "asset_run_..._sample_metadata_1",
+  "resolved_path": "results/.../sample_metadata.tsv",
+  "resolved_by": "planned_asset_alias",
+  "producer_card_id": "card_card_20260531_141200",
+  "producer_role": "sample_metadata",
+  "status": "valid"
+}
+```
+
+Rules:
+
+- executor task packets must contain concrete resolved asset ids and paths;
+- the original requested id should remain available as provenance, not as the executor-facing path lookup key;
+- unresolved virtual inputs must block run startup with a structured `input_resolution_failed` error;
+- Dependency Attention should report both `requested_asset_id` and `resolved_asset_id` for virtual inputs;
+- virtual inputs should not be reported as `input_asset_outdated` merely because they are not concrete;
+- if the virtual id resolves to a stale/superseded concrete asset, emit a resolver error or warning that names the current valid target.
+
+### Rerun Boundary
+
+`rerun_card` and accepted-card reruns need special handling. After a card has been accepted, `card.outputs[].asset_id` usually points at the previous concrete run asset, not the original planned contract id. A rerun must not turn that previous concrete id into the next run's logical alias.
+
+The resolver should recover the stable logical id from one of:
+
+- the current output asset's `metadata["planned_asset_id"]`;
+- an earlier accepted output alias for the same card and role;
+- the original planned card/proposal snapshot when available.
+
+The chain walk must not accept concrete materialized ids as stable logical ids. If a candidate id exists in `graph.assets`, treat it as a materialized asset and continue only if that asset's metadata points to another candidate id. Only ids that are absent from `graph.assets` qualify as stable planned contract ids. A stable logical planned id must not itself be a materialized asset.
+
+Concrete id prefixes such as `asset_run_*` are implementation details of the current id generator and must not be used as the primary concrete-vs-logical discriminator. Prefixes may be useful as weak diagnostic hints, but the resolver's primary rule is membership in `graph.assets`.
+
+This guard is required because historical drift can already contain concrete-to-concrete aliases, for example:
+
+```text
+new concrete asset
+  metadata.planned_asset_id = previous concrete asset
+```
+
+Following that chain blindly would recover the previous rerun artifact as the "stable" id and keep extending the drift.
+
+If no stable logical id can be recovered, the rerun should still run, but the result should be marked with explicit provenance so downstream dependency repair can see that the alias chain is incomplete.
 
 ## Bug 2: Planned Cards Are Incorrectly Included In Dependency ATTENTION
 
@@ -293,6 +399,12 @@ Suggested API shape:
 acceptProposal(projectId, proposalId, sessionId?)
 ```
 
+The backend request body must remain fully optional. Legacy callers that send no body should continue to succeed with the current non-auto behavior; they must not start receiving `422` validation errors. The implementation shape should stay equivalent to:
+
+```python
+request: AcceptProposalRequest | None = Body(default=None)
+```
+
 The backend should treat `session_id` as optional:
 
 - if no `session_id` is provided, preserve the current non-auto behavior;
@@ -317,16 +429,62 @@ This should reuse the existing guard inside `evaluate_workboard_and_maybe_signal
 
 ## Likely Fix Plan
 
-### P0: Stop False ATTENTION On Planned Cards
+### Completed In Current Repair Pass
+
+These items are already part of the current repair direction and should be preserved during follow-up work:
+
+- Dependency ATTENTION eligibility whitelist for input diagnostics:
+  - planned/proposed cards do not emit default input repair issues;
+  - accepted/failed/stale/needs_review/superseded cards remain eligible.
+- Planned alias read/write:
+  - accepted concrete assets can carry `Asset.metadata["planned_asset_id"]`;
+  - producer maps register both concrete and planned ids;
+  - downstream planned contracts remain unchanged.
+- Proposal accept workboard reevaluation:
+  - proposal accept can pass explicit `session_id`;
+  - workboard signaling happens only for the matching enabled auto owner session with `consume_workboard`.
+
+### Partially Completed In Current Repair Pass
+
+- OAA-2 one-time metadata repair:
+  - initial accept alias backfill is done or can be repaired with the existing metadata alias path;
+  - historical rerun drift cases where `planned_asset_id` points to another concrete asset are still pending under the current remaining repair order below.
+
+### Next: Accepted-Card Rerun Alias Drift Guard
+
+Before broad resolver rollout, prevent future reruns from extending concrete-to-concrete alias chains.
+
+Three layers defend against concrete-to-concrete alias drift:
+
+- Write-time guard (this item): prevent new drift from being introduced during accept.
+- Read-time chain walk (shared resolver below): at frontier evaluation and run startup, follow `metadata["planned_asset_id"]` and reject concrete intermediate ids so historically drifted assets can still resolve to the original logical id.
+- One-time data repair (OAA-2 re-check below): proactively rewrite drifted `metadata["planned_asset_id"]` values so the chain walk is not required as a permanent backstop.
+
+The write-time guard is the minimum fix. The read-time walk is required until historical drift is repaired. The one-time repair can then retire the walk as a permanent compatibility backstop, though the resolver should still keep the concrete-id rejection guard for safety.
+
+Required behavior:
+
+- accepted-card rerun recovers the original logical planned id before writing the new asset alias;
+- chain walk rejects any candidate id that exists in `graph.assets`;
+- multiple reruns keep the alias pointed at the original logical planned id, not the immediately previous concrete asset;
+- if no stable logical id can be recovered, provenance should mark the alias chain incomplete rather than pretending the previous concrete id is stable.
+
+Add tests:
+
+- accepted run followed by rerun preserves the original logical planned alias;
+- accepted run followed by multiple reruns does not create a concrete-to-concrete alias chain;
+- resolver/alias recovery rejects a `metadata["planned_asset_id"]` value that points to an existing concrete asset unless a deeper non-materialized logical id is recovered.
+
+### Completed: Stop False ATTENTION On Planned Cards
 
 Change Dependency ATTENTION so plain planned/proposed cards do not produce input dependency repair issues.
 
 Add tests:
 
-- planned downstream card referencing a planned upstream output should not produce `input_asset_missing`.
+- planned downstream card referencing a planned upstream output should not produce `input_asset_missing`;
 - accepted downstream card referencing a superseded/missing upstream asset should still produce ATTENTION.
 
-### P0: Preserve Planned Output Identity Through Accept
+### Completed: Preserve Planned Output Identity Through Accept
 
 Run acceptance must not make downstream planned inputs lose their source.
 
@@ -348,11 +506,33 @@ Add tests:
 Additional alias regression tests are useful if the implementation is already touching review state:
 
 - first run rejected, second run accepted for the same planned output id resolves the alias to the accepted materialization;
-- accepted run followed by rerun keeps the planned alias pointed at the latest accepted output, not the stale candidate.
+- accepted run followed by rerun keeps the latest accepted output mapped back to the original planned alias, not to a stale candidate or previous concrete run asset.
 
 After code is fixed, run a one-time OAA-2 repair to write missing `planned_asset_id` metadata for already accepted assets.
 
-### P0: Workboard Re-Evaluate After Proposal Accept In Auto Session
+### Next: Add Shared Input Resolution Before Run Startup
+
+Workboard readiness, Dependency Attention, and executor launch must agree on the concrete asset consumed by each card input.
+
+Chosen implementation direction:
+
+- add a backend-owned input resolver that accepts `project_id`, `card`, and current snapshot/graph state;
+- resolve every `card.inputs[].asset_id` to a concrete valid/candidate `Asset` before creating `task_packet.json`;
+- include both requested and resolved ids in task packet provenance;
+- make `FlowService` and `DependencyAttentionService` use the same resolver or a shared index built by it;
+- block `start_card_run`, `rerun_card`, and `submit_claimed_workboard_items` if resolution fails.
+
+Add tests:
+
+- a downstream card input using a planned alias starts with the latest concrete asset path in `task_packet.json`;
+- if the alias is missing or resolves to a nonvalid asset, workboard does not expose `ready_to_start`;
+- Dependency Attention for virtual inputs reports `requested_asset_id` and `resolved_asset_id`;
+- replacing a concrete old input with a virtual planned input does not hide launch-time resolution failure;
+- workboard does not expose `ready_to_start` when the resolved asset status is outside the launch-eligible set such as `valid` or `candidate`;
+- resolver rejects concrete-id alias chains instead of treating a previous run asset as the stable logical id;
+- rerunning an accepted card preserves the original logical planned alias instead of aliasing to the previous concrete run asset.
+
+### Completed: Workboard Re-Evaluate After Proposal Accept In Auto Session
 
 Extend proposal accept handling to carry the current session id and auto context.
 
@@ -372,20 +552,33 @@ Add tests:
 - accepting a proposal outside auto does not enqueue a wake;
 - accepting a proposal with only blocked work sets auto state to blocked if inside auto.
 
-### Repair Order
+### Current Remaining Repair Order
 
-Use this order:
+The original P0 sequence was:
 
 1. Fix planned-card ATTENTION eligibility.
 2. Fix planned asset alias read/write.
-3. Run the OAA-2 one-time metadata repair.
-4. Wire proposal accept to auto-session workboard evaluation.
+3. Add shared input resolution before run startup.
+4. Run the OAA-2 one-time metadata repair.
+5. Wire proposal accept to auto-session workboard evaluation.
 
-The order matters. Workboard signaling after proposal accept is only useful once the ready frontier is correct; otherwise Manager wakes up only to see the same `missing_required_assets` blockers.
+For the current follow-up, the remaining order should be:
+
+1. Add accepted-card rerun alias drift guard.
+2. Add shared input resolution before run startup.
+3. Re-check OAA-2 repaired data for historical concrete-to-concrete drift and dirty card links:
+   - `asset_run_ed5501deff3d_sample_metadata_1.metadata.planned_asset_id` currently points to `asset_run_23e40a696a1c_sample_metadata_1`; rewrite it to the original logical id `asset_sample_metadata`.
+   - `asset_run_ed5501deff3d_group_summary_2.metadata.planned_asset_id` currently points to `asset_run_23e40a696a1c_group_summary_2`; rewrite it to the original logical planned id recovered from proposal patch or card history.
+   - `asset_run_f49e9240eb0d_cleaned_matrix_1.metadata.planned_asset_id` currently points to `asset_run_91a53b3c53a5_cleaned_matrix_1`; rewrite it to `asset_cleaned_matrix`.
+   - `card_card_20260531_140609` (`提取样本名称`) has `linked_runs=[]` and `linked_assets=[]` despite a reviewed run and valid output; populate the links.
+
+The order matters. Shared input resolution should not be forced to normalize newly-created drift. Workboard signaling after proposal accept is only useful once the ready frontier is correct; otherwise Manager wakes up only to see the same `missing_required_assets` blockers.
 
 ## Non-Goals
 
 This note does not propose changing Manager prompt behavior directly.
+
+This note also does not change the broader workboard wake signal deduplication, Manager prompt contract, scoped `/auto <prompt>` behavior, executor timeout/manifest repair, or runtime dependency install gating. Those are covered by `docs/36_manager_workboard_prompt_contract.md`.
 
 The broken state is backend-derived:
 
@@ -403,6 +596,7 @@ The dependency model currently conflates:
 
 - planned output contract ids;
 - concrete run output asset ids;
+- virtual input ids and resolved execution assets;
 - dependency attention repair diagnostics;
 - workboard readiness.
 
@@ -410,4 +604,5 @@ The next repair should restore those boundaries:
 
 - planned cards use frontier/readiness, not ATTENTION;
 - accepted runs materialize outputs without breaking logical dependencies;
+- run startup resolves every virtual/planned input to a concrete asset through the same logic used by readiness and diagnostics;
 - proposal accept inside `/auto` re-enters the workboard signal loop.

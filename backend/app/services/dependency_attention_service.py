@@ -6,6 +6,7 @@ from typing import Any
 
 from app.models.cards import Card
 from app.models.graph import Asset, GraphState, RunRecord
+from app.services.input_resolution_service import InputResolutionService
 
 
 class DependencyAttentionService:
@@ -180,12 +181,12 @@ class DependencyAttentionService:
         return None
 
     def _build_indexes(self, cards: list[Card], graph: GraphState) -> dict[str, Any]:
+        resolution_service = InputResolutionService()
         card_by_id = {card.card_id: card for card in cards}
         asset_by_id = {asset.asset_id: asset for asset in graph.assets}
         run_by_id = {run.run_id: run for run in graph.runs}
         run_card_by_id = {run.run_id: run.card_id for run in graph.runs}
 
-        planned_output_by_asset_id: dict[str, dict[str, Any]] = {}
         current_output_by_card_role: dict[tuple[str, str], Any] = {}
         for card in cards:
             for output in card.outputs:
@@ -193,11 +194,6 @@ class DependencyAttentionService:
                     continue
                 if not output.asset_id:
                     continue
-                planned_output_by_asset_id[output.asset_id] = {
-                    "card_id": card.card_id,
-                    "role": output.role,
-                    "output": output,
-                }
                 if output.role:
                     current_output_by_card_role[(card.card_id, output.role)] = output
 
@@ -224,10 +220,11 @@ class DependencyAttentionService:
             "asset_by_id": asset_by_id,
             "run_by_id": run_by_id,
             "run_card_by_id": run_card_by_id,
-            "planned_output_by_asset_id": planned_output_by_asset_id,
             "current_output_by_card_role": current_output_by_card_role,
             "producer_card_by_asset": producer_card_by_asset,
             "role_by_asset": role_by_asset,
+            "input_resolution_service": resolution_service,
+            "input_resolution_index": resolution_service.build_index(cards, graph),
         }
 
     def _analyze_card_inputs(
@@ -242,29 +239,35 @@ class DependencyAttentionService:
             return
 
         asset_by_id: dict[str, Asset] = indexes["asset_by_id"]
-        planned_output_by_asset_id = indexes["planned_output_by_asset_id"]
         producer_card_by_asset = indexes["producer_card_by_asset"]
         role_by_asset = indexes["role_by_asset"]
         card_by_id: dict[str, Card] = indexes["card_by_id"]
         current_output_by_card_role = indexes["current_output_by_card_role"]
+        input_resolution_service: InputResolutionService = indexes["input_resolution_service"]
+        input_resolution_index = indexes["input_resolution_index"]
 
         for input_ref in card.inputs:
             asset_id = input_ref.asset_id
             if not asset_id:
                 continue
-            asset = asset_by_id.get(asset_id)
+            resolution = input_resolution_service.resolve_input(asset_id, input_resolution_index)
+            asset = resolution.asset
             if not asset:
-                if asset_id not in planned_output_by_asset_id:
-                    issues.append(
-                        self._issue(
-                            kind="input_asset_missing",
-                            severity="error",
-                            card=card,
-                            asset_id=asset_id,
-                            label=input_ref.label,
-                            message=f"Input asset {input_ref.label or asset_id} is missing.",
-                        )
+                issues.append(
+                    self._issue(
+                        kind="input_asset_missing",
+                        severity="error",
+                        card=card,
+                        asset_id=asset_id,
+                        requested_asset_id=resolution.requested_asset_id,
+                        resolved_asset_id=resolution.resolved_asset_id,
+                        resolved_by=resolution.resolved_by,
+                        producer_card_id=resolution.producer_card_id,
+                        producer_role=resolution.producer_role,
+                        label=input_ref.label,
+                        message=f"Input asset {input_ref.label or asset_id} is missing.",
                     )
+                )
                 continue
 
             if asset.status not in self.VALID_INPUT_STATUSES:
@@ -274,6 +277,9 @@ class DependencyAttentionService:
                         severity="error" if asset.status in self.ERROR_INPUT_STATUSES else "warning",
                         card=card,
                         asset_id=asset.asset_id,
+                        requested_asset_id=resolution.requested_asset_id,
+                        resolved_asset_id=resolution.resolved_asset_id,
+                        resolved_by=resolution.resolved_by,
                         asset_status=asset.status,
                         label=input_ref.label,
                         message=f"Input asset {input_ref.label or asset.asset_id} has status {asset.status}.",
@@ -283,8 +289,8 @@ class DependencyAttentionService:
             if asset.status == "candidate":
                 continue
 
-            producer_card_id = producer_card_by_asset.get(asset.asset_id)
-            role = role_by_asset.get(asset.asset_id)
+            producer_card_id = resolution.producer_card_id or producer_card_by_asset.get(asset.asset_id)
+            role = resolution.producer_role or role_by_asset.get(asset.asset_id)
             if producer_card_id:
                 producer_card = card_by_id.get(producer_card_id)
                 if producer_card and producer_card.status in self.INACTIVE_PRODUCER_CARD_STATUSES:
@@ -294,6 +300,9 @@ class DependencyAttentionService:
                             severity="warning",
                             card=card,
                             asset_id=asset.asset_id,
+                            requested_asset_id=resolution.requested_asset_id,
+                            resolved_asset_id=resolution.resolved_asset_id,
+                            resolved_by=resolution.resolved_by,
                             asset_status=asset.status,
                             label=input_ref.label,
                             producer_card_id=producer_card.card_id,
@@ -310,6 +319,9 @@ class DependencyAttentionService:
                                 severity="warning",
                                 card=card,
                                 asset_id=asset.asset_id,
+                                requested_asset_id=resolution.requested_asset_id,
+                                resolved_asset_id=resolution.resolved_asset_id,
+                                resolved_by=resolution.resolved_by,
                                 asset_status=asset.status,
                                 label=input_ref.label,
                                 producer_card_id=producer_card_id,
@@ -319,13 +331,21 @@ class DependencyAttentionService:
                         )
                     current_output = current_output_by_card_role.get((producer_card_id, role))
                     current_asset = asset_by_id.get(current_output.asset_id) if current_output and current_output.asset_id else None
-                    if current_asset and current_asset.asset_id != asset.asset_id and current_asset.status in self.VALID_INPUT_STATUSES:
+                    if (
+                        current_asset
+                        and not resolution.is_virtual
+                        and current_asset.asset_id != asset.asset_id
+                        and current_asset.status in self.VALID_INPUT_STATUSES
+                    ):
                         issues.append(
                             self._issue(
                                 kind="input_asset_outdated",
                                 severity="warning",
                                 card=card,
                                 asset_id=asset.asset_id,
+                                requested_asset_id=resolution.requested_asset_id,
+                                resolved_asset_id=resolution.resolved_asset_id,
+                                resolved_by=resolution.resolved_by,
                                 asset_status=asset.status,
                                 label=input_ref.label,
                                 producer_card_id=producer_card_id,
@@ -343,6 +363,9 @@ class DependencyAttentionService:
                         severity="warning",
                         card=card,
                         asset_id=asset.asset_id,
+                        requested_asset_id=resolution.requested_asset_id,
+                        resolved_asset_id=resolution.resolved_asset_id,
+                        resolved_by=resolution.resolved_by,
                         asset_status=asset.status,
                         label=input_ref.label,
                         upstream_invalid_assets=invalid_roots[:8],

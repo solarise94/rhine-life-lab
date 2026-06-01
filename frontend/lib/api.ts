@@ -412,10 +412,22 @@ export const api = {
     const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
     return request<{ state: ManagerAutoState; is_owner: boolean; btw_mode: boolean }>(`/projects/${projectId}/manager-auto${query}`);
   },
-  enableManagerAuto(projectId: string, sessionId: string, mode: "continuous" | "once" = "continuous") {
-    return request<{ state: ManagerAutoState }>(`/projects/${projectId}/manager-auto`, {
+  enableManagerAuto(
+    projectId: string,
+    sessionId: string,
+    mode: "continuous" | "once" = "continuous",
+    directiveText?: string | null,
+    messageId?: string | null,
+  ) {
+    return request<{ state: ManagerAutoState; directive?: unknown; wake_event?: Record<string, unknown> | null }>(`/projects/${projectId}/manager-auto`, {
       method: "POST",
-      body: JSON.stringify({ session_id: sessionId, mode }),
+      body: JSON.stringify({
+        session_id: sessionId,
+        mode,
+        directive_text: directiveText ?? null,
+        message_id: messageId ?? null,
+        trigger_wake: true,
+      }),
     });
   },
   stopManagerAuto(projectId: string, sessionId: string, reason = "user_off", message = "Auto mode 已关闭。") {

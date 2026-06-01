@@ -483,7 +483,7 @@ def install_runtime_dependencies(
     _verify_internal_token(authorization)
     _guard_mutation(project_id, "install_runtime_dependencies", x_blueprint_session_id, manager_auto_service)
     try:
-        response = manager_service.blueprint_tools.install_runtime_dependencies(project_id, payload)
+        response = manager_service.blueprint_tools.install_runtime_dependencies(project_id, payload, x_blueprint_session_id)
         if response.get("job_id"):
             _mark_auto_running(
                 project_id,

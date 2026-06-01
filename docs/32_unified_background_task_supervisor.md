@@ -238,6 +238,60 @@ Manager workboard processing then becomes consistent:
 
 This prevents simultaneous card completions from starting multiple unmanaged Manager turns. If `card_1` and `card_2` finish at the same time, both terminal facts are stored, but Manager receives one "workboard has information" signal and chooses what to consume.
 
+### Workboard Wake Coalescing
+
+The wake queue may persist multiple raw workboard wake records. That is useful
+for crash recovery and auditability, but Manager should not process one turn per
+stored workboard wake. A single Manager wake turn reads the latest workboard
+snapshot, so older pending workboard wakes are redundant once any workboard wake
+has been claimed.
+
+Required behavior:
+
+1. `workboard_actionable` wakes remain durable and idempotent by board revision
+   or digest;
+2. when `ManagerWakeProcessor` claims one `workboard_actionable` wake, it takes
+   ownership of the current workboard snapshot;
+3. before or while processing that turn, the wake service coalesces all other
+   queued/stale-running `workboard_actionable` wakes for the same project;
+4. coalesced wakes are marked `skipped` or `done` with a reason such as
+   `coalesced_by_wake:<wake_id>`;
+5. non-workboard wakes, such as directives, provider errors, or explicit user
+   interrupts, are not coalesced by this rule.
+
+Example:
+
+```text
+card_1 finishes -> workboard revision 10 -> wake A queued
+card_2 finishes -> workboard revision 11 -> wake B queued
+card_3 fails    -> workboard revision 12 -> wake C queued
+Manager claims wake A
+wake service coalesces wake B and wake C
+Manager reads latest workboard revision 12
+Manager handles one coherent workboard decision cycle
+```
+
+Without this coalescing, queued workboard wakes for older revisions can trigger
+extra Manager turns even though the Manager already read the latest board state.
+The result is duplicate wake responses or empty follow-up turns.
+
+Implementation shape:
+
+- add a wake-service operation such as
+  `coalesce_workboard_wakes(project_id, keep_wake_id, reason)`;
+- match only `kind == "workboard_actionable"` and `source_type ==
+  "workboard"`;
+- skip the claimed wake itself;
+- update only events with `status in {"queued", "running"}` whose claim is stale
+  or owned by the same processor;
+- leave `directive_received` and provider-error wakes untouched.
+
+Tests should cover:
+
+- several queued workboard revisions collapse into one Manager turn;
+- directive/provider wakes survive workboard coalescing;
+- the Manager turn still reads the newest workboard snapshot after coalescing.
+
 ## Background Workboard
 
 The supervisor should expose a workboard for Manager instead of making Manager reconstruct project state from general inspection tools.

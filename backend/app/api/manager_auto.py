@@ -16,6 +16,9 @@ router = APIRouter(prefix="/projects/{project_id}/manager-auto", tags=["manager-
 class SetManagerAutoRequest(BaseModel):
     session_id: str
     mode: str = "continuous"
+    directive_text: str | None = None
+    message_id: str | None = None
+    trigger_wake: bool = True
 
 
 class StopManagerAutoRequest(BaseModel):
@@ -62,13 +65,64 @@ def enable_manager_auto(
     request: SetManagerAutoRequest,
     chat_session_service: ChatSessionService = Depends(get_chat_session_service),
     manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+    manager_wake_service: ManagerWakeService = Depends(get_manager_wake_service),
 ) -> dict:
     try:
         chat_session_service.get_session(project_id, request.session_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    directive_text = str(request.directive_text or "").strip()
+    current_state = manager_auto_service.get_state(project_id)
+    if (
+        directive_text
+        and current_state.enabled
+        and current_state.owner_session_id == request.session_id
+        and (
+            any(item.status == "pending" for item in current_state.pending_directives)
+            or current_state.state not in {"completed", "cancelled", "stopped"}
+        )
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A scoped workboard continuation is already active for this session. "
+                "Stop it first or append steering through the directives path."
+            ),
+        )
     state = manager_auto_service.enable(project_id, request.session_id, mode=request.mode)
-    return _status_payload(state)
+    directive = None
+    wake_event = None
+    if directive_text:
+        directive = manager_auto_service.add_directive(
+            project_id,
+            request.session_id,
+            text=directive_text,
+            message_id=request.message_id,
+        )
+        if request.trigger_wake:
+            from app.models.manager_auto import ManagerWakeEvent
+            from app.services.utils import utc_now
+
+            if manager_auto_service.should_trigger_directive_wake(project_id):
+                wake_event = ManagerWakeEvent(
+                    wake_id=f"wake_{directive.id}",
+                    project_id=project_id,
+                    kind="directive_received",
+                    source_type="directive",
+                    source_id=directive.id,
+                    severity="info",
+                    message=f"收到新的 auto 指令：{directive.text}",
+                    payload_summary={"directive_id": directive.id},
+                    idempotency_key=f"directive:{directive.id}",
+                    created_at=utc_now(),
+                )
+                manager_wake_service.enqueue(wake_event)
+        state = manager_auto_service.get_state(project_id)
+    return {
+        **_status_payload(state),
+        "directive": directive.model_dump() if directive else None,
+        "wake_event": wake_event.model_dump() if wake_event else None,
+    }
 
 
 @router.post("/stop")

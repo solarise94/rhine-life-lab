@@ -234,6 +234,37 @@ class RemediationTestCase(unittest.TestCase):
         self.assertEqual(card.outputs[0].asset_id, "real_1")
         self.assertEqual(unmapped, [])
 
+    def test_backfill_planned_asset_alias_recovers_logical_id_from_concrete_chain(self) -> None:
+        previous = Asset(
+            asset_id="asset_prev",
+            asset_type="table",
+            title="Previous",
+            status="valid",
+            path="prev.tsv",
+            summary="prev",
+            metadata={"role": "out", "planned_asset_id": "planned_out"},
+        )
+        current = Asset(
+            asset_id="asset_current",
+            asset_type="table",
+            title="Current",
+            status="candidate",
+            path="current.tsv",
+            summary="current",
+            metadata={"role": "out", "planned_asset_id": "asset_prev"},
+        )
+
+        WorkerService._backfill_planned_asset_alias(
+            current,
+            "asset_prev",
+            asset_lookup={
+                "asset_prev": previous,
+                "asset_current": current,
+            },
+        )
+
+        self.assertEqual("planned_out", current.metadata.get("planned_asset_id"))
+
     def test_sync_card_outputs_duplicate_role_resolves_by_unique_path(self) -> None:
         # With duplicate roles but unique paths, the mapping resolves by path (Priority 4).
         card = Card(
@@ -868,6 +899,112 @@ class RemediationTestCase(unittest.TestCase):
         statuses = {asset.asset_id: asset.status for asset in graph.assets}
         self.assertEqual(statuses["old_a"], "superseded")
         self.assertEqual(statuses["old_b"], "superseded")
+
+    def test_finalize_run_review_rerun_rewrites_concrete_planned_asset_alias(self) -> None:
+        from app.models.runs import RunContext
+        from app.services.utils import utc_now
+
+        root = self.project_service.project_path("test-project")
+        run_id = "run_rerun_alias_rewrite"
+        run_dir = root / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (root / "results").mkdir(parents=True, exist_ok=True)
+
+        store = self.project_service.graph_store("test-project")
+        card = Card(
+            card_id="card_rerun_alias",
+            card_type="module",
+            title="Rerun Alias Rewrite",
+            status="running",
+            step=1,
+            summary="",
+            why="",
+            inputs=[],
+            outputs=[
+                CardOutputSpec(
+                    role="out",
+                    label="Out",
+                    artifact_class="table",
+                    accepted_formats=["tsv"],
+                    asset_id="asset_prev_out",
+                )
+            ],
+            linked_assets=["asset_prev_out"],
+        )
+        store.save_cards([card])
+        graph = store.load_graph()
+        graph.assets.append(
+            Asset(
+                asset_id="asset_prev_out",
+                asset_type="table",
+                title="Previous output",
+                status="valid",
+                created_by_run="run_prev",
+                path="results/prev.tsv",
+                summary="prev",
+                metadata={"role": "out", "planned_asset_id": "planned_out"},
+            )
+        )
+        graph.runs.append(
+            RunRecord(
+                run_id=run_id,
+                card_id="card_rerun_alias",
+                status="running",
+                title="rerun alias rewrite",
+                summary="test",
+                started_at=utc_now(),
+            )
+        )
+        store.save_graph(graph)
+
+        task_packet = TaskPacket(
+            task_id=run_id,
+            project_id="test-project",
+            card_id="card_rerun_alias",
+            card_title="Rerun Alias Rewrite",
+            card_status="running",
+            goal="test",
+            input_assets=[],
+            card_inputs=[],
+            card_outputs=[],
+            expected_outputs=[],
+            allowed_paths=[],
+            readonly_paths=[],
+            forbidden_paths=[],
+            execution_policy={},
+            constraints=[],
+            worker_instructions="",
+            run_context=RunContext(run_id=run_id, worker_type="pi", project_root=str(root), run_dir=f"runs/{run_id}", result_dir="results"),
+            executor_context={},
+            manager_reporting_contract={},
+        )
+        manifest = Manifest(
+            run_id=run_id,
+            status="success",
+            summary="test",
+            created_assets=[
+                CreatedAsset(
+                    path="results/out.tsv",
+                    role="out",
+                    artifact_class="table",
+                    format="tsv",
+                    asset_id="asset_prev_out",
+                )
+            ],
+            code_artifacts=[],
+            key_findings=[],
+            validation_evidence={},
+        )
+        atomic_write_json(run_dir / "task_packet.json", task_packet.model_dump())
+        atomic_write_json(run_dir / "manifest.json", manifest.model_dump())
+
+        result = self.worker._finalize_run_review("test-project", run_id, accept=True, source="reviewer")
+        self.assertTrue(result["accepted"], result)
+
+        graph = store.load_graph()
+        new_asset = next(asset for asset in graph.assets if asset.created_by_run == run_id and asset.metadata.get("role") == "out")
+        self.assertEqual("planned_out", new_asset.metadata.get("planned_asset_id"))
+        self.assertNotEqual("asset_prev_out", new_asset.metadata.get("planned_asset_id"))
 
     def test_finalize_run_review_consistency_failure_reason_not_mapping_ambiguous(self) -> None:
         # Preflight consistency failure must report failure_reason="consistency_failed"

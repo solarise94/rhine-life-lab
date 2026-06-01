@@ -15,6 +15,8 @@ from app.models.runs import ExecutorFailureReport
 from app.services.background_task_service import BackgroundTaskService
 from app.services.flow_service import FlowService
 from app.services.project_service import ProjectService
+from app.services.runtime_dependency_state_service import ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES
+from app.services.runtime_dependency_state_service import dependency_blockers_by_card
 from app.services.utils import atomic_write_json, read_json, utc_now
 
 
@@ -145,6 +147,16 @@ class BackgroundWorkboardService:
         pending_starts: list[tuple[str, str]] = []
         if not session_id:
             raise HTTPException(status_code=400, detail="session_id is required.")
+        runtime_dependency_blockers = dependency_blockers_by_card(self.project_service.project_path(project_id))
+        current_work_order = self.flow_service.get_work_order(
+            project_id,
+            runtime_dependency_blockers=runtime_dependency_blockers,
+        )
+        work_items_by_card_id = {
+            str(item.get("card_id") or ""): item
+            for item in current_work_order["work_items"]
+            if isinstance(item, dict) and item.get("card_id")
+        }
         with self._lock_for(project_id):
             state = self._load_state(project_id)
             changed = self._release_expired_claims(state)
@@ -170,12 +182,32 @@ class BackgroundWorkboardService:
                 if source is None:
                     derived_source = derived_items.get(source_id)
                     source = derived_source.model_dump() if derived_source is not None else None
+                card_id = str(item.payload.get("card_id") or item.card_id or "")
                 if source is None or source.get("lane") != "ready_to_start":
-                    blocked.append({"item_id": item_id, "reason": "source_not_ready"})
+                    runtime_dependency_blocker = None
+                    if card_id:
+                        work_item = work_items_by_card_id.get(card_id)
+                        if isinstance(work_item, dict):
+                            runtime_dependency_blocker = work_item.get("runtime_dependency_blocker")
+                    if (
+                        isinstance(runtime_dependency_blocker, dict)
+                        and str(runtime_dependency_blocker.get("status") or "") in ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES
+                    ):
+                        blocked.append(
+                            {
+                                "item_id": item_id,
+                                "card_id": card_id,
+                                "reason": f"Card {card_id} is waiting for runtime dependency repair to finish.",
+                                "error_code": "runtime_dependency_repair_in_progress",
+                                "job_id": runtime_dependency_blocker.get("job_id"),
+                                "retry_after_signal": "runtime_dependency_install_terminal",
+                            }
+                        )
+                    else:
+                        blocked.append({"item_id": item_id, "reason": "source_not_ready"})
                     item = item.model_copy(update={"status": "failed", "updated_at": utc_now(), "message": "Source card is no longer ready to start."})
                     state.items[item_id] = item
                     continue
-                card_id = str(item.payload.get("card_id") or item.card_id or "")
                 if not card_id:
                     blocked.append({"item_id": item_id, "reason": "missing_card_id"})
                     continue
@@ -193,7 +225,19 @@ class BackgroundWorkboardService:
             try:
                 response = start_callback(project_id, card_id)
             except HTTPException as exc:
-                blocked.append({"item_id": item_id, "card_id": card_id, "reason": str(exc.detail)})
+                if isinstance(exc.detail, dict):
+                    blocked.append(
+                        {
+                            "item_id": item_id,
+                            "card_id": card_id,
+                            "reason": exc.detail.get("message") or str(exc.detail),
+                            "error_code": exc.detail.get("error_code"),
+                            "job_id": exc.detail.get("job_id"),
+                            "retry_after_signal": exc.detail.get("retry_after_signal"),
+                        }
+                    )
+                else:
+                    blocked.append({"item_id": item_id, "card_id": card_id, "reason": str(exc.detail)})
                 with self._lock_for(project_id):
                     state = self._load_state(project_id)
                     item = state.items.get(item_id)
@@ -247,7 +291,7 @@ class BackgroundWorkboardService:
         actionable = (
             sum(1 for item in view.todo if item.get("status") != "processing")
             + len(view.needs_manager)
-            + len(view.completed)
+            + sum(1 for item in view.completed if self._completed_item_is_actionable(item))
             + len(view.ready_to_start)
         )
         running = int(counts.get("running", 0))
@@ -428,7 +472,7 @@ class BackgroundWorkboardService:
                         task_id=task_id,
                         status="pending",
                         summary=str(result.get("message") or "Dependency installation completed."),
-                        payload=result,
+                        payload={**result, "actionable_wake": False},
                         updated_at=str(item.get("finished_at") or item.get("created_at") or utc_now()),
                     )
                 elif status == "failed":
@@ -446,8 +490,32 @@ class BackgroundWorkboardService:
                         payload=result,
                         updated_at=str(item.get("finished_at") or item.get("created_at") or utc_now()),
                     )
+                elif status in ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES:
+                    derived[f"workboard_item:{job_id}:runtime_dependency_install_running"] = WorkboardItemRecord(
+                        item_id=f"workboard_item:{job_id}:runtime_dependency_install_running",
+                        lane="deferred",
+                        kind="runtime_dependency_install_running",
+                        card_id=str(source_meta.get("card_id") or "") or None,
+                        run_id=str(source_meta.get("run_id") or "") or None,
+                        job_id=job_id,
+                        task_id=task_id,
+                        status="pending",
+                        summary="Waiting for runtime dependency installation to finish before starting the affected card.",
+                        message=str(result.get("message") or item.get("error") or ""),
+                        payload={
+                            "status": status,
+                            "runtime": source.get("runtime"),
+                            "packages": source.get("packages"),
+                            "session_id": source_meta.get("session_id"),
+                        },
+                        updated_at=str(item.get("started_at") or item.get("created_at") or utc_now()),
+                    )
 
-        work_order = self.flow_service.get_work_order(project_id)
+        runtime_dependency_blockers = dependency_blockers_by_card(self.project_service.project_path(project_id))
+        work_order = self.flow_service.get_work_order(
+            project_id,
+            runtime_dependency_blockers=runtime_dependency_blockers,
+        )
         for item in work_order["work_items"]:
             if not item.get("can_start"):
                 continue
@@ -629,6 +697,13 @@ class BackgroundWorkboardService:
                 if isinstance(item, dict):
                     index[str(item.get("item_id") or "")] = item
         return index
+
+    @staticmethod
+    def _completed_item_is_actionable(item: dict[str, Any]) -> bool:
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        if "actionable_wake" in payload:
+            return bool(payload.get("actionable_wake"))
+        return str(item.get("kind") or "") != "runtime_dependency_install_succeeded"
 
     def _path(self, project_id: str) -> Path:
         return self.project_service.project_path(project_id) / "chat" / "background_workboard_state.json"

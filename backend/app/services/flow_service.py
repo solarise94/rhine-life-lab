@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from typing import Any
+
 from app.models.cards import Card
 from app.models.graph import Asset, GraphState, Module, RunRecord
 from app.services.asset_timeline_service import AssetTimelineService
 from app.services.dependency_attention_service import DependencyAttentionService
+from app.services.input_resolution_service import InputResolutionService, VALID_LAUNCHABLE_INPUT_STATUSES
 from app.services.project_service import ProjectService
+from app.services.runtime_dependency_state_service import ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES, dependency_blockers_by_card
 
 
 class FlowService:
@@ -12,6 +16,7 @@ class FlowService:
         self.project_service = project_service
         self.timeline_service = AssetTimelineService()
         self.dependency_attention_service = DependencyAttentionService()
+        self.input_resolution_service = InputResolutionService()
 
     def get_asset_flow(self, project_id: str) -> dict:
         snapshot = self.project_service.get_project_snapshot(project_id)
@@ -25,29 +30,41 @@ class FlowService:
             "timeline": timeline,
         }
 
-    def get_work_order(self, project_id: str) -> dict:
+    def get_work_order(
+        self,
+        project_id: str,
+        *,
+        runtime_dependency_blockers: dict[str, dict[str, Any]] | None = None,
+    ) -> dict:
         snapshot = self.project_service.get_project_snapshot(project_id)
         graph: GraphState = snapshot["graph"]
         timeline = self.timeline_service.build(project_id, snapshot)
         attention = self.dependency_attention_service.analyze_project(snapshot)
         attention_by_card = attention["issues_by_card"]
-        asset_map = {asset.asset_id: asset for asset in graph.assets}
         card_map = {card.card_id: card for card in snapshot["cards"]}
+        resolution_index = self.input_resolution_service.build_index(snapshot["cards"], graph)
+        runtime_dependency_blockers = runtime_dependency_blockers or dependency_blockers_by_card(
+            self.project_service.project_path(project_id)
+        )
         work_items: list[dict] = []
 
         for card in snapshot["cards"]:
             required_uses = timeline["required_uses_by_card"].get(card.card_id, [])
             required_asset_ids = [use.asset_id for use in required_uses]
             dependency_ids = sorted(timeline["dependency_map"].get(card.card_id, set()))
-            missing_asset_ids = [
-                asset_id
+            input_resolutions = [
+                self.input_resolution_service.resolve_input(asset_id, resolution_index)
                 for asset_id in required_asset_ids
-                if asset_id not in asset_map and asset_id not in timeline["producer_by_asset"]
+            ]
+            missing_asset_ids = [
+                item.requested_asset_id
+                for item in input_resolutions
+                if item.resolved_asset_id is None
             ]
             nonvalid_asset_ids = [
-                asset_id
-                for asset_id in required_asset_ids
-                if asset_id in asset_map and asset_map[asset_id].status not in {"valid", "candidate"}
+                item.resolved_asset_id or item.requested_asset_id
+                for item in input_resolutions
+                if item.resolved_asset_id is not None and item.status not in VALID_LAUNCHABLE_INPUT_STATUSES
             ]
             unmet_dependency_ids = [
                 dep_id
@@ -55,12 +72,14 @@ class FlowService:
                 if dep_id in card_map and card_map[dep_id].status != "accepted"
             ]
             missing_script_binding_ids = self._missing_script_asset_binding_ids(card)
+            runtime_dependency_blocker = runtime_dependency_blockers.get(card.card_id)
             can_start = (
                 card.status in {"planned", "failed", "stale", "superseded"}
                 and not missing_asset_ids
                 and not nonvalid_asset_ids
                 and not unmet_dependency_ids
                 and not missing_script_binding_ids
+                and runtime_dependency_blocker is None
             )
             block_reasons = self._block_reasons(
                 card,
@@ -68,6 +87,7 @@ class FlowService:
                 nonvalid_asset_ids,
                 unmet_dependency_ids,
                 missing_script_binding_ids,
+                runtime_dependency_blocker,
             )
             card_attention = attention_by_card.get(card.card_id, [])
             work_items.append(
@@ -82,10 +102,39 @@ class FlowService:
                     "depends_on_card_ids": dependency_ids,
                     "blocked_by_card_ids": unmet_dependency_ids,
                     "blocked_by_asset_ids": missing_asset_ids + nonvalid_asset_ids,
+                    "blocked_by_job_ids": [runtime_dependency_blocker["job_id"]] if runtime_dependency_blocker else [],
                     "missing_script_asset_requirement_ids": missing_script_binding_ids,
                     "planned_input_asset_ids": [
-                        asset_id for asset_id in required_asset_ids if asset_id not in asset_map and asset_id in timeline["producer_by_asset"]
+                        item.requested_asset_id
+                        for item in input_resolutions
+                        if item.is_virtual and item.resolved_asset_id is not None
                     ],
+                    "input_resolutions": [
+                        {
+                            "requested_asset_id": item.requested_asset_id,
+                            "resolved_asset_id": item.resolved_asset_id,
+                            "resolved_path": item.resolved_path,
+                            "resolved_by": item.resolved_by,
+                            "producer_card_id": item.producer_card_id,
+                            "producer_role": item.producer_role,
+                            "status": item.status,
+                        }
+                        for item in input_resolutions
+                    ],
+                    "runtime_dependency_blocker": (
+                        {
+                            "job_id": runtime_dependency_blocker["job_id"],
+                            "task_id": runtime_dependency_blocker["task_id"],
+                            "status": runtime_dependency_blocker["status"],
+                            "runtime": runtime_dependency_blocker["runtime"],
+                            "packages": runtime_dependency_blocker["packages"],
+                            "run_id": runtime_dependency_blocker["run_id"] or None,
+                            "session_id": runtime_dependency_blocker["session_id"] or None,
+                            "retry_after_signal": "runtime_dependency_install_terminal",
+                        }
+                        if runtime_dependency_blocker
+                        else None
+                    ),
                     "can_start": can_start,
                     "block_reasons": block_reasons,
                     "active": card.status not in {"accepted", "rejected", "cancelled"},
@@ -184,6 +233,7 @@ class FlowService:
         nonvalid_asset_ids: list[str],
         unmet_dependency_ids: list[str],
         missing_script_binding_ids: list[str],
+        runtime_dependency_blocker: dict | None,
     ) -> list[str]:
         reasons: list[str] = []
         if card.status == "proposed":
@@ -200,6 +250,13 @@ class FlowService:
             reasons.append("upstream_cards_not_accepted")
         if missing_script_binding_ids:
             reasons.append("missing_script_asset_bindings")
+        if runtime_dependency_blocker:
+            status = str(runtime_dependency_blocker.get("status") or "")
+            reasons.append(
+                "runtime_dependency_repair_in_progress"
+                if status in ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES
+                else "runtime_dependency_repair_failed"
+            )
         return reasons
 
     @staticmethod

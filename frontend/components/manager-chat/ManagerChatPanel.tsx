@@ -95,7 +95,7 @@ const PROJECT_MUTATION_TOOLS = /^(create_card|update_card|delete_card|configure_
 const RUN_CONTROL_TOOLS = /^(start_card_run|rerun_card|review_card_run|stop_card_run|cleanup_run_history)$/;
 const SLASH_COMMANDS: SlashCommandOption[] = [
   { command: "/compact", label: "压缩当前会话上下文" },
-  { command: "/auto", label: "开启自动推进模式" },
+  { command: "/auto", label: "启动 /auto <目标>" },
 ];
 
 const DEFAULT_MANAGER_MESSAGE: ChatMessage = {
@@ -541,14 +541,8 @@ export function ManagerChatPanel({
   const effectiveManagerAuto = localManagerAuto ?? managerAuto;
   const isAutoOwnerSession = Boolean(effectiveManagerAuto?.enabled && sessionId && effectiveManagerAuto.owner_session_id === sessionId);
   const isBtwSession = Boolean(effectiveManagerAuto?.enabled && sessionId && effectiveManagerAuto.owner_session_id && effectiveManagerAuto.owner_session_id !== sessionId);
-  const autoBackgroundRunning = Boolean(
-    effectiveManagerAuto?.state === "active" ||
-      effectiveManagerAuto?.state === "running" ||
-      effectiveManagerAuto?.state === "thinking" ||
-      effectiveManagerAuto?.active_run_id ||
-      effectiveManagerAuto?.active_job_id,
-  );
-  const autoComposerState = !isAutoOwnerSession ? "normal" : autoBackgroundRunning ? "auto_running" : "auto_idle";
+  const autoScopedActive = Boolean(isAutoOwnerSession && effectiveManagerAuto?.enabled);
+  const autoComposerState = !autoScopedActive ? "normal" : "auto_running";
   const chatSessionQuery = useChatSession(projectId, sessionId ?? undefined, Boolean(sessionId), {
     refetchInterval: effectiveManagerAuto?.enabled && !activeStreamControllerRef.current ? 4_000 : false,
   });
@@ -1589,12 +1583,12 @@ export function ManagerChatPanel({
   async function submit() {
     if (!draft.trim() || busy || !sessionId) return;
     const text = draft.trim();
-    if (text === "/auto") {
+    if (text === "/auto" || text.startsWith("/auto ")) {
       await handleAutoCommand(text);
       return;
     }
     if (text === "/auto once" || text === "/auto status" || text === "/auto off" || text === "/auto stop") {
-      handleDeprecatedAutoCommand(text);
+      await handleDeprecatedAutoCommand(text);
       return;
     }
     if (text === "/compact") {
@@ -1804,42 +1798,99 @@ export function ManagerChatPanel({
     }
   }
 
+  function parseAutoObjective(command: string): string | null {
+    if (!command.startsWith("/auto")) {
+      return null;
+    }
+    const objective = command.slice(5).trim();
+    return objective || null;
+  }
+
   async function handleAutoCommand(command: string) {
     if (!sessionId) return;
+    const objective = parseAutoObjective(command);
+    const userMessageId = createMessageId();
+    const managerMessageId = createMessageId();
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: userMessageId,
+        role: "user",
+        content: command,
+        state: "done",
+        timeline: [{ id: `${userMessageId}_text`, kind: "text", content: command, status: "done" }],
+      },
+    ]);
+    setDraft("");
     setBusy(true);
     setError(null);
     try {
-      if (command !== "/auto") {
+      if (!objective) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: managerMessageId,
+            role: "manager",
+            content: "请直接使用 `/auto <目标>`。例如：`/auto 继续推进 ready_to_start 的卡片，直到出现需要我决定的阻塞。`",
+            state: "done",
+            timeline: [],
+          },
+        ]);
         return;
       }
-      const response = await api.enableManagerAuto(projectId, sessionId, "continuous");
+      if (autoScopedActive) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: managerMessageId,
+            role: "manager",
+            content: "当前会话的后台继续执行权限仍在生效。先停止，再提交新的 `/auto <目标>`。",
+            state: "done",
+            timeline: [],
+          },
+        ]);
+        return;
+      }
+      const response = await api.enableManagerAuto(projectId, sessionId, "continuous", objective, userMessageId);
       applyManagerAutoState(response.state);
+      const directiveId = typeof response.directive === "object" && response.directive && "id" in response.directive
+        ? String((response.directive as { id?: unknown }).id ?? "")
+        : "";
+      const wakeId = response.wake_event && typeof response.wake_event === "object" && "wake_id" in response.wake_event
+        ? String((response.wake_event as { wake_id?: unknown }).wake_id ?? "")
+        : "";
+      const ackSuffix = [directiveId ? `directive=${directiveId}` : "", wakeId ? `wake=${wakeId}` : ""]
+        .filter(Boolean)
+        .join(" · ");
       setMessages((prev) => [
         ...prev,
         {
-          id: createMessageId(),
+          id: managerMessageId,
           role: "manager",
-          content: "Auto mode 已开启。我会在 card 完成、依赖任务结束或出现可处理阻塞时继续推进，并把每次动作写在这里。",
+          content: `已允许当前会话继续消费 workboard 并在后台唤醒。目标：${objective}${ackSuffix ? `\n${ackSuffix}` : ""}`,
           state: "done",
           timeline: [],
         },
       ]);
-      setDraft("");
       await onRefresh();
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Auto mode 命令失败。");
+      setError(nextError instanceof Error ? nextError.message : "`/auto <目标>` 命令失败。");
     } finally {
       setBusy(false);
     }
   }
 
-  function handleDeprecatedAutoCommand(command: string) {
+  async function handleDeprecatedAutoCommand(command: string) {
+    if ((command === "/auto stop" || command === "/auto off") && autoScopedActive && sessionId) {
+      await stopAutoFromComposer();
+      return;
+    }
     const message =
       command === "/auto stop" || command === "/auto off"
-        ? "旧的 `/auto stop` 和 `/auto off` 输入入口已收起。请在 AUTO 运行态直接点发送按钮停止，或使用当前会话的 auto 控件。"
+        ? "当前没有正在运行的后台继续执行会话。"
         : command === "/auto status"
           ? "旧的 `/auto status` 输入入口已收起。当前 auto 状态请直接看会话和项目状态面板。"
-          : "旧的 `/auto once` 输入入口已收起。当前前端只保留 `/auto` 作为显式 autonomous session 入口。";
+          : "旧的 `/auto once` 输入入口已收起。请直接使用 `/auto <目标>`。";
     setMessages((prev) => [
       ...prev,
       {
@@ -1977,23 +2028,19 @@ export function ManagerChatPanel({
   const displayMessages = messages.length ? messages : [DEFAULT_MANAGER_MESSAGE];
   const sessionLoadError = chatSessionQuery.error instanceof Error ? chatSessionQuery.error.message : null;
   const sessionBusy = !sessionId || chatSessionQuery.isLoading;
-  const composerInputDisabled = sessionBusy || Boolean(sessionLoadError) || autoComposerState === "auto_running";
+  const composerInputDisabled = sessionBusy || Boolean(sessionLoadError) || autoScopedActive;
   const composerSendDisabled =
     autoComposerState === "auto_running"
       ? autoStopPending || !sessionId || sessionBusy || Boolean(sessionLoadError)
       : !draft.trim() || sessionBusy || Boolean(sessionLoadError);
   const composerButtonTitle =
     autoComposerState === "auto_running"
-      ? "停止 Auto 推进"
-      : autoComposerState === "auto_idle"
-        ? "Auto mode 已开启，发送为追加指令"
-        : "发送";
+      ? "停止当前后台继续执行"
+      : "发送";
   const composerButtonClass =
     autoComposerState === "auto_running"
       ? "auto-running"
-      : autoComposerState === "auto_idle"
-        ? "auto-idle"
-        : "";
+      : "";
 
   function renderStatusIcon(status: ToolState | ChatMessage["thinkingState"]) {
     if (status === "running") {
@@ -2206,7 +2253,7 @@ export function ManagerChatPanel({
               className={`manager-upload-button ${uploadMutation.isPending ? "loading" : ""}`}
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={busy || uploadMutation.isPending || sessionBusy || Boolean(sessionLoadError)}
+              disabled={busy || uploadMutation.isPending || composerInputDisabled}
               title="上传文件到后端"
             >
               {uploadMutation.isPending ? <Loader2 size={17} /> : <Paperclip size={17} />}
@@ -2265,11 +2312,11 @@ export function ManagerChatPanel({
                     return;
                   }
                 }
-                if (e.key === "Enter" && (e.shiftKey || e.metaKey || e.ctrlKey)) {
-                  e.preventDefault();
-                  if (autoComposerState === "auto_running") {
-                    return;
-                  }
+                  if (e.key === "Enter" && (e.shiftKey || e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    if (autoScopedActive) {
+                      return;
+                    }
                   submit();
                 }
               }}
@@ -2283,7 +2330,7 @@ export function ManagerChatPanel({
                   className={`manager-effort-button ${effortMenuOpen ? "open" : ""}`}
                   type="button"
                   onClick={() => setEffortMenuOpen((current) => !current)}
-                  disabled={busy || sessionBusy}
+                  disabled={busy || sessionBusy || autoScopedActive}
                   title="Thinking effort"
                 >
                   <span>{effortLabel(thinkingEffort)}</span>
@@ -2332,8 +2379,6 @@ export function ManagerChatPanel({
                   >
                     {autoComposerState === "auto_running" ? (
                       autoStopPending ? <Loader2 size={16} className="spinning" /> : <Square size={14} />
-                    ) : autoComposerState === "auto_idle" ? (
-                      <Sparkles size={16} />
                     ) : (
                       <Send size={16} />
                     )}

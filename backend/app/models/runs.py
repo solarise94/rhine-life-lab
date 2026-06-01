@@ -27,11 +27,20 @@ class TaskPacketAsset(BaseModel):
     type: str
     title: str | None = None
     status: str | None = None
+    requested_asset_id: str | None = None
+    resolved_by: str | None = None
+    producer_card_id: str | None = None
+    producer_role: str | None = None
 
 
 class TaskPacketCardInput(BaseModel):
     label: str
     asset_id: str | None = None
+    requested_asset_id: str | None = None
+    resolved_asset_id: str | None = None
+    resolved_by: str | None = None
+    producer_card_id: str | None = None
+    producer_role: str | None = None
     asset_path: str | None = None
     asset_type: str | None = None
     status: str | None = None

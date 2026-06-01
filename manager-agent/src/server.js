@@ -155,10 +155,10 @@ Available capabilities:
 - write_project_memory stores only explicit user preferences and corrections, such as "remember this", "default to this", or "do not do this again".
 - create_card, revise_card_plan, annotate_card, and delete_card directly modify blueprint cards after backend validation.
 - configure_card_execution directly updates selected skills, MCP servers, and Python/R runtime bindings for one or more cards.
-- install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime. Treat it like card execution background work: after a successful start, report the job_id and stop; do not foreground-poll the job in the same turn.
+- install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime. When fixing a specific card/run dependency issue, include source.card_id and source.run_id when known. Treat it like card execution background work: after a successful start, report the job_id and stop; do not foreground-poll the job in the same turn.
 - get_runtime_dependency_install_status checks whether a previously started dependency installation job has finished. Use it for explicit user checks, recovery, or a later wake turn; do not use it to poll a just-started job in the same turn.
-- promote_workboard_item_to_todo, claim_workboard_item, complete_workboard_item, defer_workboard_item, block_workboard_item_for_user, reopen_workboard_item, and submit_claimed_workboard_items consume backend workboard items. Use them in auto/background turns; do not invent your own todo list.
-- start_card_run, stop_card_run, rerun_card, and review_card_run control card execution directly when execution should happen now. start_card_run and rerun_card launch background executor work; after a successful start, do not poll card status in the same turn. Briefly report the run_id and stop so run events/wake events can carry progress.
+- promote_workboard_item_to_todo, claim_workboard_item, complete_workboard_item, defer_workboard_item, block_workboard_item_for_user, reopen_workboard_item, and submit_claimed_workboard_items consume backend workboard items. Use them in auto/background turns and also for user-driven "continue / resume / run next / run ready cards / run several cards" requests; do not invent your own todo list.
+- start_card_run, stop_card_run, rerun_card, and review_card_run control card execution directly when execution should happen now. Reserve start_card_run for one explicit card. For frontier or batch execution, prefer get_background_workboard -> promote/claim/submit. After a successful start_card_run or rerun_card launch, do not poll card status in the same turn. Briefly report the run_id and stop so run events/wake events can carry progress.
 - cleanup_run_history removes old finished run execution files/caches when they are no longer needed; by default it preserves runs that own valid accepted assets.
 - search_card_templates, save_card_template, and instantiate_card_template manage reusable manager-only card templates.
 - read_result_asset reads a whitelisted result asset preview by asset_id.
@@ -170,6 +170,7 @@ ${webCapabilityLines.join("\n")}
 Judgment:
 - Decide whether current project context is needed. If exact card ids, asset ids, steps, or current blueprint state matter, use inspect_project_summary or find_* first.
 - In auto/background turns, call get_background_workboard first. Consume at most one actionable workboard item or one claimed run batch per turn.
+- If the user asks to continue, resume, start pending work, run ready cards, run the next step, or run several cards, call get_background_workboard first even outside auto mode.
 - For broad workflow additions, use inspect_project_summary and find_assets before choosing steps and asset_ids.
 - For plotting style, report style, recurring user preferences, or previously corrected behavior, read project memory when relevant.
 - Treat the blueprint/cards/assets/runs as the source of project execution facts. Do not write blueprint facts into project memory.
@@ -184,7 +185,7 @@ Judgment:
 ${webJudgmentLines.join("\n")}
 - Write project memory only when the user explicitly asks you to remember a durable preference, says a behavior should be the default, or corrects something you should avoid in future. Keep memory summaries short.
 - Card agents cannot ask the user interactively. If a card needs a non-default Python or R runtime, use configure_card_execution on that card before telling the user it is ready.
-- Card executor agents run in a constrained runtime. They must not install missing R or Python packages on their own. If runtime packages are missing or the user explicitly wants packages added to a selected non-system runtime, you may use install_runtime_dependencies with explicit package names to start a background install job, then stop the current turn and wait for the dependency-install wake event. Do not pass or invent a package manager; backend always picks the conda-family solver automatically. If installation fails or the missing dependency is a system tool, tell the user exactly what dependency must be prepared.
+- Card executor agents run in a constrained runtime. They must not install missing R or Python packages on their own. If runtime packages are missing or the user explicitly wants packages added to a selected non-system runtime, you may use install_runtime_dependencies with explicit package names to start a background install job, then stop the current turn and wait for the dependency-install wake event. Include source.card_id and source.run_id when you are repairing a specific card/run. Do not pass or invent a package manager; backend always picks the conda-family solver automatically. If installation fails or the missing dependency is a system tool, tell the user exactly what dependency must be prepared.
 - Search the skill/MCP library only when a card clearly may benefit from reusable execution abilities. The list/search tools are intentionally id/name-only; read one item detail only if the id/name is ambiguous.
 - If a task looks like a stable repeated workflow, search_card_templates before creating a new analysis card from scratch.
 - When a template requires script assets, ask the user which project script assets to bind before instantiate_card_template or before starting the card. Do not make card agents ask the user for bindings.
@@ -1857,12 +1858,18 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "install_runtime_dependencies",
       label: "Install runtime dependencies",
-      description: "Start a background job that installs explicitly named Python or R packages into an already selected non-system runtime. Use only for clear package lists. Do not choose or pass an installer; backend will choose the best available conda-family solver automatically. After a successful start, report the job_id and stop this turn; do not poll status with get_runtime_dependency_install_status in the same turn.",
+      description: "Start a background job that installs explicitly named Python or R packages into an already selected non-system runtime. Use only for clear package lists. When fixing a specific card/run dependency issue, include source.card_id and source.run_id when known. Do not choose or pass an installer; backend will choose the best available conda-family solver automatically. After a successful start, report the job_id and stop this turn; do not poll status with get_runtime_dependency_install_status in the same turn.",
       parameters: Type.Object({
         ecosystem: Type.String({ description: "python or R" }),
         runtime: Type.String({ description: "Selected non-system runtime name, such as omicverse, rnaseq, or R_env. Do not use __system__." }),
         packages: Type.Array(Type.String({ description: "Package names or simple Python version specs." })),
         timeout_seconds: Type.Optional(Type.Number()),
+        source: Type.Optional(
+          Type.Object({
+            card_id: Type.Optional(Type.String()),
+            run_id: Type.Optional(Type.String()),
+          }),
+        ),
       }),
       execute: async (toolCallId, params, signal) => {
         try {
@@ -2080,7 +2087,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "submit_claimed_workboard_items",
       label: "Submit claimed workboard items",
-      description: "Submit claimed todo workboard items as one backend-owned background run batch. If any start succeeds, stop the turn and wait for events/wake.",
+      description: "Submit claimed todo workboard items as one backend-owned background run batch. Use this for frontier or multi-card execution after get_background_workboard -> promote -> claim. If any start succeeds, stop the turn and wait for events/wake.",
       parameters: Type.Object({
         todo_item_ids: Type.Array(Type.String()),
       }),
@@ -2106,7 +2113,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "start_card_run",
       label: "Start card run",
-      description: "Start executing a specific card as background work. Use the card's saved execution configuration when present; otherwise the backend uses system defaults. Use configure_card_execution only when the card needs non-default Python/R runtime bindings or attached skills/MCP servers. If successful, report the run_id and stop the turn; do not poll card status while waiting. If can_start is false, inspect block_reasons and fix the blocker before retrying.",
+      description: "Start executing one explicit card as background work. Use the card's saved execution configuration when present; otherwise the backend uses system defaults. For frontier or multi-card execution, prefer get_background_workboard -> promote -> claim -> submit. Use configure_card_execution only when the card needs non-default Python/R runtime bindings or attached skills/MCP servers. If successful, report the run_id and stop the turn; do not poll card status while waiting. If can_start is false, inspect block_reasons and fix the blocker before retrying.",
       parameters: Type.Object({
         card_id: Type.String(),
       }),
@@ -3113,9 +3120,9 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     instruction:
       (payload.auto_mode?.btw_mode
         ? "This session is in /btw mode. Answer questions, inspect status, explain logs, and use read-only tools only. Do not mutate blueprint or execution state."
-        : "Answer naturally. Decide whether project tools are needed. If you change the blueprint, remember that cards are the blueprint units and use create_card, revise_card_plan, annotate_card, delete_card, configure_card_execution, run-control, or template tools directly as needed. After ok:false tool results, correct and retry when the fix is clear.") +
+        : "Answer naturally. Decide whether project tools are needed. If the user asks to continue, resume, run the next step, run ready cards, or start multiple cards, read get_background_workboard first and prefer the workboard claim/submit path. If you change the blueprint, remember that cards are the blueprint units and use create_card, revise_card_plan, annotate_card, delete_card, configure_card_execution, run-control, or template tools directly as needed. After ok:false tool results, correct and retry when the fix is clear.") +
       (payload.auto_mode?.enabled && !payload.auto_mode?.btw_mode
-        ? " Auto mode is enabled. Keep the project moving, prefer safe routine fixes, and treat pending directives as higher-priority steering."
+        ? " Scoped workboard wake permission is enabled for this session. Keep the project moving, prefer safe routine fixes, and treat pending directives as higher-priority steering."
         : ""),
   };
   const abortController = new AbortController();

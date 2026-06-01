@@ -176,7 +176,7 @@ class ManagerAutoService:
         state = self.get_state(project_id)
         if not state.enabled:
             return False
-        return state.state == "idle" and not state.active_run_id and not state.active_job_id
+        return state.state not in {"running", "thinking"} and not state.active_run_id and not state.active_job_id
 
     def notify_turn_settled(self, project_id: str, session_id: str | None, *, async_boundary: bool = False) -> ManagerAutoState:
         if not session_id:

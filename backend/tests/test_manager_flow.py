@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from pydantic import SecretStr, ValidationError
 
 from app.api.chat import AcceptProposalRequest, accept_proposal
+from app.api.manager_auto import SetManagerAutoRequest, enable_manager_auto
 from app.core.config import Settings, get_settings
 from app.models.cards import Card
 from app.models.chat import ChatRequest, ChatSessionMessage
@@ -401,6 +402,12 @@ class ManagerFlowTest(unittest.TestCase):
             {"kind": "mcp", "items": [mcp_entry], "updated_at": now},
         )
 
+    def _write_runtime_dependency_jobs(self, *jobs: dict[str, Any]) -> None:
+        atomic_write_json(
+            Path(self.tmpdir) / "test-project" / "chat" / "runtime_dependency_jobs.json",
+            list(jobs),
+        )
+
     def _add_single_submodule_group_fixture(self) -> tuple[str, str, str, str]:
         store = self.project_service.graph_store("test-project")
         graph = store.load_graph()
@@ -756,6 +763,171 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue(consumer["can_start"])
         self.assertNotIn("missing_required_assets", consumer["block_reasons"])
         self.assertEqual(["planned_filtered_counts"], consumer["planned_input_asset_ids"])
+
+    def test_task_packet_resolves_planned_input_asset_id_to_materialized_asset(self) -> None:
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        graph = store.load_graph()
+        cards.extend(
+            [
+                Card.model_validate(
+                    {
+                        "card_id": "card_alias_source_packet",
+                        "card_type": "module",
+                        "title": "Alias Source Packet",
+                        "status": "accepted",
+                        "step": 1,
+                        "summary": "Produces a materialized asset for a planned output id.",
+                        "outputs": [output_contract("filtered counts", role="filtered_counts", asset_id="planned_filtered_counts_packet")],
+                        "linked_assets": ["asset_run_alias_filtered_counts_packet_1"],
+                    }
+                ),
+                Card.model_validate(
+                    {
+                        "card_id": "card_alias_consumer_packet",
+                        "card_type": "module",
+                        "title": "Alias Consumer Packet",
+                        "status": "planned",
+                        "step": 2,
+                        "summary": "Consumes the logical planned asset id.",
+                        "inputs": [{"label": "counts", "asset_id": "planned_filtered_counts_packet"}],
+                        "outputs": [output_contract("pca plot", role="pca_plot_packet", artifact_class="figure")],
+                    }
+                ),
+            ]
+        )
+        graph.assets.append(
+            Asset(
+                asset_id="asset_run_alias_filtered_counts_packet_1",
+                asset_type="table",
+                title="Filtered counts",
+                status="valid",
+                created_by_run="run_alias_source_packet",
+                path="results/alias/filtered_counts_packet.tsv",
+                summary="Materialized filtered counts.",
+                metadata={"role": "filtered_counts", "planned_asset_id": "planned_filtered_counts_packet"},
+            )
+        )
+        graph.runs.append(
+            RunRecord(
+                run_id="run_alias_source_packet",
+                card_id="card_alias_source_packet",
+                status="reviewed",
+                title="alias source packet",
+                summary="alias source packet",
+                started_at="2026-05-28T00:00:00Z",
+            )
+        )
+        store.save_cards(cards)
+        store.save_graph(graph)
+
+        consumer_card = next(card for card in cards if card.card_id == "card_alias_consumer_packet")
+        packet = self.worker._task_packet(
+            "test-project",
+            "run_alias_consumer_packet",
+            consumer_card,
+            graph.assets,
+            "shell",
+            cards=cards,
+            runs=graph.runs,
+        )
+
+        self.assertEqual(["asset_run_alias_filtered_counts_packet_1"], [item.asset_id for item in packet.input_assets])
+        self.assertEqual("planned_filtered_counts_packet", packet.input_assets[0].requested_asset_id)
+        self.assertEqual("planned_asset_alias", packet.input_assets[0].resolved_by)
+        self.assertEqual("asset_run_alias_filtered_counts_packet_1", packet.card_inputs[0].asset_id)
+        self.assertEqual("planned_filtered_counts_packet", packet.card_inputs[0].requested_asset_id)
+        self.assertEqual("asset_run_alias_filtered_counts_packet_1", packet.card_inputs[0].resolved_asset_id)
+
+    def test_work_order_blocks_planned_input_alias_when_materialized_asset_not_valid(self) -> None:
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        graph = store.load_graph()
+        cards.extend(
+            [
+                Card.model_validate(
+                    {
+                        "card_id": "card_alias_source_invalid",
+                        "card_type": "module",
+                        "title": "Alias Source Invalid",
+                        "status": "accepted",
+                        "step": 1,
+                        "summary": "Produces a non-valid materialized asset for a planned output id.",
+                        "outputs": [output_contract("filtered counts", role="filtered_counts", asset_id="planned_filtered_counts_invalid")],
+                        "linked_assets": ["asset_run_alias_filtered_counts_invalid_1"],
+                    }
+                ),
+                Card.model_validate(
+                    {
+                        "card_id": "card_alias_consumer_invalid",
+                        "card_type": "module",
+                        "title": "Alias Consumer Invalid",
+                        "status": "planned",
+                        "step": 2,
+                        "summary": "Consumes the logical planned asset id.",
+                        "inputs": [{"label": "counts", "asset_id": "planned_filtered_counts_invalid"}],
+                        "outputs": [output_contract("pca plot", role="pca_plot_invalid", artifact_class="figure")],
+                    }
+                ),
+            ]
+        )
+        graph.assets.append(
+            Asset(
+                asset_id="asset_run_alias_filtered_counts_invalid_1",
+                asset_type="table",
+                title="Filtered counts invalid",
+                status="superseded",
+                created_by_run="run_alias_source_invalid",
+                path="results/alias/filtered_counts_invalid.tsv",
+                summary="Materialized filtered counts.",
+                metadata={"role": "filtered_counts", "planned_asset_id": "planned_filtered_counts_invalid"},
+            )
+        )
+        graph.runs.append(
+            RunRecord(
+                run_id="run_alias_source_invalid",
+                card_id="card_alias_source_invalid",
+                status="reviewed",
+                title="alias source invalid",
+                summary="alias source invalid",
+                started_at="2026-05-28T00:00:00Z",
+            )
+        )
+        store.save_cards(cards)
+        store.save_graph(graph)
+
+        work_order = self.flow_service.get_work_order("test-project")
+        consumer = next(item for item in work_order["work_items"] if item["card_id"] == "card_alias_consumer_invalid")
+        self.assertFalse(consumer["can_start"])
+        self.assertIn("required_assets_not_valid", consumer["block_reasons"])
+        self.assertIn("asset_run_alias_filtered_counts_invalid_1", consumer["blocked_by_asset_ids"])
+
+    def test_task_packet_raises_input_resolution_failed_for_missing_planned_input_alias(self) -> None:
+        card = Card.model_validate(
+            {
+                "card_id": "card_alias_missing_packet",
+                "card_type": "module",
+                "title": "Alias Missing Packet",
+                "status": "planned",
+                "step": 2,
+                "summary": "Consumes a missing logical planned asset id.",
+                "inputs": [{"label": "counts", "asset_id": "planned_missing_counts"}],
+                "outputs": [output_contract("pca plot", role="pca_plot_missing", artifact_class="figure")],
+            }
+        )
+
+        with self.assertRaises(HTTPException) as ctx:
+            self.worker._task_packet(
+                "test-project",
+                "run_alias_missing_packet",
+                card,
+                self.project_service.graph_store("test-project").load_graph().assets,
+                "shell",
+            )
+
+        self.assertEqual(409, ctx.exception.status_code)
+        self.assertEqual("input_resolution_failed", ctx.exception.detail["error_code"])
+        self.assertEqual("planned_missing_counts", ctx.exception.detail["inputs"][0]["requested_asset_id"])
 
     def test_dependency_attention_replaces_automatic_downstream_rebind(self) -> None:
         producer = Card.model_validate(
@@ -1252,6 +1424,84 @@ class ManagerFlowTest(unittest.TestCase):
         wakes = wake_service.list_recent("test-project")
         self.assertEqual(["workboard_actionable"], [item.kind for item in wakes])
 
+    def test_enable_auto_with_directive_text_creates_scoped_directive_and_wake(self) -> None:
+        project_id = "auto-directive-project"
+        self.project_service.create_project(
+            project_id=project_id,
+            name="Auto Directive Project",
+            current_goal="Auto directive scope",
+            seed_demo=False,
+        )
+        wake_service = ManagerWakeService(self.project_service)
+        auto_service = ManagerAutoService(
+            self.project_service,
+            background_workboard_service=self.background_workboard_service,
+            manager_wake_service=wake_service,
+        )
+        session = self.chat_session_service.create_session(project_id, "Auto directive test")
+
+        response = enable_manager_auto(
+            project_id,
+            SetManagerAutoRequest(
+                session_id=session.session_id,
+                directive_text="继续推进 ready_to_start 的卡片，直到出现需要我决定的阻塞。",
+            ),
+            chat_session_service=self.chat_session_service,
+            manager_auto_service=auto_service,
+            manager_wake_service=wake_service,
+        )
+
+        self.assertTrue(response["state"]["enabled"])
+        self.assertEqual(session.session_id, response["state"]["owner_session_id"])
+        self.assertIsNotNone(response["directive"])
+        self.assertEqual(
+            "继续推进 ready_to_start 的卡片，直到出现需要我决定的阻塞。",
+            response["directive"]["text"],
+        )
+        self.assertIsNotNone(response["wake_event"])
+        self.assertEqual(["directive_received"], [item.kind for item in wake_service.list_recent(project_id)])
+
+    def test_enable_auto_with_directive_text_rejects_duplicate_active_session_enable(self) -> None:
+        project_id = "auto-duplicate-directive-project"
+        self.project_service.create_project(
+            project_id=project_id,
+            name="Auto Duplicate Directive Project",
+            current_goal="Reject duplicate enable with directive",
+            seed_demo=False,
+        )
+        wake_service = ManagerWakeService(self.project_service)
+        auto_service = ManagerAutoService(
+            self.project_service,
+            background_workboard_service=self.background_workboard_service,
+            manager_wake_service=wake_service,
+        )
+        session = self.chat_session_service.create_session(project_id, "Auto duplicate directive test")
+
+        enable_manager_auto(
+            project_id,
+            SetManagerAutoRequest(
+                session_id=session.session_id,
+                directive_text="先启动 scoped continuation。",
+            ),
+            chat_session_service=self.chat_session_service,
+            manager_auto_service=auto_service,
+            manager_wake_service=wake_service,
+        )
+
+        with self.assertRaises(HTTPException) as exc:
+            enable_manager_auto(
+                project_id,
+                SetManagerAutoRequest(
+                    session_id=session.session_id,
+                    directive_text="重复提交新的 scoped objective。",
+                ),
+                chat_session_service=self.chat_session_service,
+                manager_auto_service=auto_service,
+                manager_wake_service=wake_service,
+            )
+        self.assertEqual(409, exc.exception.status_code)
+        self.assertIn("already active", str(exc.exception.detail))
+
     def test_auto_run_terminal_state_emits_workboard_wake_only(self) -> None:
         wake_service = ManagerWakeService(self.project_service)
         auto_service = ManagerAutoService(
@@ -1288,7 +1538,14 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue(all(item.kind == "workboard_actionable" for item in wakes))
         self.assertEqual("active", auto_service.get_state("test-project").state)
 
-    def test_auto_dependency_terminal_state_emits_workboard_wake_only(self) -> None:
+    def test_auto_dependency_terminal_state_ignores_housekeeping_completion_without_ready_work(self) -> None:
+        project_id = "auto-dependency-housekeeping-project"
+        self.project_service.create_project(
+            project_id=project_id,
+            name="Auto Dependency Housekeeping Project",
+            current_goal="No wake for housekeeping completion",
+            seed_demo=False,
+        )
         wake_service = ManagerWakeService(self.project_service)
         auto_service = ManagerAutoService(
             self.project_service,
@@ -1304,25 +1561,90 @@ class ManagerFlowTest(unittest.TestCase):
                 job_id=job_id,
             ),
         )
-        auto_service.enable("test-project", "sess_auto")
-        initial_wake_count = len(wake_service.list_recent("test-project"))
+        auto_service.enable(project_id, "sess_auto")
+        initial_wake_count = len(wake_service.list_recent(project_id))
 
         job = service.submit(
-            "test-project",
+            project_id,
             {
                 "ecosystem": "python",
                 "runtime": "rnaseq",
                 "packages": ["scanpy"],
                 "manager": "conda",
-                "source": {"card_id": "card_enrichment_group"},
             },
             lambda _project_id, _payload: {"ok": True, "message": "done"},
         )
         job.future.result(timeout=2)
 
+        wakes = wake_service.list_recent(project_id)
+        self.assertEqual(initial_wake_count, len(wakes))
+        self.assertEqual("completed", auto_service.get_state(project_id).state)
+
+    def test_auto_dependency_success_wakes_when_card_becomes_ready_after_blocker_clears(self) -> None:
+        wake_service = ManagerWakeService(self.project_service)
+        auto_service = ManagerAutoService(
+            self.project_service,
+            background_workboard_service=self.background_workboard_service,
+            manager_wake_service=wake_service,
+        )
+        manager_with_worker = ManagerService(
+            self.project_service,
+            planner=AnswerOnlyPlanner(),
+            worker_service=self.worker,
+            background_workboard_service=self.background_workboard_service,
+        )
+        created = manager_with_worker.blueprint_tools.create_card(
+            "test-project",
+            {
+                "title": "Dependency-gated ready card",
+                "step": 2,
+                "summary": "Ready once dependency repair completes.",
+                "inputs": [],
+                "outputs": [{"role": "dependency_ready", "artifact_class": "table"}],
+            },
+        )
+        self._write_runtime_dependency_jobs(
+            {
+                "job_id": "depjob_ready_card",
+                "task_id": "bgtask_depjob_ready_card",
+                "project_id": "test-project",
+                "payload": {
+                    "ecosystem": "python",
+                    "runtime": "rnaseq",
+                    "packages": ["scanpy"],
+                    "source": {"card_id": created["card_id"], "session_id": "sess_auto"},
+                },
+                "status": "running",
+                "created_at": "2026-06-01T00:00:00Z",
+                "started_at": "2026-06-01T00:00:01Z",
+            }
+        )
+        auto_service.enable("test-project", "sess_auto")
+        baseline = len(wake_service.list_recent("test-project"))
+
+        self._write_runtime_dependency_jobs(
+            {
+                "job_id": "depjob_ready_card",
+                "task_id": "bgtask_depjob_ready_card",
+                "project_id": "test-project",
+                "payload": {
+                    "ecosystem": "python",
+                    "runtime": "rnaseq",
+                    "packages": ["scanpy"],
+                    "source": {"card_id": created["card_id"], "session_id": "sess_auto"},
+                },
+                "status": "succeeded",
+                "result": {"ok": True, "message": "Dependencies installed."},
+                "created_at": "2026-06-01T00:00:00Z",
+                "started_at": "2026-06-01T00:00:01Z",
+                "finished_at": "2026-06-01T00:00:03Z",
+            }
+        )
+        auto_service.notify_background_task_terminal("test-project", job_id="depjob_ready_card")
+
         wakes = wake_service.list_recent("test-project")
-        self.assertGreater(len(wakes), initial_wake_count)
-        self.assertTrue(all(item.kind == "workboard_actionable" for item in wakes))
+        self.assertGreater(len(wakes), baseline)
+        self.assertEqual("workboard_actionable", wakes[-1].kind)
         self.assertEqual("active", auto_service.get_state("test-project").state)
 
     def test_accept_proposal_in_auto_owner_session_reevaluates_workboard(self) -> None:
@@ -2763,6 +3085,96 @@ class ManagerFlowTest(unittest.TestCase):
         self.assertTrue(str(result["task_id"]).startswith("bgtask_"))
         self._wait_for_run("test-project", result["run_id"])
 
+    def test_runtime_dependency_install_suppresses_ready_to_start_for_affected_card(self) -> None:
+        manager_with_worker = ManagerService(
+            self.project_service,
+            planner=AnswerOnlyPlanner(),
+            worker_service=self.worker,
+            background_workboard_service=self.background_workboard_service,
+        )
+        created = manager_with_worker.blueprint_tools.create_card(
+            "test-project",
+            {
+                "title": "Dependency blocked card",
+                "step": 2,
+                "summary": "Should not surface as ready while dependency repair is active.",
+                "inputs": [],
+                "outputs": [{"role": "dependency_blocked_result", "artifact_class": "table"}],
+            },
+        )
+        self._write_runtime_dependency_jobs(
+            {
+                "job_id": "depjob_active_block",
+                "task_id": "bgtask_depjob_active_block",
+                "project_id": "test-project",
+                "payload": {
+                    "ecosystem": "python",
+                    "runtime": "rnaseq",
+                    "packages": ["scanpy"],
+                    "source": {"card_id": created["card_id"], "session_id": "sess_workboard"},
+                },
+                "status": "running",
+                "created_at": "2026-06-01T00:00:00Z",
+                "started_at": "2026-06-01T00:00:01Z",
+            }
+        )
+
+        board = manager_with_worker.blueprint_tools.get_background_workboard("test-project", "sess_workboard")
+        self.assertFalse(any(item["card_id"] == created["card_id"] for item in board["ready_to_start"]))
+        waiting = next(item for item in board["deferred"] if item["card_id"] == created["card_id"])
+        self.assertEqual("runtime_dependency_install_running", waiting["kind"])
+        work_item = next(item for item in self.flow_service.get_work_order("test-project")["work_items"] if item["card_id"] == created["card_id"])
+        self.assertFalse(work_item["can_start"])
+        self.assertIn("runtime_dependency_repair_in_progress", work_item["block_reasons"])
+
+    def test_unrelated_ready_cards_are_not_suppressed_by_card_scoped_dependency_repair(self) -> None:
+        manager_with_worker = ManagerService(
+            self.project_service,
+            planner=AnswerOnlyPlanner(),
+            worker_service=self.worker,
+            background_workboard_service=self.background_workboard_service,
+        )
+        blocked = manager_with_worker.blueprint_tools.create_card(
+            "test-project",
+            {
+                "title": "Blocked by dependency repair",
+                "step": 2,
+                "summary": "This card should be held back.",
+                "inputs": [],
+                "outputs": [{"role": "blocked_dependency_result", "artifact_class": "table"}],
+            },
+        )
+        ready = manager_with_worker.blueprint_tools.create_card(
+            "test-project",
+            {
+                "title": "Still ready",
+                "step": 2,
+                "summary": "This card should remain ready.",
+                "inputs": [],
+                "outputs": [{"role": "still_ready_result", "artifact_class": "table"}],
+            },
+        )
+        self._write_runtime_dependency_jobs(
+            {
+                "job_id": "depjob_card_scoped",
+                "task_id": "bgtask_depjob_card_scoped",
+                "project_id": "test-project",
+                "payload": {
+                    "ecosystem": "python",
+                    "runtime": "rnaseq",
+                    "packages": ["scanpy"],
+                    "source": {"card_id": blocked["card_id"]},
+                },
+                "status": "running",
+                "created_at": "2026-06-01T00:00:00Z",
+            }
+        )
+
+        board = manager_with_worker.blueprint_tools.get_background_workboard("test-project", "sess_workboard")
+        ready_card_ids = {item["card_id"] for item in board["ready_to_start"]}
+        self.assertIn(ready["card_id"], ready_card_ids)
+        self.assertNotIn(blocked["card_id"], ready_card_ids)
+
     def test_background_workboard_rejects_todo_mutation_from_other_session(self) -> None:
         manager_with_worker = ManagerService(
             self.project_service,
@@ -2801,6 +3213,146 @@ class ManagerFlowTest(unittest.TestCase):
                 "sess_other",
             )
         self.assertEqual(409, exc.exception.status_code)
+
+    def test_start_card_run_returns_runtime_dependency_repair_in_progress(self) -> None:
+        manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
+        created = manager_with_worker.blueprint_tools.create_card(
+            "test-project",
+            {
+                "title": "Direct start dependency blocked",
+                "step": 2,
+                "summary": "Direct start should return a structured dependency blocker.",
+                "inputs": [],
+                "outputs": [{"role": "direct_dependency_blocked", "artifact_class": "table"}],
+            },
+        )
+        self._write_runtime_dependency_jobs(
+            {
+                "job_id": "depjob_direct_start",
+                "task_id": "bgtask_depjob_direct_start",
+                "project_id": "test-project",
+                "payload": {
+                    "ecosystem": "python",
+                    "runtime": "rnaseq",
+                    "packages": ["scanpy"],
+                    "source": {"card_id": created["card_id"]},
+                },
+                "status": "running",
+                "created_at": "2026-06-01T00:00:00Z",
+            }
+        )
+
+        result = manager_with_worker.blueprint_tools.start_card_run(
+            "test-project",
+            {"card_id": created["card_id"]},
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["can_start"])
+        self.assertEqual("runtime_dependency_repair_in_progress", result["error_code"])
+        self.assertEqual(created["card_id"], result["card_id"])
+        self.assertEqual("depjob_direct_start", result["job_id"])
+        self.assertEqual("runtime_dependency_install_terminal", result["retry_after_signal"])
+
+    def test_workboard_submit_returns_runtime_dependency_repair_in_progress(self) -> None:
+        manager_with_worker = ManagerService(
+            self.project_service,
+            planner=AnswerOnlyPlanner(),
+            worker_service=self.worker,
+            background_workboard_service=self.background_workboard_service,
+        )
+        created = manager_with_worker.blueprint_tools.create_card(
+            "test-project",
+            {
+                "title": "Claimed card later blocked by dependency repair",
+                "step": 2,
+                "summary": "Submit should return the structured dependency blocker.",
+                "inputs": [],
+                "outputs": [{"role": "workboard_dependency_blocked", "artifact_class": "table"}],
+            },
+        )
+        board = manager_with_worker.blueprint_tools.get_background_workboard("test-project", "sess_workboard")
+        ready_item = next(item for item in board["ready_to_start"] if item["card_id"] == created["card_id"])
+        promoted = manager_with_worker.blueprint_tools.promote_workboard_item_to_todo(
+            "test-project",
+            {"item_id": ready_item["item_id"]},
+            "sess_workboard",
+        )
+        claimed = manager_with_worker.blueprint_tools.claim_workboard_item(
+            "test-project",
+            {"item_id": promoted["item"]["item_id"]},
+            "sess_workboard",
+        )
+        self._write_runtime_dependency_jobs(
+            {
+                "job_id": "depjob_claimed_submit",
+                "task_id": "bgtask_depjob_claimed_submit",
+                "project_id": "test-project",
+                "payload": {
+                    "ecosystem": "python",
+                    "runtime": "rnaseq",
+                    "packages": ["scanpy"],
+                    "source": {"card_id": created["card_id"], "session_id": "sess_workboard"},
+                },
+                "status": "running",
+                "created_at": "2026-06-01T00:00:00Z",
+            }
+        )
+
+        result = manager_with_worker.blueprint_tools.submit_claimed_workboard_items(
+            "test-project",
+            {"todo_item_ids": [claimed["item"]["item_id"]]},
+            "sess_workboard",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(0, result["started_count"])
+        self.assertEqual("runtime_dependency_repair_in_progress", result["blocked"][0]["error_code"])
+        self.assertEqual("depjob_claimed_submit", result["blocked"][0]["job_id"])
+
+    def test_dependency_install_failure_creates_needs_manager_and_blocks_ready(self) -> None:
+        manager_with_worker = ManagerService(
+            self.project_service,
+            planner=AnswerOnlyPlanner(),
+            worker_service=self.worker,
+            background_workboard_service=self.background_workboard_service,
+        )
+        created = manager_with_worker.blueprint_tools.create_card(
+            "test-project",
+            {
+                "title": "Dependency failure blocked card",
+                "step": 2,
+                "summary": "Failed dependency repair should create needs_manager and suppress ready.",
+                "inputs": [],
+                "outputs": [{"role": "dependency_failure_result", "artifact_class": "table"}],
+            },
+        )
+        self._write_runtime_dependency_jobs(
+            {
+                "job_id": "depjob_failed_block",
+                "task_id": "bgtask_depjob_failed_block",
+                "project_id": "test-project",
+                "payload": {
+                    "ecosystem": "python",
+                    "runtime": "rnaseq",
+                    "packages": ["scanpy"],
+                    "source": {"card_id": created["card_id"]},
+                },
+                "status": "failed",
+                "result": {"ok": False, "message": "conda solve failed"},
+                "error": "conda solve failed",
+                "created_at": "2026-06-01T00:00:00Z",
+                "finished_at": "2026-06-01T00:00:03Z",
+            }
+        )
+
+        board = manager_with_worker.blueprint_tools.get_background_workboard("test-project", "sess_workboard")
+        self.assertFalse(any(item["card_id"] == created["card_id"] for item in board["ready_to_start"]))
+        issue = next(item for item in board["needs_manager"] if item["card_id"] == created["card_id"])
+        self.assertEqual("runtime_dependency_install_failed", issue["kind"])
+        work_item = next(item for item in self.flow_service.get_work_order("test-project")["work_items"] if item["card_id"] == created["card_id"])
+        self.assertFalse(work_item["can_start"])
+        self.assertIn("runtime_dependency_repair_failed", work_item["block_reasons"])
 
     def test_start_card_run_with_pending_approval_does_not_enter_async_boundary(self) -> None:
         manager_with_worker = ManagerService(self.project_service, planner=AnswerOnlyPlanner(), worker_service=self.worker)
