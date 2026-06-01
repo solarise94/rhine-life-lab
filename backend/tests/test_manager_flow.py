@@ -6227,6 +6227,190 @@ manifest = {
         self.assertIsNone(self.manager.tool_layer._resolve_spec("please create a good module"))
         self.assertIsNone(self.manager.tool_layer._resolve_spec("we are going to discuss the plan"))
 
+    def test_frozen_input_binding_catches_outdated_downstream_after_upstream_rerun(self) -> None:
+        """High: DependencyAttention uses frozen input_bindings to detect stale accepted results.
+
+        Scenario:
+        1. Producer card accepted with logical output "planned_table" -> concrete "asset_run_old_table_1"
+        2. Consumer card accepted with logical input "planned_table", run produces output asset
+           with frozen input_bindings pointing to "asset_run_old_table_1"
+        3. Producer rerun and re-accepted: new concrete "asset_run_new_table_1", binding updated
+        4. Consumer's frozen binding shows it used old concrete; current binding resolves to new concrete
+        5. DependencyAttention should flag consumer as input_asset_outdated
+        6. FlowService should mark consumer (when planned) as can_start=True
+        7. signal_snapshot should report has_startable_frontier=True
+        """
+        from app.services.dependency_attention_service import DependencyAttentionService
+
+        store = self.project_service.graph_store("test-project")
+        cards = store.load_cards()
+        graph = store.load_graph()
+
+        producer = Card.model_validate(
+            {
+                "card_id": "card_frozen_producer",
+                "card_type": "module",
+                "title": "Frozen Producer",
+                "status": "accepted",
+                "step": 1,
+                "summary": "Producer",
+                "outputs": [output_contract("counts", role="filtered_counts", asset_id="planned_filtered_counts")],
+                "linked_assets": ["asset_run_new_table_1"],
+            }
+        )
+        consumer = Card.model_validate(
+            {
+                "card_id": "card_frozen_consumer",
+                "card_type": "module",
+                "title": "Frozen Consumer",
+                "status": "accepted",
+                "step": 2,
+                "summary": "Consumer",
+                "inputs": [{"label": "counts", "asset_id": "planned_filtered_counts"}],
+                "outputs": [output_contract("report", role="report", asset_id="planned_report")],
+                "linked_assets": ["asset_run_consumer_report_1"],
+            }
+        )
+        cards.extend([producer, consumer])
+
+        # Old producer output (superseded by rerun)
+        old_producer_asset = Asset(
+            asset_id="asset_run_old_table_1",
+            asset_type="table",
+            title="Old counts",
+            status="superseded",
+            created_by_run="run_old",
+            path="results/old/counts.tsv",
+            summary="Old counts.",
+            metadata={"role": "filtered_counts", "planned_asset_id": "planned_filtered_counts"},
+        )
+        # New producer output (current)
+        new_producer_asset = Asset(
+            asset_id="asset_run_new_table_1",
+            asset_type="table",
+            title="New counts",
+            status="valid",
+            created_by_run="run_new",
+            path="results/new/counts.tsv",
+            summary="New counts.",
+            metadata={"role": "filtered_counts", "planned_asset_id": "planned_filtered_counts"},
+        )
+        # Consumer output with frozen input_bindings pointing to OLD concrete asset
+        consumer_output_asset = Asset(
+            asset_id="asset_run_consumer_report_1",
+            asset_type="document",
+            title="Consumer report",
+            status="valid",
+            created_by_run="run_consumer",
+            path="results/consumer/report.md",
+            summary="Consumer report.",
+            metadata={
+                "role": "report",
+                "planned_asset_id": "planned_report",
+                "input_bindings": [
+                    {
+                        "label": "counts",
+                        "requested_asset_id": "planned_filtered_counts",
+                        "resolved_asset_id": "asset_run_old_table_1",
+                        "resolved_by": "materialization_binding",
+                        "producer_card_id": "card_frozen_producer",
+                        "producer_role": "filtered_counts",
+                    }
+                ],
+            },
+        )
+        graph.assets.extend([old_producer_asset, new_producer_asset, consumer_output_asset])
+        graph.runs.extend([
+            RunRecord(
+                run_id="run_old",
+                card_id="card_frozen_producer",
+                status="reviewed",
+                title="old",
+                summary="old",
+                started_at="2026-05-28T00:00:00Z",
+            ),
+            RunRecord(
+                run_id="run_new",
+                card_id="card_frozen_producer",
+                status="reviewed",
+                title="new",
+                summary="new",
+                started_at="2026-05-28T01:00:00Z",
+            ),
+            RunRecord(
+                run_id="run_consumer",
+                card_id="card_frozen_consumer",
+                status="reviewed",
+                title="consumer",
+                summary="consumer",
+                started_at="2026-05-28T02:00:00Z",
+            ),
+        ])
+        # Binding: logical id now points to new concrete asset
+        graph.metadata = {
+            **(graph.metadata or {}),
+            "asset_materializations": {
+                "planned_filtered_counts": {
+                    "planned_asset_id": "planned_filtered_counts",
+                    "current_asset_id": "asset_run_new_table_1",
+                    "producer_card_id": "card_frozen_producer",
+                    "producer_role": "filtered_counts",
+                    "producer_run_id": "run_new",
+                    "status": "valid",
+                    "path": "results/new/counts.tsv",
+                    "updated_at": "2026-05-28T01:00:00Z",
+                    "superseded_asset_ids": ["asset_run_old_table_1"],
+                },
+                "planned_report": {
+                    "planned_asset_id": "planned_report",
+                    "current_asset_id": "asset_run_consumer_report_1",
+                    "producer_card_id": "card_frozen_consumer",
+                    "producer_role": "report",
+                    "producer_run_id": "run_consumer",
+                    "status": "valid",
+                    "path": "results/consumer/report.md",
+                    "updated_at": "2026-05-28T02:00:00Z",
+                    "superseded_asset_ids": [],
+                },
+            },
+        }
+        store.save_cards(cards)
+        store.save_graph(graph)
+
+        snapshot = {"cards": cards, "graph": graph}
+        attention = DependencyAttentionService().analyze_project(snapshot)
+        consumer_issues = [i for i in attention["issues"] if i["card_id"] == "card_frozen_consumer"]
+        outdated_issues = [i for i in consumer_issues if i["kind"] == "input_asset_outdated"]
+        self.assertTrue(
+            outdated_issues,
+            f"Expected input_asset_outdated for consumer, got: {consumer_issues}",
+        )
+        self.assertEqual("asset_run_new_table_1", outdated_issues[0]["resolved_asset_id"])
+        self.assertEqual("asset_run_new_table_1", outdated_issues[0]["current_asset_id"])
+        self.assertEqual("asset_run_old_table_1", outdated_issues[0]["frozen_resolved_asset_id"])
+
+        # Flip consumer to planned and verify FlowService marks it ready
+        consumer.status = "planned"
+        store.save_cards(cards)
+        work_order = self.flow_service.get_work_order("test-project")
+        consumer_item = next(
+            (item for item in work_order["work_items"] if item["card_id"] == "card_frozen_consumer"), None
+        )
+        self.assertIsNotNone(consumer_item)
+        self.assertTrue(consumer_item["can_start"], f"Expected can_start=True, got: {consumer_item}")
+
+        # Verify signal_snapshot reports startable frontier
+        signal = self.background_workboard_service.signal_snapshot("test-project")
+        self.assertTrue(
+            signal["actionability"]["has_startable_frontier"],
+            f"Expected has_startable_frontier=True, got: {signal['actionability']}",
+        )
+        ready_units = [u for u in signal.get("fingerprint_items", []) if u.startswith("ready:")]
+        self.assertTrue(
+            any("card_frozen_consumer" in u for u in ready_units),
+            f"Expected ready:card_frozen_consumer in fingerprint, got: {ready_units}",
+        )
+
     def _wait_for_run(self, project_id: str, run_id: str) -> None:
         deadline = time.time() + 5
         while time.time() < deadline:

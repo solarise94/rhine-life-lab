@@ -464,7 +464,9 @@ class ProjectService:
         cards = store.load_cards()
         graph = store.load_graph()
         # Lazy bootstrap materialization bindings for legacy projects
-        if not (graph.metadata.get("asset_materializations") if isinstance(graph.metadata, dict) else {}):
+        metadata = graph.metadata if isinstance(graph.metadata, dict) else {}
+        needs_bootstrap = not metadata.get("asset_materializations") and not metadata.get("asset_materializations_bootstrapped_at")
+        if needs_bootstrap:
             AssetMaterializationService.bootstrap_from_aliases(graph, cards)
             store.save_graph(graph)
         summary = ProjectSummary(

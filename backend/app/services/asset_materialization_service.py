@@ -143,6 +143,10 @@ class AssetMaterializationService:
                                 "updated_at": utc_now(),
                                 "superseded_asset_ids": [],
                             }
+        # Mark as bootstrapped so empty projects don't repeatedly save.
+        if graph.metadata is None:
+            graph.metadata = {}
+        graph.metadata["asset_materializations_bootstrapped_at"] = utc_now()
 
     @staticmethod
     def resolve_logical_output(

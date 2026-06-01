@@ -232,6 +232,23 @@ class DependencyAttentionService:
                 if concrete is not None:
                     current_asset_by_card_role[(card.card_id, output.role)] = concrete
 
+        # Frozen input bindings from accepted cards' output assets (for stale detection)
+        frozen_input_bindings_by_card: dict[str, list[dict]] = {}
+        for card in cards:
+            if card.status != "accepted":
+                continue
+            binding_sources: list[tuple[Asset, int]] = []
+            for asset in graph.assets:
+                if asset.asset_id not in card.linked_assets:
+                    continue
+                metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
+                bindings = metadata.get("input_bindings")
+                if bindings:
+                    binding_sources.append((asset, run_order_by_id.get(asset.created_by_run or "", -1)))
+            if binding_sources:
+                binding_sources.sort(key=lambda x: x[1], reverse=True)
+                frozen_input_bindings_by_card[card.card_id] = list(binding_sources[0][0].metadata.get("input_bindings") or [])
+
         # Legacy current_output_by_card_role (output objects for producer lookup)
         current_output_by_card_role: dict[tuple[str, str], Any] = {}
         for card in cards:
@@ -275,6 +292,7 @@ class DependencyAttentionService:
             "input_resolution_index": resolution_service.build_index(cards, graph),
             "materializations": materializations,
             "alias_assets_by_planned_id": alias_assets_by_planned_id,
+            "frozen_input_bindings_by_card": frozen_input_bindings_by_card,
         }
 
     def _analyze_card_inputs(
@@ -391,6 +409,7 @@ class DependencyAttentionService:
                                 binding = mats.get(current_output.asset_id)
                                 if binding:
                                     current_asset_from_binding = asset_by_id.get(binding.get("current_asset_id"))
+                    outdated_by_binding = False
                     if (
                         current_asset_from_binding
                         and not resolution.is_virtual
@@ -414,6 +433,38 @@ class DependencyAttentionService:
                                 message=f"Input asset {input_ref.label or asset.asset_id} references an older {producer_card_id} output for role {role}.",
                             )
                         )
+                        outdated_by_binding = True
+
+                    # Frozen input binding stale check:
+                    # For accepted cards with produced outputs, compare the concrete asset
+                    # that was frozen at run-time against the current materialization.
+                    # This catches cases where the input kept a logical id and the binding
+                    # was updated by an upstream rerun after this card was accepted.
+                    if not outdated_by_binding and card.status == "accepted":
+                        frozen_bindings = indexes.get("frozen_input_bindings_by_card", {}).get(card.card_id, [])
+                        frozen = next((b for b in frozen_bindings if b.get("requested_asset_id") == asset_id), None)
+                        if frozen:
+                            frozen_resolved_id = frozen.get("resolved_asset_id")
+                            current_resolved_id = resolution.resolved_asset_id or (resolution.asset.asset_id if resolution.asset else None)
+                            if frozen_resolved_id and current_resolved_id and frozen_resolved_id != current_resolved_id:
+                                issues.append(
+                                    self._issue(
+                                        kind="input_asset_outdated",
+                                        severity="warning",
+                                        card=card,
+                                        asset_id=asset_id,
+                                        requested_asset_id=resolution.requested_asset_id,
+                                        resolved_asset_id=resolution.resolved_asset_id,
+                                        resolved_by=resolution.resolved_by,
+                                        asset_status=asset.status,
+                                        label=input_ref.label,
+                                        producer_card_id=producer_card_id,
+                                        producer_role=role,
+                                        current_asset_id=current_resolved_id,
+                                        frozen_resolved_asset_id=frozen_resolved_id,
+                                        message=f"Input asset {input_ref.label or asset_id} was frozen as {frozen_resolved_id} when this card last ran, but the current materialization is {current_resolved_id}.",
+                                    )
+                                )
 
             invalid_roots, truncated = self._find_invalid_lineage_roots(asset.asset_id, asset_by_id, max_nodes=max_lineage_nodes)
             if invalid_roots:
