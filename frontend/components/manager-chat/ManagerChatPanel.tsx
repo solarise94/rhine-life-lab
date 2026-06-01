@@ -834,6 +834,9 @@ export function ManagerChatPanel({
             autoStreamSeqRef.current.set(payload.message_id, payload.seq);
           }
           remoteHydratingRef.current = true;
+          if (applyCompactStreamEvent(payload.event)) {
+            return;
+          }
           if (payload.event.type === "done" || payload.event.type === "error") {
             activeAutoStreamMessagesRef.current.delete(payload.message_id);
             autoStreamSeqRef.current.delete(payload.message_id);
@@ -1006,6 +1009,28 @@ export function ManagerChatPanel({
 
   function updateMessage(messageId: string, updater: (message: ChatMessage) => ChatMessage) {
     setMessages((previous) => previous.map((message) => (message.id === messageId ? updater(message) : message)));
+  }
+
+  function updateOrInsertStreamMessage(messageId: string, updater: (message: ChatMessage) => ChatMessage) {
+    setMessages((previous) => {
+      const hasMessage = previous.some((message) => message.id === messageId);
+      const base = hasMessage
+        ? previous
+        : [
+            ...previous,
+            {
+              id: messageId,
+              role: "manager" as const,
+              content: "",
+              thinking: "",
+              thinkingState: "idle" as const,
+              tools: [],
+              state: "thinking" as const,
+              timeline: [],
+            },
+          ];
+      return base.map((message) => (message.id === messageId ? updater(message) : message));
+    });
   }
 
   function buildChatHistory(sourceMessages: ChatMessage[]): ChatHistoryMessage[] {
@@ -1195,7 +1220,7 @@ export function ManagerChatPanel({
   }
 
   function applyStreamEvent(messageId: string, event: ChatStreamEvent) {
-    updateMessage(messageId, (current) => {
+    updateOrInsertStreamMessage(messageId, (current) => {
       const timeline = current.timeline ?? [];
       switch (event.type) {
         case "thinking_start":
@@ -1576,6 +1601,58 @@ export function ManagerChatPanel({
     });
   }
 
+  function applyCompactStreamEvent(event: ChatStreamEvent) {
+    if (event.type === "compact_start") {
+      upsertCompactMessage({
+        id: event.compact_id,
+        kind: "compact",
+        content: "",
+        status: "running",
+        startedAt: Date.now(),
+      });
+      return true;
+    }
+    if (event.type === "compact_delta") {
+      upsertCompactMessage({
+        id: event.compact_id,
+        kind: "compact",
+        content: event.content || "",
+        status: "running",
+        startedAt: Date.now(),
+      });
+      return true;
+    }
+    if (event.type === "compact_end") {
+      finalizeCompaction({
+        id: event.compact_id,
+        kind: "compact",
+        content: event.content || "",
+        status: "done",
+        startedAt: Date.now() - (event.duration_ms ?? 0),
+        endedAt: Date.now(),
+        durationMs: event.duration_ms,
+        firstKeptMessageId: event.first_kept_message_id,
+        tokensBefore: event.tokens_before,
+        tokensAfter: event.tokens_after,
+        provider: event.provider,
+        model: event.model,
+      });
+      return true;
+    }
+    if (event.type === "compact_error") {
+      upsertCompactMessage({
+        id: event.compact_id,
+        kind: "compact",
+        content: event.message || "上下文压缩失败。",
+        status: "error",
+        startedAt: Date.now(),
+        endedAt: Date.now(),
+      });
+      return true;
+    }
+    return false;
+  }
+
   async function runManualCompaction() {
     if (busy || !sessionId) return;
     const startedAt = Date.now();
@@ -1701,52 +1778,7 @@ export function ManagerChatPanel({
         history,
         serializeSessionMessages(priorMessages),
         (event) => {
-          if (event.type === "compact_start") {
-            upsertCompactMessage({
-              id: event.compact_id,
-              kind: "compact",
-              content: "",
-              status: "running",
-              startedAt: Date.now(),
-            });
-            return;
-          }
-          if (event.type === "compact_delta") {
-            upsertCompactMessage({
-              id: event.compact_id,
-              kind: "compact",
-              content: event.content || "",
-              status: "running",
-              startedAt: Date.now(),
-            });
-            return;
-          }
-          if (event.type === "compact_end") {
-            finalizeCompaction({
-              id: event.compact_id,
-              kind: "compact",
-              content: event.content || "",
-              status: "done",
-              startedAt: Date.now() - (event.duration_ms ?? 0),
-              endedAt: Date.now(),
-              durationMs: event.duration_ms,
-              firstKeptMessageId: event.first_kept_message_id,
-              tokensBefore: event.tokens_before,
-              tokensAfter: event.tokens_after,
-              provider: event.provider,
-              model: event.model,
-            });
-            return;
-          }
-          if (event.type === "compact_error") {
-            upsertCompactMessage({
-              id: event.compact_id,
-              kind: "compact",
-              content: event.message || "上下文压缩失败。",
-              status: "error",
-              startedAt: Date.now(),
-              endedAt: Date.now(),
-            });
+          if (applyCompactStreamEvent(event)) {
             return;
           }
           applyStreamEvent(managerMessageId, event);
