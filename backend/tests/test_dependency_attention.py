@@ -140,7 +140,8 @@ class DependencyAttentionServiceTest(unittest.TestCase):
         self.assertTrue(resolution.is_virtual)
         self.assertEqual("missing", resolution.status)
         self.assertIsNone(resolution.resolved_asset_id)
-        self.assertIsNone(resolution.resolved_by)
+        # producer exists but no materialization: resolved_by distinguishes from truly missing.
+        self.assertEqual("materialization_missing", resolution.resolved_by)
         self.assertEqual("producer", resolution.producer_card_id)
 
     def test_inactive_producer_card_warns_without_rebinding(self) -> None:

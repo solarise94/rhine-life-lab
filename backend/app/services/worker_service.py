@@ -774,6 +774,9 @@ class WorkerService:
                 for asset in self._current_output_assets(card, graph.assets, current_run_id=run_id)
             }
 
+            # 0a. Bootstrap legacy materializations so accept can see previous bindings.
+            AssetMaterializationService.bootstrap_from_aliases(graph, cards)
+
             # 1. Materialize run assets: reuse existing valid assets without demotion.
             frozen_input_bindings = [
                 {

@@ -65,13 +65,13 @@ class FlowService:
                 item.requested_asset_id
                 for item in input_resolutions
                 if item.resolved_asset_id is None
-                and item.resolved_by is None
+                and not item.producer_card_id
             ]
             materialization_missing_asset_ids = [
                 item.requested_asset_id
                 for item in input_resolutions
                 if item.resolved_asset_id is None
-                and item.resolved_by is not None
+                and item.producer_card_id
             ]
             nonvalid_asset_ids = [
                 item.resolved_asset_id or item.requested_asset_id

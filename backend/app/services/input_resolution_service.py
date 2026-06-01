@@ -170,11 +170,13 @@ class InputResolutionService:
                 preferred_role=producer_role,
             )
         if current_asset is None:
+            # Distinguish: producer exists but no materialization vs truly missing producer.
+            has_producer = producer_card_id is not None
             return InputResolution(
                 requested_asset_id=requested,
                 resolved_asset_id=None,
                 resolved_path=None,
-                resolved_by=None,
+                resolved_by="materialization_missing" if has_producer else None,
                 producer_card_id=producer_card_id,
                 producer_role=producer_role,
                 status="missing",

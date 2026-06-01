@@ -188,6 +188,51 @@ class DependencyAttentionService:
         run_by_id = {run.run_id: run for run in graph.runs}
         run_card_by_id = {run.run_id: run.card_id for run in graph.runs}
 
+        materializations = graph.metadata.get("asset_materializations") if isinstance(graph.metadata, dict) else {}
+        materializations = materializations or {}
+
+        # Build alias index by planned id for alias fallback
+        alias_assets_by_planned_id: dict[str, list[Asset]] = {}
+        for asset in graph.assets:
+            metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
+            planned = str(metadata.get("planned_asset_id") or "").strip()
+            if planned:
+                alias_assets_by_planned_id.setdefault(planned, []).append(asset)
+
+        # Build current_asset_by_card_role: binding-first, alias fallback
+        current_asset_by_card_role: dict[tuple[str, str], Asset] = {}
+        run_order_by_id = {run.run_id: index for index, run in enumerate(graph.runs)}
+        for card in cards:
+            for output in card.outputs:
+                if self._is_system_output_role(output.role):
+                    continue
+                if not output.asset_id or not output.role:
+                    continue
+                logical_id = output.asset_id
+                concrete = None
+                # Priority 1: explicit materialization binding
+                binding = materializations.get(logical_id)
+                if binding:
+                    current_id = binding.get("current_asset_id")
+                    if current_id:
+                        concrete = asset_by_id.get(current_id)
+                # Priority 2: alias candidates (pick latest valid)
+                if concrete is None:
+                    candidates = alias_assets_by_planned_id.get(logical_id, [])
+                    if candidates:
+                        status_rank = {"valid": 0, "candidate": 1, "stale": 2, "superseded": 3, "rejected": 4, "archived": 5, "missing": 6}
+                        def _sort_key(a: Asset) -> tuple[int, int]:
+                            return (
+                                status_rank.get(a.status, 99),
+                                -(run_order_by_id.get(a.created_by_run or "", -1)),
+                            )
+                        best = sorted(candidates, key=_sort_key)[0]
+                        if best.status == "valid":
+                            concrete = best
+                if concrete is not None:
+                    current_asset_by_card_role[(card.card_id, output.role)] = concrete
+
+        # Legacy current_output_by_card_role (output objects for producer lookup)
         current_output_by_card_role: dict[tuple[str, str], Any] = {}
         for card in cards:
             for output in card.outputs:
@@ -208,7 +253,8 @@ class DependencyAttentionService:
                 planned_asset_id = str(metadata.get("planned_asset_id") or "").strip()
                 if planned_asset_id:
                     producer_card_by_asset.setdefault(planned_asset_id, producer_card_id)
-                    asset_by_id.setdefault(planned_asset_id, asset)
+                    # NOTE: do NOT setdefault asset_by_id — alias lookups use
+                    # current_asset_by_card_role or alias_assets_by_planned_id.
             role = str(metadata.get("role") or "").strip()
             if role:
                 role_by_asset[asset.asset_id] = role
@@ -216,23 +262,13 @@ class DependencyAttentionService:
                 if planned_asset_id:
                     role_by_asset.setdefault(planned_asset_id, role)
 
-        # Build alias index by planned id for output analysis fallback
-        alias_assets_by_planned_id: dict[str, list[Asset]] = {}
-        for asset in graph.assets:
-            metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
-            planned = str(metadata.get("planned_asset_id") or "").strip()
-            if planned:
-                alias_assets_by_planned_id.setdefault(planned, []).append(asset)
-
-        materializations = graph.metadata.get("asset_materializations") if isinstance(graph.metadata, dict) else {}
-        materializations = materializations or {}
-
         return {
             "card_by_id": card_by_id,
             "asset_by_id": asset_by_id,
             "run_by_id": run_by_id,
             "run_card_by_id": run_card_by_id,
             "current_output_by_card_role": current_output_by_card_role,
+            "current_asset_by_card_role": current_asset_by_card_role,
             "producer_card_by_asset": producer_card_by_asset,
             "role_by_asset": role_by_asset,
             "input_resolution_service": resolution_service,
@@ -343,13 +379,23 @@ class DependencyAttentionService:
                                 message=f"Input asset {input_ref.label or asset.asset_id} uses removed output role {role}.",
                             )
                         )
-                    current_output = current_output_by_card_role.get((producer_card_id, role))
-                    current_asset = asset_by_id.get(current_output.asset_id) if current_output and current_output.asset_id else None
+                    current_asset_from_binding = indexes.get("current_asset_by_card_role", {}).get((producer_card_id, role))
+                    if current_asset_from_binding is None:
+                        # Legacy fallback: look up current_output.asset_id through asset_by_id
+                        current_output = current_output_by_card_role.get((producer_card_id, role))
+                        if current_output and current_output.asset_id:
+                            current_asset_from_binding = asset_by_id.get(current_output.asset_id)
+                            # If not found, try materialization binding
+                            if current_asset_from_binding is None:
+                                mats = indexes.get("materializations", {})
+                                binding = mats.get(current_output.asset_id)
+                                if binding:
+                                    current_asset_from_binding = asset_by_id.get(binding.get("current_asset_id"))
                     if (
-                        current_asset
+                        current_asset_from_binding
                         and not resolution.is_virtual
-                        and current_asset.asset_id != asset.asset_id
-                        and current_asset.status in self.VALID_INPUT_STATUSES
+                        and current_asset_from_binding.asset_id != asset.asset_id
+                        and current_asset_from_binding.status in self.VALID_INPUT_STATUSES
                     ):
                         issues.append(
                             self._issue(
@@ -364,7 +410,7 @@ class DependencyAttentionService:
                                 label=input_ref.label,
                                 producer_card_id=producer_card_id,
                                 producer_role=role,
-                                current_asset_id=current_asset.asset_id,
+                                current_asset_id=current_asset_from_binding.asset_id,
                                 message=f"Input asset {input_ref.label or asset.asset_id} references an older {producer_card_id} output for role {role}.",
                             )
                         )

@@ -485,6 +485,151 @@ class WakeLoopRegressionTest(unittest.TestCase):
             "dep:python:numpy:package_not_found",
         )
 
+    # --- OAA-2 Terminal Settlement Regression Tests ---
+
+    def test_terminal_settlement_bypasses_stale_running_guard(self):
+        """notify_background_task_terminal should clear active_run_id and evaluate workboard
+        even when auto state is 'running', so that terminal settlement is not short-circuited."""
+        wake_service = ManagerWakeService(self.project_service)
+        service = ManagerAutoService(
+            self.project_service,
+            manager_wake_service=wake_service,
+        )
+        store = self.project_service.graph_store("test-project")
+        graph = store.load_graph()
+        state = ManagerAutoState(
+            enabled=True,
+            wake_allowed=True,
+            owner_session_id="sess_auto",
+            consume_workboard=True,
+            chain_count=0,
+            max_chain_count=10,
+            state="running",
+            active_run_id="run_1",
+        )
+        graph.metadata["manager_auto"] = state.model_dump()
+        store.save_graph(graph)
+
+        # Mock signal_snapshot: no actionable items, no running items
+        mock_bws = MagicMock()
+        mock_bws.signal_snapshot.return_value = {
+            "revision": 1,
+            "counts": {},
+            "has_actionable": False,
+            "has_running": False,
+            "has_blocked_for_user": False,
+            "actionability": {
+                "has_manager_actionable": False,
+                "has_startable_frontier": False,
+                "has_only_running": False,
+            },
+            "fingerprint": "",
+            "fingerprint_items": [],
+        }
+        service.background_workboard_service = mock_bws
+
+        result = service.notify_background_task_terminal("test-project", run_id="run_1")
+        self.assertTrue(result.enabled)
+        self.assertIsNone(result.active_run_id)
+        # State should have settled out of 'running'
+        self.assertNotEqual("running", result.state)
+
+    def test_terminal_settlement_enqueues_wake_when_downstream_frontier_appears(self):
+        """After upstream accept, if a downstream card becomes ready_to_start via
+        materialization binding, terminal settlement must enqueue a workboard_actionable wake."""
+        wake_service = ManagerWakeService(self.project_service)
+        service = ManagerAutoService(
+            self.project_service,
+            manager_wake_service=wake_service,
+        )
+        store = self.project_service.graph_store("test-project")
+        graph = store.load_graph()
+        state = ManagerAutoState(
+            enabled=True,
+            wake_allowed=True,
+            owner_session_id="sess_auto",
+            consume_workboard=True,
+            chain_count=0,
+            max_chain_count=10,
+            state="running",
+            active_run_id="run_1",
+        )
+        graph.metadata["manager_auto"] = state.model_dump()
+        store.save_graph(graph)
+
+        # Mock signal_snapshot: startable frontier exists
+        mock_bws = MagicMock()
+        mock_bws.signal_snapshot.return_value = {
+            "revision": 100,
+            "counts": {"ready_to_start": 1},
+            "has_actionable": True,
+            "has_running": False,
+            "has_blocked_for_user": False,
+            "actionability": {
+                "has_manager_actionable": False,
+                "has_startable_frontier": True,
+                "has_only_running": False,
+            },
+            "fingerprint": "sha1:downstream_ready",
+            "fingerprint_items": ["ready:card_downstream"],
+        }
+        service.background_workboard_service = mock_bws
+
+        result = service.notify_background_task_terminal("test-project", run_id="run_1")
+        self.assertTrue(result.enabled)
+        self.assertIsNotNone(result.last_wake_id)
+        # Verify wake was enqueued with the correct kind
+        wake = wake_service.list_recent("test-project")[-1] if wake_service.list_recent("test-project") else None
+        if wake:
+            self.assertEqual("workboard_actionable", wake.kind)
+
+    def test_terminal_settlement_no_frontier_completes_without_wake(self):
+        """When accept produces no downstream frontier, terminal settlement must settle
+        auto state out of 'running' without enqueuing a wake. Auto should remain enabled."""
+        wake_service = ManagerWakeService(self.project_service)
+        service = ManagerAutoService(
+            self.project_service,
+            manager_wake_service=wake_service,
+        )
+        store = self.project_service.graph_store("test-project")
+        graph = store.load_graph()
+        state = ManagerAutoState(
+            enabled=True,
+            wake_allowed=True,
+            owner_session_id="sess_auto",
+            consume_workboard=True,
+            chain_count=0,
+            max_chain_count=10,
+            state="running",
+            active_run_id="run_1",
+        )
+        graph.metadata["manager_auto"] = state.model_dump()
+        store.save_graph(graph)
+
+        # Mock signal_snapshot: no actionable, no running, no blocked
+        mock_bws = MagicMock()
+        mock_bws.signal_snapshot.return_value = {
+            "revision": 200,
+            "counts": {},
+            "has_actionable": False,
+            "has_running": False,
+            "has_blocked_for_user": False,
+            "actionability": {
+                "has_manager_actionable": False,
+                "has_startable_frontier": False,
+                "has_only_running": False,
+            },
+            "fingerprint": "",
+            "fingerprint_items": [],
+        }
+        service.background_workboard_service = mock_bws
+
+        result = service.notify_background_task_terminal("test-project", run_id="run_1")
+        self.assertTrue(result.enabled)
+        self.assertIsNone(result.last_wake_id)
+        self.assertIn(result.state, {"completed", "idle", "blocked"})
+        self.assertIsNone(result.active_run_id)
+
 
 if __name__ == "__main__":
     unittest.main()

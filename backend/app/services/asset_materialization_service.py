@@ -86,6 +86,7 @@ class AssetMaterializationService:
 
         mats = _materializations(graph)
         asset_by_id = {asset.asset_id: asset for asset in graph.assets}
+        run_order_by_id = {run.run_id: index for index, run in enumerate(graph.runs)}
 
         # Build reverse map: planned_asset_id -> list of concrete assets
         alias_assets: dict[str, list[Asset]] = {}
@@ -112,7 +113,7 @@ class AssetMaterializationService:
                     if planned and planned in alias_assets:
                         # Find the best candidate for this planned id
                         candidates = alias_assets[planned]
-                        best = _pick_best_candidate(candidates)
+                        best = _pick_best_candidate(candidates, run_order_by_id=run_order_by_id)
                         if best:
                             mats[planned] = {
                                 "planned_asset_id": planned,
@@ -129,7 +130,7 @@ class AssetMaterializationService:
                     # output.asset_id is a logical id with alias candidates
                     candidates = alias_assets.get(output.asset_id, [])
                     if candidates:
-                        best = _pick_best_candidate(candidates)
+                        best = _pick_best_candidate(candidates, run_order_by_id=run_order_by_id)
                         if best:
                             mats[output.asset_id] = {
                                 "planned_asset_id": output.asset_id,
@@ -171,19 +172,20 @@ class AssetMaterializationService:
         return None
 
 
-def _pick_best_candidate(candidates: list[Asset]) -> Asset | None:
+def _pick_best_candidate(candidates: list[Asset], *, run_order_by_id: dict[str, int] | None = None) -> Asset | None:
     """Pick the best candidate from a list of alias assets.
 
-    Prefers valid status, then latest run order.
+    Prefers valid status, then newest run order.
     """
     if not candidates:
         return None
     status_rank = {"valid": 0, "candidate": 1, "stale": 2, "superseded": 3, "rejected": 4, "archived": 5, "missing": 6}
+    run_order = run_order_by_id or {}
 
-    def sort_key(asset: Asset) -> tuple[int, str]:
+    def sort_key(asset: Asset) -> tuple[int, int]:
         return (
             status_rank.get(asset.status, 99),
-            asset.created_by_run or "",
+            -(run_order.get(asset.created_by_run or "", -1)),  # newest run first
         )
 
     return sorted(candidates, key=sort_key)[0]
