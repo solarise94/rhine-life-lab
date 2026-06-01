@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from hashlib import sha256
 from pathlib import Path
@@ -29,9 +30,16 @@ from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.project_service import ProjectService
 from app.services.result_asset_service import ResultAssetService
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
+from app.services.runtime_dependency_state_service import (
+    find_duplicate_in_flight,
+    find_duplicate_terminal_failure,
+)
 from app.services.utils import atomic_write_json, resolve_within, utc_now
 from app.workers.command_worker import CommandTemplateWorkerAdapter
 from app.services.worker_service import WorkerService
+
+
+logger = logging.getLogger(__name__)
 
 
 class DependencyResolutionError(ManagerPlanningError):
@@ -990,6 +998,68 @@ class ManagerBlueprintTools:
             }
         except ValidationError as exc:
             raise ManagerPlanningError(f"Invalid install_runtime_dependencies payload: {exc}") from exc
+
+        ecosystem = request_payload["ecosystem"]
+        runtime = request_payload["runtime"]
+        packages = request_payload["packages"]
+        project_path = self.project_service.project_path(project_id)
+
+        # In-flight duplicate suppression
+        in_flight_dup = find_duplicate_in_flight(project_path, ecosystem, runtime, packages)
+        if in_flight_dup is not None:
+            dedupe_key = f"dep:{ecosystem}:{runtime}:{','.join(sorted(str(p).strip().lower() for p in packages))}::"
+            logger.info(
+                "dep_cooling_rejected",
+                extra={
+                    "dedupe_key": dedupe_key,
+                    "error_code": None,
+                    "kind": "in_flight",
+                    "project_id": project_id,
+                    "runtime": runtime,
+                },
+            )
+            return {
+                "ok": False,
+                "background": False,
+                "async_boundary": False,
+                "do_not_poll": False,
+                "wait_for_wake": False,
+                "error_code": "duplicate_dependency_resolution_in_progress",
+                "prior_job_id": in_flight_dup["prior_job_id"],
+                "message": "The same dependency installation is already running for this runtime.",
+                "retry_hint": "wait_for_existing_dependency_job",
+            }
+
+        # Terminal failure cooling
+        terminal_dup = find_duplicate_terminal_failure(project_path, ecosystem, runtime, packages)
+        if terminal_dup is not None and terminal_dup.get("prior_status") == "failed":
+            dedupe_key = terminal_dup.get("dedupe_key") or ""
+            prior_error_code = terminal_dup.get("prior_error_code")
+            logger.info(
+                "dep_cooling_rejected",
+                extra={
+                    "dedupe_key": dedupe_key,
+                    "error_code": prior_error_code,
+                    "kind": "terminal",
+                    "project_id": project_id,
+                    "runtime": runtime,
+                },
+            )
+            return {
+                "ok": False,
+                "background": False,
+                "async_boundary": False,
+                "do_not_poll": False,
+                "wait_for_wake": False,
+                "error_code": "duplicate_dependency_resolution_failure",
+                "prior_job_id": terminal_dup["prior_job_id"],
+                "prior_error_code": prior_error_code,
+                "dedupe_key": dedupe_key,
+                "message": "The same dependency request already failed for this runtime.",
+                "retry_hint": "do_not_retry_same_conda_request; modify package list, change runtime, or mark manually resolved",
+                "fallback_available": terminal_dup.get("fallback_available"),
+            }
+
         job = self.runtime_dependency_job_service.submit(
             project_id,
             request_payload,

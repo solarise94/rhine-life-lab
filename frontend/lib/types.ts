@@ -133,6 +133,25 @@ export interface AssetFlow {
   asset_edges: AssetFlowAssetEdge[];
 }
 
+export interface RuntimeDependencyBlocker {
+  job_id: string;
+  task_id?: string;
+  status: string;
+  runtime: string;
+  ecosystem?: "python" | "R" | string | null;
+  packages: string[];
+  run_id?: string | null;
+  session_id?: string | null;
+  error_code?: string | null;
+  message?: string | null;
+  requested_package?: string | null;
+  attempted_candidates?: string[] | null;
+  fallback_available?: string[] | null;
+  retry_hint?: string | null;
+  dedupe_key?: string | null;
+  error?: string | null;
+}
+
 export interface WorkItem {
   card_id: string;
   title: string;
@@ -153,6 +172,7 @@ export interface WorkItem {
   dependency_attention_count?: number;
   attention_issue_ids?: string[];
   attention_severity?: "info" | "warning" | "error" | string | null;
+  runtime_dependency_blocker?: RuntimeDependencyBlocker | null;
 }
 
 export interface WorkOrder {

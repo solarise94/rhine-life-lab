@@ -97,6 +97,60 @@ export function CardDetailPanel({
             </div>
           </div>
         ) : null}
+        {workItem?.runtime_dependency_blocker?.status === "failed" ? (
+          <div className="meta-block attention-block">
+            <h4>Runtime Dependency Failure</h4>
+            <div className="kv">
+              <div className="attention-detail error">
+                <div className="attention-detail-title">
+                  <span>{workItem.runtime_dependency_blocker.error_code || "dependency_install_failed"}</span>
+                  <span>error</span>
+                </div>
+                <div className="meta-text" style={{ marginBottom: 6 }}>
+                  {workItem.runtime_dependency_blocker.message || "Dependency installation failed."}
+                </div>
+                {workItem.runtime_dependency_blocker.requested_package ? (
+                  <div className="meta-text muted">
+                    Failed package: {workItem.runtime_dependency_blocker.requested_package}
+                  </div>
+                ) : null}
+                {workItem.runtime_dependency_blocker.runtime ? (
+                  <div className="meta-text muted">
+                    Runtime: {workItem.runtime_dependency_blocker.runtime}
+                  </div>
+                ) : null}
+                {workItem.runtime_dependency_blocker.attempted_candidates?.length ? (
+                  <div className="meta-text muted">
+                    {workItem.runtime_dependency_blocker.ecosystem === "R"
+                      ? "Conda name variants tried"
+                      : "Package tried"}
+                    : {workItem.runtime_dependency_blocker.attempted_candidates.join(", ")}
+                  </div>
+                ) : null}
+                {workItem.runtime_dependency_blocker.fallback_available?.length ? (
+                  <div className="meta-text muted">
+                    Fallback available: {workItem.runtime_dependency_blocker.fallback_available.join(", ")}
+                  </div>
+                ) : null}
+                {workItem.runtime_dependency_blocker.retry_hint ? (
+                  <div className="meta-text muted" style={{ marginTop: 4 }}>
+                    Action: {(() => {
+                      const hint = workItem.runtime_dependency_blocker.retry_hint;
+                      if (hint === "do_not_retry_same_conda_request") return "Open runtime detail / edit package list";
+                      if (hint === "manual_preparation_required") return "Mark manually resolved";
+                      if (hint === "manual_runtime_preparation_required") return "Open runtime settings / mark manually resolved";
+                      if (hint === "choose_fallback") return "Try fallback installer only when policy allows it";
+                      if (hint === "retry_allowed_after_runtime_check") return "Retry after checking runtime availability";
+                      if (hint === "inspect_stderr") return "View stderr tail / lazy fetch job detail";
+                      if (hint === "wait_for_existing_dependency_job") return "Wait for existing dependency job";
+                      return hint;
+                    })()}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
         <div className="meta-block">
           <h4>Inputs</h4>
           <div className="kv">

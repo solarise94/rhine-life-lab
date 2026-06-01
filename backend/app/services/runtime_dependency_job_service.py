@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from app.services.background_task_service import BackgroundTaskService
 from app.services.project_event_service import ProjectEventService
 from app.services.project_service import ProjectService
+from app.services.runtime_dependency_state_service import runtime_dependency_failure_details
 from app.services.utils import atomic_write_json, read_json, utc_now
 
 
@@ -155,6 +156,46 @@ class RuntimeDependencyJobService:
             return
         source_payload = job.payload.get("source") if isinstance(job.payload, dict) else {}
         source = source_payload if isinstance(source_payload, dict) else {}
+        payload: dict[str, Any] = {
+            "task_id": job.task_id,
+            "job_status": job.status,
+            "runtime": job.payload.get("runtime"),
+            "packages": job.payload.get("packages"),
+            "manager": job.payload.get("manager"),
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "ok": bool(job.result.get("ok")) if isinstance(job.result, dict) else None,
+        }
+        # Enrich terminal events with normalized failure details
+        if job.status in {"failed", "succeeded"}:
+            try:
+                details = runtime_dependency_failure_details(job)
+                # Merge key failure fields into the event payload
+                for key in (
+                    "error_code",
+                    "message",
+                    "requested_package",
+                    "attempted_candidates",
+                    "fallback_available",
+                    "retry_hint",
+                    "dedupe_key",
+                    "stdout_tail",
+                    "stderr_tail",
+                    "truncated",
+                    "ecosystem",
+                    "resolved_runtime",
+                    "card_id",
+                    "run_id",
+                    "session_id",
+                ):
+                    if key in details:
+                        payload[key] = details[key]
+            except Exception:
+                logger.exception(
+                    "Failed to enrich runtime dependency event: project_id=%s job_id=%s",
+                    job.project_id,
+                    job.job_id,
+                )
         try:
             self.project_event_service.emit(
                 job.project_id,
@@ -164,16 +205,7 @@ class RuntimeDependencyJobService:
                 job_id=job.job_id,
                 task_id=job.task_id,
                 status=job.status,
-                payload={
-                    "task_id": job.task_id,
-                    "job_status": job.status,
-                    "runtime": job.payload.get("runtime"),
-                    "packages": job.payload.get("packages"),
-                    "manager": job.payload.get("manager"),
-                    "started_at": job.started_at,
-                    "finished_at": job.finished_at,
-                    "ok": bool(job.result.get("ok")) if isinstance(job.result, dict) else None,
-                },
+                payload=payload,
             )
         except Exception:
             logger.exception("Failed to emit runtime dependency project event: project_id=%s job_id=%s", job.project_id, job.job_id)
@@ -275,3 +307,36 @@ class RuntimeDependencyJobService:
                 project_id,
                 job_id,
             )
+
+    def mark_job_resolved(
+        self,
+        project_id: str,
+        job_id: str,
+        session_id: str,
+        resolution_message: str,
+    ) -> dict[str, Any]:
+        """Mark a runtime dependency job as manually resolved.
+
+        Adds resolution metadata to the persisted job record and emits a project event.
+        Does not create a new job; updates the existing one in-place.
+        """
+        with self.lock:
+            self._load_project_jobs_locked(project_id)
+            job = self.jobs.get(job_id)
+            if job is None or job.project_id != project_id:
+                raise HTTPException(status_code=404, detail="Runtime dependency job not found")
+            now = utc_now()
+            job.payload["resolution_status"] = "manually_resolved"
+            job.payload["resolved_at"] = now
+            job.payload["resolved_by_session_id"] = session_id
+            job.payload["resolution_message"] = resolution_message
+            self._persist_project_jobs_locked(project_id)
+            self._emit_project_event(job)
+        return {
+            "job_id": job.job_id,
+            "status": job.status,
+            "resolution_status": "manually_resolved",
+            "resolved_at": now,
+            "resolved_by_session_id": session_id,
+            "resolution_message": resolution_message,
+        }

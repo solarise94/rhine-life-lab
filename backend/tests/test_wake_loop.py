@@ -422,7 +422,7 @@ class WakeLoopRegressionTest(unittest.TestCase):
             kind="runtime_dependency_install_failed",
             card_id="card_a",
             status="pending",
-            payload={"coalescing_key": "dep:python:numpy:package_not_found", "coalescing_handled": False},
+            payload={"coalescing_key": "dep:unknown:python:numpy:package_not_found:", "coalescing_handled": False},
         )
         state.items["dep_fail_b"] = WorkboardItemRecord(
             item_id="dep_fail_b",
@@ -430,7 +430,7 @@ class WakeLoopRegressionTest(unittest.TestCase):
             kind="runtime_dependency_install_failed",
             card_id="card_b",
             status="pending",
-            payload={"coalescing_key": "dep:python:numpy:package_not_found", "coalescing_handled": False},
+            payload={"coalescing_key": "dep:unknown:python:numpy:package_not_found:", "coalescing_handled": False},
         )
         service._save_state("test-project", state)
 
@@ -438,7 +438,7 @@ class WakeLoopRegressionTest(unittest.TestCase):
         service.block_workboard_item_for_user("test-project", "dep_fail_a", "session_1", message="needs user")
 
         updated_state = service._load_state("test-project")
-        self.assertIn("dep:python:numpy:package_not_found", updated_state.handled_coalescing_keys)
+        self.assertIn("dep:unknown:python:numpy:package_not_found:", updated_state.handled_coalescing_keys)
         self.assertTrue(updated_state.items["dep_fail_a"].payload.get("coalescing_handled"))
         self.assertTrue(updated_state.items["dep_fail_b"].payload.get("coalescing_handled"))
 
@@ -469,8 +469,8 @@ class WakeLoopRegressionTest(unittest.TestCase):
         dep_jobs_path.write_text(_json.dumps(jobs), encoding="utf-8")
 
         state = BackgroundWorkboardState()
-        # The coalescing_key for this job is dep:python:numpy:package_not_found
-        state.handled_coalescing_keys["dep:python:numpy:package_not_found"] = "2026-01-01T00:00:00Z"
+        # The coalescing_key for this job is dep:unknown:python:numpy:package_not_found:
+        state.handled_coalescing_keys["dep:unknown:python:numpy:package_not_found:"] = "2026-01-01T00:00:00Z"
         service._save_state("test-project", state)
 
         derived = service._derived_items("test-project", state=state)
@@ -482,7 +482,7 @@ class WakeLoopRegressionTest(unittest.TestCase):
         )
         self.assertEqual(
             failed_item.payload.get("coalescing_key"),
-            "dep:python:numpy:package_not_found",
+            "dep:unknown:python:numpy:package_not_found:",
         )
 
     # --- OAA-2 Terminal Settlement Regression Tests ---

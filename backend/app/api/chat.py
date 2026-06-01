@@ -148,6 +148,26 @@ def get_runtime_dependency_job(
     }
 
 
+class MarkRuntimeDependencyResolvedRequest(BaseModel):
+    session_id: str
+    resolution_message: str = "User confirmed the runtime package was installed manually."
+
+
+@router.post("/runtime-dependency-jobs/{job_id}/mark-resolved")
+def mark_runtime_dependency_job_resolved(
+    project_id: str,
+    job_id: str,
+    body: MarkRuntimeDependencyResolvedRequest,
+    runtime_dependency_job_service: RuntimeDependencyJobService = Depends(get_runtime_dependency_job_service),
+) -> dict:
+    return runtime_dependency_job_service.mark_job_resolved(
+        project_id,
+        job_id,
+        session_id=body.session_id,
+        resolution_message=body.resolution_message,
+    )
+
+
 @router.post("/chat-uploads")
 async def upload_chat_file(
     project_id: str,

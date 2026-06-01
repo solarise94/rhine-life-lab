@@ -247,9 +247,29 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           type?: string;
           reason?: string;
           run_id?: string | null;
+          job_status?: string;
+          requested_package?: string;
+          fallback_available?: string[];
+          message?: string;
+          card_id?: string;
         };
         if (payload.type === "heartbeat") {
           return;
+        }
+        // Surface failed dependency install events as a project-level notice.
+        if (
+          payload.reason === "runtime_dependency_job_changed" &&
+          payload.job_status === "failed"
+        ) {
+          const pkg = payload.requested_package || "unknown package";
+          const fallback = payload.fallback_available?.length
+            ? `Fallback available: ${payload.fallback_available.join(", ")}.`
+            : "";
+          const msg = payload.message || "";
+          setNotice(
+            projectId,
+            `Dependency install failed: ${pkg} was not found in configured conda channels. ${fallback} ${msg}`.trim(),
+          );
         }
         const runId = typeof payload.run_id === "string" ? payload.run_id : null;
         scheduleProjectEventRefresh(runId);
@@ -371,9 +391,11 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
 
   useEffect(() => {
     if (!notice) return;
+    // Keep dependency failure notices visible longer so users can read them.
+    const delay = notice.startsWith("Dependency install failed") ? 30_000 : 2_200;
     const timer = window.setTimeout(() => {
       setNotice(projectId, null);
-    }, 2200);
+    }, delay);
     return () => window.clearTimeout(timer);
   }, [notice, projectId, setNotice]);
 

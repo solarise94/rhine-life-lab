@@ -1,8 +1,12 @@
 # Runtime Dependency Resolver Failure Reporting Review
 
-Status: review analysis note.
+Status: refined implementation plan.
 
 Date: 2026-06-01
+
+Last refined: 2026-06-02
+
+Repository note: as of this refinement, this is the highest numbered review document under `docs/`. There is no `docs/42_*` review document yet.
 
 ## Summary
 
@@ -336,67 +340,329 @@ The resolver agent should not run arbitrary shell commands. It should return a p
 
 Backend then decides which actions are allowed automatically.
 
-## Recommended Fix Direction
+## Refined Implementation Plan
 
-### 1. Make Dependency Job Failure A First-Class UI Event
+The fix should be split into two delivery layers:
 
-Enrich `runtime_dependency_job_changed` terminal events with:
+1. **P0 reporting and retry control**: make existing failed jobs visible and stop duplicate impossible retries.
+2. **P1 resolver/installer separation**: add a structured resolution plan before any background installation job is created.
 
+P0 is required for OAA-2 stability. P1 is the longer-term product boundary that prevents conda-only misses from becoming repeated failed jobs.
+
+### P0.1 Normalize Runtime Dependency Failure Details
+
+Add a small backend helper so every consumer receives the same failure shape.
+
+Suggested location:
+
+```text
+backend/app/services/runtime_dependency_state_service.py
+```
+
+Suggested helper:
+
+```python
+def runtime_dependency_failure_details(job: Mapping[str, Any] | Any) -> dict[str, Any]:
+    ...
+```
+
+Do not import `RuntimeDependencyJobService` into `runtime_dependency_state_service.py`. The helper should accept either a persisted job dictionary or a duck-typed in-memory job object to avoid service-layer circular imports.
+
+It should derive:
+
+- `job_id`;
+- `task_id`;
+- `status`;
+- `runtime`;
+- `resolved_runtime`;
+- `ecosystem`;
+- `manager`;
+- `packages`;
+- `card_id`;
+- `run_id`;
+- `session_id`;
+- `ok`;
 - `error_code`;
 - `message`;
 - `requested_package`;
 - `attempted_candidates`;
 - `fallback_available`;
+- `stdout_tail`;
+- `stderr_tail`;
+- `dedupe_key`;
 - `retry_hint`;
-- `card_id`;
-- `run_id`;
-- `dedupe_key`.
+- `created_at`;
+- `started_at`;
+- `finished_at`.
 
-Frontend should react directly to failed dependency jobs:
+`retry_hint` should be deterministic, not prompt-only. Recommended mapping:
 
-- show a persistent project notice or task-card alert;
-- allow expanding job detail;
-- link to the affected card/run;
-- distinguish "still installing" from "terminal failed".
+```text
+package_not_found_in_conda_channels
+  -> do_not_retry_same_conda_request; choose fallback/manual preparation
 
-### 2. Expose Runtime Dependency Blockers In WorkOrder Types
+github_source_install_not_supported / external_source_install_not_supported
+  -> do_not_retry_installer; use explicit environment-preparation workflow
 
-Frontend `WorkItem` should include a typed runtime dependency blocker:
+dependency_install_timeout
+  -> retry_allowed_after_runtime_check
 
-```ts
-runtime_dependency_blocker?: {
-  job_id: string;
-  status: string;
-  runtime: string;
-  packages: string[];
-  result?: {
-    error_code?: string;
-    message?: string;
-    requested_package?: string;
-    attempted_candidates?: string[];
-    fallback_available?: string[];
-  };
-  error?: string;
+dependency_install_start_failed
+  -> manual_runtime_preparation_required; inspect runtime path and environment existence
+
+dependency_install_compilation_failed
+  -> manual_system_dependency_or_runtime_preparation_required
+
+dependency_install_failed
+  -> inspect stderr_tail before retry
+```
+
+This helper prevents drift between project events, work order blockers, workboard items, API responses, and Manager tool results.
+
+`GET /projects/{project_id}/runtime-dependency-jobs/{job_id}` should also reuse this helper for top-level normalized fields while preserving the existing raw `payload`, `result`, and `error` fields for audit compatibility.
+
+### P0.2 Enrich Project Events With Terminal Failure Details
+
+Update:
+
+```text
+backend/app/services/runtime_dependency_job_service.py
+```
+
+`RuntimeDependencyJobService._emit_project_event(...)` should include normalized details when the job is terminal, especially when `status == "failed"`.
+
+Minimum failed event payload:
+
+```json
+{
+  "task_id": "bgtask_...",
+  "job_id": "depjob_...",
+  "job_status": "failed",
+  "runtime": "python_env",
+  "resolved_runtime": "/path/to/env",
+  "ecosystem": "python",
+  "packages": ["pydeseq2"],
+  "manager": "conda",
+  "ok": false,
+  "error_code": "package_not_found_in_conda_channels",
+  "message": "Package pydeseq2 was not found in conda channels.",
+  "requested_package": "pydeseq2",
+  "attempted_candidates": ["pydeseq2"],
+  "fallback_available": ["pip"],
+  "retry_hint": "do_not_retry_same_conda_request",
+  "card_id": "card_...",
+  "run_id": "run_...",
+  "dedupe_key": "dep:python:python_env:pydeseq2:package_not_found_in_conda_channels:pydeseq2",
+  "started_at": "...",
+  "finished_at": "..."
 }
 ```
 
-Then card detail can show the exact failure instead of only:
+Keep payload tails bounded:
 
 ```text
-runtime_dependency_repair_failed
+stdout_tail <= 2KB or 50 lines, whichever comes first
+stderr_tail <= 2KB or 50 lines, whichever comes first
 ```
 
-### 3. Add Failure Deduping / Cooling
+If either tail is truncated, include:
 
-Before submitting a dependency install job, check recent terminal failures for the same logical request.
+```json
+{
+  "truncated": true,
+  "full_log_job_id": "depjob_..."
+}
+```
+
+Do not emit full logs into project events. The full detail endpoint remains the audit path and should reuse the existing project read authorization model.
+
+### P0.3 Expose Runtime Dependency Blockers In Work Orders
+
+Backend already builds `runtime_dependency_blocker` in `FlowService`, but the payload is too thin and frontend types ignore it.
+
+Update:
+
+```text
+backend/app/services/runtime_dependency_state_service.py
+backend/app/services/flow_service.py
+frontend/lib/types.ts
+frontend/components/detail/CardDetailPanel.tsx
+```
+
+Backend `runtime_dependency_blocker` should include normalized failure details:
+
+```json
+{
+  "job_id": "depjob_...",
+  "task_id": "bgtask_...",
+  "status": "failed",
+  "runtime": "python_env",
+  "ecosystem": "python",
+  "packages": ["pydeseq2"],
+  "run_id": "run_...",
+  "session_id": "session_...",
+  "error_code": "package_not_found_in_conda_channels",
+  "message": "Package pydeseq2 was not found in conda channels.",
+  "requested_package": "pydeseq2",
+  "attempted_candidates": ["pydeseq2"],
+  "fallback_available": ["pip"],
+  "retry_hint": "do_not_retry_same_conda_request",
+  "dedupe_key": "dep:python:python_env:pydeseq2:package_not_found_in_conda_channels:pydeseq2"
+}
+```
+
+Frontend `WorkItem` should add:
+
+```ts
+export interface RuntimeDependencyBlocker {
+  job_id: string;
+  task_id?: string;
+  status: string;
+  runtime: string;
+  ecosystem?: "python" | "R" | string | null;
+  packages: string[];
+  run_id?: string | null;
+  session_id?: string | null;
+  error_code?: string | null;
+  message?: string | null;
+  requested_package?: string | null;
+  attempted_candidates?: string[] | null;
+  fallback_available?: string[] | null;
+  retry_hint?: string | null;
+  dedupe_key?: string | null;
+  error?: string | null;
+}
+```
+
+`CardDetailPanel` should display a compact dependency failure block when `workItem.runtime_dependency_blocker?.status === "failed"`:
+
+- failed package;
+- runtime;
+- attempted candidates;
+- fallback families;
+- retry hint;
+- link/action to expand job detail.
+
+For display copy:
+
+- Python `attempted_candidates` can be labeled "Package tried".
+- R `attempted_candidates` should be labeled "Conda name variants tried" because values such as `r-limma` and `bioconductor-limma` are backend-generated conda candidates, not necessarily user-requested package names.
+
+The UI should map retry hints to concrete actions:
+
+| `retry_hint` | UI action |
+| --- | --- |
+| `do_not_retry_same_conda_request` | Open runtime detail / edit package list |
+| `manual_preparation_required` | Mark manually resolved |
+| `manual_runtime_preparation_required` | Open runtime settings / mark manually resolved |
+| `choose_fallback` | Try fallback installer only when P1 fallback policy allows it |
+| `retry_allowed_after_runtime_check` | Retry after checking runtime availability |
+| `inspect_stderr` | View stderr tail / lazy fetch job detail |
+
+The generic `block_reasons` row should remain, but it must not be the only user-facing explanation.
+
+### P0.4 Add A Frontend Project-Level Failure Notice
+
+Update:
+
+```text
+frontend/components/layout/ProjectWorkspace.tsx
+```
+
+When an event arrives with:
+
+```text
+reason == "runtime_dependency_job_changed"
+payload.job_status == "failed"
+```
+
+the frontend should:
+
+1. refetch project/work order as it does today;
+2. show a persistent notice such as:
+
+```text
+Dependency install failed: pydeseq2 was not found in configured conda channels. Fallback available: pip.
+```
+
+3. select or link the affected card if `card_id` is present;
+4. allow opening job detail through `getRuntimeDependencyJob(projectId, jobId)`.
+
+Use event payload for the immediate notice. Fetch the detail endpoint only when the user expands details, to avoid excessive requests on high-frequency project events.
+
+### P0.5 Enforce Duplicate Failure Cooling Before Job Submission
+
+Update:
+
+```text
+backend/app/services/runtime_dependency_job_service.py
+backend/app/services/manager_blueprint_tools.py
+```
+
+Cooling must happen before `RuntimeDependencyJobService.submit(...)` creates a new background task.
+
+Important implementation detail: current `RuntimeDependencyJobService.submit(...)` creates a `BackgroundTask` immediately. Therefore duplicate detection cannot be added only after entering `submit(...)` unless `submit(...)` is refactored into a preflight path. The safer first implementation is:
+
+```text
+ManagerBlueprintTools.install_runtime_dependencies
+  -> validate payload
+  -> runtime_dependency_job_service.find_duplicate_terminal_failure(...)
+  -> return duplicate response OR call submit(...)
+```
+
+`RuntimeDependencyJobService` can own the duplicate lookup helper, but job creation must remain after the duplicate check.
+
+Cooling scope is project-scoped, not session-scoped. If any session in the same project has already produced the same non-retryable failure for the same runtime/package set, later sessions should also be cooled.
+
+The lookup must read persisted `chat/runtime_dependency_jobs.json`, not only the in-memory `self.jobs` table. `self.jobs` is reconstructed after backend restart, so a restart must not reset duplicate failure cooling.
+
+Also add in-flight dedupe before terminal failure cooling:
+
+```text
+status in {"queued", "launching", "running", "waiting"}
+and same (project_id, ecosystem, runtime, normalized_packages)
+  -> duplicate_dependency_resolution_in_progress
+```
+
+In-flight duplicate response:
+
+```json
+{
+  "ok": false,
+  "background": false,
+  "error_code": "duplicate_dependency_resolution_in_progress",
+  "prior_job_id": "depjob_...",
+  "message": "The same dependency installation is already running for this runtime.",
+  "retry_hint": "wait_for_existing_dependency_job"
+}
+```
+
+This is distinct from `runtime_locks`: the existing lock serializes execution after job creation, but it does not prevent multiple duplicate background tasks from being created.
 
 Suggested key:
 
 ```text
-ecosystem + runtime + normalized package set + error_code + requested_package
+dep:{ecosystem}:{runtime}:{normalized_packages}:{error_code}:{requested_package}
 ```
 
-If the same failure exists, return a non-background response:
+Normalization rules:
+
+- trim package names;
+- lower-case Python package names for key comparison;
+- keep R package names case-sensitive for display but lower-case in the key;
+- remove duplicates while preserving request order for display;
+- sort the normalized package set for the key;
+- include `requested_package` when a prior resolver identified the exact failing member;
+- include `error_code`, because timeout and package-not-found should not cool each other.
+
+Admission behavior:
+
+1. Validate payload.
+2. Compute a request key without `error_code`.
+3. Load recent terminal jobs for the same project/runtime/ecosystem/package set.
+4. If a failed job has a deterministic non-retryable error code, return a non-background duplicate response.
+
+Duplicate response:
 
 ```json
 {
@@ -404,64 +670,428 @@ If the same failure exists, return a non-background response:
   "background": false,
   "error_code": "duplicate_dependency_resolution_failure",
   "prior_job_id": "depjob_...",
+  "prior_error_code": "package_not_found_in_conda_channels",
+  "dedupe_key": "dep:python:python_env:pydeseq2:package_not_found_in_conda_channels:pydeseq2",
   "message": "The same dependency request already failed for this runtime.",
-  "retry_hint": "Do not retry conda install; choose fallback or ask user for manual runtime preparation."
+  "retry_hint": "do_not_retry_same_conda_request; modify package list, change runtime, or mark manually resolved",
+  "fallback_available": ["pip"]
 }
 ```
 
-This directly addresses the OAA-2 repeated `pydeseq2` failures.
+The duplicate response should be visible in the conversation audit trail. Recommended behavior:
 
-### 4. Separate Resolution From Installation
+- return the structured non-background tool result to Manager;
+- have Manager summarize it in the current assistant turn;
+- persist the assistant turn normally as a chat session message;
+- optionally add a timeline item with `kind="tool"` and `status="error"` for the rejected install attempt.
 
-Current install flow combines:
+Do not create a background task or dependency job for the duplicate response.
 
-```text
-validate payload -> resolve package names -> install
+Add structured observability on every dedupe rejection:
+
+```python
+logger.info(
+    "dep_cooling_rejected",
+    extra={
+        "dedupe_key": dedupe_key,
+        "error_code": error_code,
+        "kind": "terminal",  # or "in_flight"
+        "project_id": project_id,
+        "runtime": runtime,
+    },
+)
 ```
 
-Split it into:
+This is needed to identify hot packages, dominant error codes, and repeated project/runtime failure patterns after P0 lands.
+
+Do not cool these cases by default:
+
+- `dependency_install_timeout`;
+- backend interruption/restart failures;
+- user explicitly changes package list;
+- user explicitly changes runtime;
+- user explicitly chooses a different approved installer plan after P1 exists.
+
+This directly addresses OAA-2 repeated `pydeseq2` and R package misses.
+
+### P0.6 Keep Workboard Coalescing Aligned With Job Cooling
+
+Doc 39 introduced dependency failure coalescing at the workboard layer. Doc 41 should use the same semantic key shape where possible.
+
+Expected alignment:
 
 ```text
-resolve_runtime_dependencies -> install_runtime_dependencies
+workboard payload.coalescing_key == runtime dependency failure dedupe key or a stable prefix of it
 ```
 
-`resolve_runtime_dependencies` should be allowed to return:
+If the workboard key remains less detailed, it should at least include:
 
-- fully resolvable conda plan;
-- partial plan;
-- fallback plan;
-- manual preparation required;
-- source install unsupported;
-- ambiguous package name.
+- ecosystem;
+- runtime;
+- normalized package set;
+- error_code;
+- requested_package.
 
-`install_runtime_dependencies` should execute only a concrete approved plan.
+This avoids a split-brain condition where backend job admission suppresses retries but workboard still treats the same failure as new wake fuel.
 
-This reduces failed background jobs caused by predictable resolver misses.
+### P0.7 Define How Failed Dependency Blockers Are Cleared
 
-### 5. Keep Manager As Orchestrator
+`FlowService` treats failed runtime dependency jobs as blockers. That is correct while the dependency is unresolved, but the design needs an explicit unblock path.
 
-Manager should still decide when dependency repair is needed and when to ask the user.
+Accepted clearing conditions:
 
-But package ecosystem decisions should move out of Manager prompt logic and into a structured resolver layer.
+- a newer dependency job for the same card/runtime succeeds;
+- the card is revised to no longer require that runtime/package set;
+- the user or Manager records an explicit manual-preparation acknowledgement after the runtime has been fixed outside the installer.
 
-Recommended Manager behavior after resolver failure:
+Do not clear a blocker merely because the user dismisses a frontend notice. Dismissal is UI-only. It must not affect scheduling.
+
+Recommended backend action for manual preparation:
 
 ```text
-1. read structured failure;
-2. do not retry identical install;
-3. if controlled fallback exists and policy allows it, request fallback plan;
-4. otherwise tell user exactly what runtime package/manual setup is needed.
+POST /projects/{project_id}/runtime-dependency-jobs/{job_id}/mark-resolved
 ```
+
+or an equivalent Manager tool:
+
+```text
+mark_runtime_dependency_prepared
+```
+
+The persisted record should keep the original failed result and add:
+
+```json
+{
+  "resolution_status": "manually_resolved",
+  "resolved_at": "...",
+  "resolved_by_session_id": "session_...",
+  "resolution_message": "User confirmed the runtime package was installed manually."
+}
+```
+
+`dependency_blockers_by_card(...)` should ignore failed jobs with `resolution_status == "manually_resolved"` only if no newer failed job exists for the same card/runtime/package set.
+
+Permission model:
+
+- request body must include `session_id`;
+- only the auto owner session may mark a blocker resolved while auto is enabled for that project;
+- btw sessions should receive `409` unless an explicit admin path is added later;
+- direct REST calls should reuse project write authorization and still record `resolved_by_session_id`.
+
+Auto mode linkage:
+
+- after a successful mark-resolved, if auto is enabled and `owner_session_id` is present, call `ManagerAutoService.evaluate_workboard_and_maybe_signal(...)`;
+- this lets auto continue after the user or Manager confirms manual runtime preparation.
+
+Chat audit:
+
+- mark-resolved should also append a chat session message in the owner session;
+- use the same operational-message style as `/auto` command acknowledgements;
+- recommended timeline item: `kind="command"`, `status="done"`, content summarizing the job id, package/runtime, and manual-resolution note;
+- this ensures later Manager turns can see that the blocker was manually resolved without inferring it only from hidden job metadata.
+
+This avoids permanent blocking after legitimate manual runtime preparation while preserving the original failure audit trail.
+
+### P1.1 Introduce A Resolver Plan Model
+
+Add a deterministic resolver service before introducing any optional agent:
+
+```text
+backend/app/services/runtime_dependency_resolver_service.py
+```
+
+Core API:
+
+```python
+class RuntimeDependencyResolverService:
+    def resolve(self, project_id: str, payload: dict[str, Any]) -> RuntimeDependencyResolutionPlan:
+        ...
+```
+
+Plan shape:
+
+```json
+{
+  "ok": false,
+  "ecosystem": "R",
+  "runtime": "R_env",
+  "packages": [
+    {
+      "name": "limma",
+      "normalized_name": "limma",
+      "classification": "bioconductor",
+      "conda_candidates": ["r-limma", "bioconductor-limma"],
+      "conda_match": null,
+      "fallback_available": ["bioconductor"],
+      "status": "fallback_required",
+      "message": "Not found in configured conda channels."
+    },
+    {
+      "name": "ggplot2",
+      "normalized_name": "ggplot2",
+      "classification": "cran",
+      "conda_candidates": ["r-ggplot2", "bioconductor-ggplot2"],
+      "conda_match": "r-ggplot2",
+      "fallback_available": ["cran"],
+      "status": "conda_installable"
+    }
+  ],
+  "recommended_actions": [
+    {
+      "kind": "install",
+      "installer": "conda",
+      "packages": ["r-ggplot2"]
+    },
+    {
+      "kind": "manual_preparation_required",
+      "packages": ["limma"],
+      "reason": "package_not_found_in_configured_channels"
+    }
+  ],
+  "error_code": "partial_resolution_requires_manual_preparation",
+  "message": "Some packages are not installable through the configured conda channels."
+}
+```
+
+The initial resolver can stay conservative:
+
+- it may only probe configured conda channels;
+- it may classify fallback families as guidance, not execution;
+- it must inspect every package in the request before returning failure;
+- it must not run arbitrary shell commands beyond existing bounded package search commands.
+
+The resolver should cache package probe results in memory with a short TTL to avoid repeated slow `mamba repoquery search` / `conda search --json` calls:
+
+```text
+cache key: ecosystem + channel_set + package
+default TTL: 1 hour
+```
+
+The cache can be in-memory only; losing it on backend restart is acceptable.
+
+Resolver statuses must map to P0 normalized fields so project events, workboard, UI, and Manager do not need a second vocabulary:
+
+| Resolver status | P0 `error_code` | P0 `retry_hint` |
+| --- | --- | --- |
+| `conda_installable` | none | none |
+| `fallback_required` | `package_not_found_in_conda_channels` | `choose_fallback` |
+| `manual_preparation_required` | `manual_preparation_required` | `manual_preparation_required` |
+| `source_install_required` | `github_source_install_not_supported` or `external_source_install_not_supported` | `do_not_retry_installer` |
+| `runtime_missing` | `dependency_install_start_failed` | `manual_runtime_preparation_required` |
+| `unknown` | `dependency_resolution_unknown` | `inspect_stderr` |
+
+### P1.2 Split Manager Tools Into Resolve And Install
+
+Current tool:
+
+```text
+install_runtime_dependencies
+```
+
+should remain for compatibility, but internally it should call the resolver first.
+
+Add a new Manager-visible tool:
+
+```text
+resolve_runtime_dependencies
+```
+
+Behavior:
+
+- returns the plan without creating a background job;
+- includes `dedupe_key` and prior failure if applicable;
+- tells Manager whether install is safe, partial, blocked, or manual.
+
+Updated `install_runtime_dependencies` behavior:
+
+1. validate payload;
+2. check duplicate cooling;
+3. resolve plan;
+4. if plan is fully installable through the currently allowed backend policy, submit a background job;
+5. if plan is partial/manual/fallback-only, return a non-background structured failure.
+
+This preserves backend control over actual installation and avoids turning Manager into an installer.
+
+Manager-visible plan summary format:
+
+```json
+{
+  "ok": false,
+  "tool": "resolve_runtime_dependencies",
+  "runtime": "R_env",
+  "ecosystem": "R",
+  "status": "partial_resolution_requires_manual_preparation",
+  "message": "Some packages are not installable through the configured conda channels.",
+  "installable": [
+    {"name": "ggplot2", "installer": "conda", "candidate": "r-ggplot2"}
+  ],
+  "blocked": [
+    {
+      "name": "limma",
+      "reason": "package_not_found_in_conda_channels",
+      "attempted_candidates": ["r-limma", "bioconductor-limma"],
+      "fallback_available": ["bioconductor"],
+      "recommended_action": "manual_preparation_or_policy_approved_fallback"
+    }
+  ],
+  "recommended_actions": [
+    "Do not call install_runtime_dependencies for blocked packages.",
+    "Ask for manual runtime preparation or an approved fallback policy."
+  ]
+}
+```
+
+The summary should front-load `status`, `blocked`, and `recommended_actions` so Manager can follow the resolver result without reinterpreting raw package probe details.
+
+### P1.3 Controlled Fallback Policy
+
+Do not automatically execute pip/CRAN/Bioconductor just because `fallback_available` exists.
+
+Add a policy switch before enabling fallback execution:
+
+```text
+runtime_dependency_fallback_policy = "report_only" | "allow_safe_registry_install"
+```
+
+Storage:
+
+- default value should live in backend runtime config/app config;
+- deploy may inject it from backend env;
+- per-project override can later live under `graph.metadata.dependency_policy`;
+- P1.3 should initially implement only deploy/runtime-level policy, leaving per-project override for a later iteration.
+
+Initial default:
+
+```text
+report_only
+```
+
+When set to `report_only`, fallback information is surfaced to Manager and frontend, but no fallback installer is executed.
+
+When set to `allow_safe_registry_install`, only structured registry installs are allowed:
+
+- `pip install <validated package>` for Python registry packages;
+- `install.packages(...)` for CRAN;
+- `BiocManager::install(...)` for Bioconductor.
+
+Still reject:
+
+- GitHub URLs;
+- arbitrary tarballs;
+- shell snippets;
+- system package manager commands;
+- package specs containing unsupported flags.
+
+### P1.4 Manager-Agent Prompt And Tool Result Contract
+
+Update:
+
+```text
+manager-agent/src/server.js
+```
+
+Manager must treat these backend responses as hard control signals:
+
+- `duplicate_dependency_resolution_failure`;
+- `partial_resolution_requires_manual_preparation`;
+- `package_not_found_in_conda_channels`;
+- `github_source_install_not_supported`;
+- `external_source_install_not_supported`.
+
+Required behavior:
+
+```text
+Do not retry install_runtime_dependencies with the same package/runtime.
+If fallback is only report_available, tell the user the exact manual preparation or ask for approval of an explicit fallback policy.
+If resolver returns a concrete approved install action, run install_runtime_dependencies once, then stop at the async boundary.
+```
+
+Prompt hints are not sufficient by themselves; backend duplicate cooling remains mandatory.
+
+## Implementation Order
+
+1. Add normalized failure detail helper and unit tests.
+2. Enrich `runtime_dependency_job_changed` project events.
+3. Expand backend work order `runtime_dependency_blocker` payload.
+4. Add frontend `RuntimeDependencyBlocker` type and card detail rendering.
+5. Add project-level failed dependency notice and lazy job-detail expansion.
+6. Add in-flight duplicate suppression before background task creation.
+7. Add terminal failure cooling from persisted job history before background task creation.
+8. Align workboard dependency coalescing key with the job dedupe key.
+9. Add explicit failed dependency blocker clearing semantics and auto wake re-evaluation.
+10. Add resolver plan model and deterministic resolver service.
+11. Add `resolve_runtime_dependencies` tool and make `install_runtime_dependencies` resolver-first.
+12. Add optional fallback policy switch, defaulting to `report_only`.
+
+Steps 1-9 are the OAA-2 stabilization patch. Steps 10-12 can be a follow-up PR.
+
+## Test Plan
+
+### Backend Unit Tests
+
+Add tests for:
+
+- normalized failure detail extraction from persisted job dict;
+- normalized failure detail extraction from in-memory `RuntimeDependencyJob`;
+- retry hint mapping for `package_not_found_in_conda_channels`;
+- retry hint mapping for source-install unsupported errors;
+- retry hint mapping for `dependency_install_start_failed`;
+- dedupe key normalization for package order and duplicate package names;
+- in-flight dedupe key normalization without terminal `error_code`;
+- no cooling for timeout/interrupted failures.
+
+### Backend Integration Tests
+
+Add tests for:
+
+- failed dependency job event includes `error_code`, `message`, `requested_package`, `attempted_candidates`, `fallback_available`, `retry_hint`, and `dedupe_key`;
+- `FlowService.get_work_order(...)` includes a full `runtime_dependency_blocker` for failed jobs;
+- duplicate in-flight same runtime/package request returns `duplicate_dependency_resolution_in_progress` and does not create a background task;
+- repeated same `pydeseq2` conda miss returns `duplicate_dependency_resolution_failure` and does not create a new background task;
+- backend restart does not reset terminal failure cooling because the lookup reads persisted `runtime_dependency_jobs.json`;
+- same package set on a different runtime is not deduped;
+- same runtime with a changed package set is not deduped;
+- same package set from a different session in the same project is deduped because cooling is project-scoped;
+- project event `stdout_tail` / `stderr_tail` are truncated to the documented limit and include `truncated` metadata when needed;
+- workboard `runtime_dependency_install_failed` item uses a coalescing key aligned with backend dedupe;
+- failed dependency blocker is cleared by a newer successful job for the same card/runtime;
+- failed dependency blocker is cleared by explicit manual-resolution metadata but not by frontend notice dismissal.
+- mark-resolved from a btw session is rejected while auto is enabled for another owner session;
+- mark-resolved triggers workboard evaluation when auto is enabled and an owner session exists.
+
+### Frontend Tests Or Build Checks
+
+Add coverage where the project currently supports it:
+
+- `WorkItem` accepts `runtime_dependency_blocker`;
+- card detail renders failed package, attempted candidates, fallback families, and retry hint;
+- card detail maps retry hints to concrete actions, including mark manually resolved;
+- project event handler shows a dependency failure notice for failed terminal events;
+- job-detail expansion uses the detail endpoint and does not load full logs from project events;
+- `npm run build` passes.
+
+### Manager-Agent Checks
+
+Add or update checks for:
+
+- `install_runtime_dependencies` duplicate failure response is summarized as non-retryable;
+- `duplicate_dependency_resolution_in_progress` is summarized as wait-for-existing-job, not as a new failure;
+- Manager does not call status polling immediately after starting a background dependency job;
+- Manager does not retry identical package/runtime after duplicate failure response.
 
 ## Acceptance Criteria For Future Fix
 
-1. A failed dependency job emits a project event containing `error_code`, `message`, `requested_package`, `attempted_candidates`, and `fallback_available`.
+1. A failed dependency job emits a project event containing `error_code`, `message`, `requested_package`, `attempted_candidates`, `fallback_available`, `retry_hint`, and `dedupe_key`.
 2. Frontend shows a clear dependency failure report without requiring the user to ask Manager.
-3. A card blocked by a failed dependency repair shows the exact failed job and package in card detail.
-4. Repeating the same impossible conda request does not create another background job.
-5. Manager receives a structured "do not retry, choose fallback/manual preparation" response for duplicate terminal failures.
-6. Resolver can classify a package list into installable, fallback-required, and manual-required groups before launching a background install.
-7. The installer remains backend-controlled and does not become arbitrary shell execution by Manager or an agent.
+3. A card blocked by a failed dependency repair shows the exact failed job, failed package, attempted candidates, and fallback families in card detail.
+4. Repeating the same in-flight dependency request returns `duplicate_dependency_resolution_in_progress` and does not create another background task.
+5. Repeating the same impossible conda request returns `duplicate_dependency_resolution_failure` and does not create another background task or dependency job, even after backend restart.
+6. Manager receives duplicate responses and treats in-flight duplicates as wait states and terminal duplicates as non-retryable failures.
+7. Workboard dependency failure coalescing and backend dependency job cooling use compatible semantic keys.
+8. A failed runtime dependency blocker has an auditable clearing path after a newer success, card revision, or explicit manual-preparation acknowledgement.
+9. Manual-resolution acknowledgement enforces session ownership and triggers auto workboard evaluation when auto is enabled.
+10. Resolver can classify a package list into installable, fallback-required, and manual-required groups before launching a background install.
+11. The installer remains backend-controlled and does not become arbitrary shell execution by Manager or an agent.
 
 ## Conclusion
 

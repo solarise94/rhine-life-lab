@@ -764,13 +764,15 @@ class BackgroundWorkboardService:
     @staticmethod
     def _coalescing_key_for_dependency_item(result: dict[str, Any], source: dict[str, Any]) -> str:
         runtime = str(source.get("runtime") or result.get("runtime") or "unknown")
+        ecosystem = str(source.get("ecosystem") or result.get("ecosystem") or "unknown")
         packages = source.get("packages")
         if isinstance(packages, list):
             pkg_str = ",".join(sorted(str(p) for p in packages))
         else:
             pkg_str = str(packages or "")
         error_code = str(result.get("error_code") or result.get("reason_code") or "unknown")
-        return f"dep:{runtime}:{pkg_str}:{error_code}"
+        requested_package = str(result.get("requested_package") or "")
+        return f"dep:{ecosystem}:{runtime}:{pkg_str}:{error_code}:{requested_package}"
 
     @staticmethod
     def _parallel_group_for_card(parallel_batches: Any, card_id: str) -> str | None:

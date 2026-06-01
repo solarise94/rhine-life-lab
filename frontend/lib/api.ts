@@ -467,6 +467,22 @@ export const api = {
       stderr_tail?: string | null;
     }>(`/projects/${projectId}/runtime-dependency-jobs/${jobId}`);
   },
+  markRuntimeDependencyJobResolved(projectId: string, jobId: string, sessionId: string, resolutionMessage?: string) {
+    return request<{
+      job_id: string;
+      status: string;
+      resolution_status: string;
+      resolved_at: string;
+      resolved_by_session_id: string;
+      resolution_message: string;
+    }>(`/projects/${projectId}/runtime-dependency-jobs/${jobId}/mark-resolved`, {
+      method: "POST",
+      body: JSON.stringify({
+        session_id: sessionId,
+        resolution_message: resolutionMessage || "User confirmed the runtime package was installed manually.",
+      }),
+    });
+  },
   acceptProposal(projectId: string, proposalId: string, sessionId?: string | null) {
     return request<{ proposal: Proposal; apply_result: unknown; snapshot: ProjectSnapshot }>(
       `/projects/${projectId}/proposals/${proposalId}/accept`,
