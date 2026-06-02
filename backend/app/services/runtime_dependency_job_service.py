@@ -227,10 +227,15 @@ class RuntimeDependencyJobService:
                 existing = self.jobs.get(job_id)
                 if existing is not None and existing.project_id == project_id:
                     continue
+                payload = dict(item.get("payload") or {})
+                # Restore resolution fields from top-level (written by _persist_project_jobs_locked)
+                for key in ("resolution_status", "resolved_at", "resolved_by_session_id", "resolution_message"):
+                    if key in item and item[key] is not None and key not in payload:
+                        payload[key] = item[key]
                 job = RuntimeDependencyJob(
                     job_id=job_id,
                     project_id=str(item.get("project_id") or project_id),
-                    payload=dict(item.get("payload") or {}),
+                    payload=payload,
                     status=str(item.get("status") or "failed"),
                     task_id=str(item.get("task_id") or f"bgtask_{job_id}"),
                     result=dict(item["result"]) if isinstance(item.get("result"), dict) else None,
@@ -278,6 +283,10 @@ class RuntimeDependencyJobService:
                     "created_at": job.created_at,
                     "started_at": job.started_at,
                     "finished_at": job.finished_at,
+                    "resolution_status": job.payload.get("resolution_status"),
+                    "resolved_at": job.payload.get("resolved_at"),
+                    "resolved_by_session_id": job.payload.get("resolved_by_session_id"),
+                    "resolution_message": job.payload.get("resolution_message"),
                 }
                 for job in project_jobs
             ],

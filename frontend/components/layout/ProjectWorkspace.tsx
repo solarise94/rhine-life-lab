@@ -243,35 +243,39 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
       };
       source.onmessage = (event) => {
         if (!event.data) return;
-        const payload = JSON.parse(event.data) as {
+        const raw = JSON.parse(event.data) as {
           type?: string;
           reason?: string;
           run_id?: string | null;
           job_status?: string;
-          requested_package?: string;
-          fallback_available?: string[];
-          message?: string;
-          card_id?: string;
+          payload?: {
+            requested_package?: string;
+            fallback_available?: string[];
+            message?: string;
+            card_id?: string;
+          };
         };
-        if (payload.type === "heartbeat") {
+        if (raw.type === "heartbeat") {
           return;
         }
         // Surface failed dependency install events as a project-level notice.
+        // The enriched failure fields live inside the nested payload object.
         if (
-          payload.reason === "runtime_dependency_job_changed" &&
-          payload.job_status === "failed"
+          raw.reason === "runtime_dependency_job_changed" &&
+          raw.job_status === "failed"
         ) {
-          const pkg = payload.requested_package || "unknown package";
-          const fallback = payload.fallback_available?.length
-            ? `Fallback available: ${payload.fallback_available.join(", ")}.`
+          const eventPayload = raw.payload || {};
+          const pkg = eventPayload.requested_package || "unknown package";
+          const fallback = eventPayload.fallback_available?.length
+            ? `Fallback available: ${eventPayload.fallback_available.join(", ")}.`
             : "";
-          const msg = payload.message || "";
+          const msg = eventPayload.message || "";
           setNotice(
             projectId,
             `Dependency install failed: ${pkg} was not found in configured conda channels. ${fallback} ${msg}`.trim(),
           );
         }
-        const runId = typeof payload.run_id === "string" ? payload.run_id : null;
+        const runId = typeof raw.run_id === "string" ? raw.run_id : null;
         scheduleProjectEventRefresh(runId);
       };
       source.onerror = () => {

@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app.api.deps import (
     get_chat_job_service,
+    get_chat_session_service,
     get_manager_auto_service,
     get_manager_service,
     get_patch_apply_service,
@@ -14,10 +15,11 @@ from app.api.deps import (
     get_runtime_dependency_job_service,
     get_manager_command_service,
 )
-from app.models.chat import ChatRequest
+from app.models.chat import ChatRequest, ChatSessionMessage, ChatSessionMessageTimelineItem
 from app.models.graph import Asset
 from app.models.patches import GraphPatch
 from app.services.chat_job_service import ChatJobService
+from app.services.chat_session_service import ChatSessionService
 from app.services.manager_auto_service import ManagerAutoService
 from app.services.manager_planner import ManagerPlanningError
 from app.services.manager_service import ManagerService
@@ -25,6 +27,7 @@ from app.services.patch_apply import PatchApplyService
 from app.services.project_service import ProjectService
 from app.services.provider_errors import ProviderAPIError
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
+from app.services.runtime_dependency_state_service import runtime_dependency_failure_details
 from app.services.utils import parse_slash_command, sha256_file, utc_now
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["chat"])
@@ -127,24 +130,14 @@ def get_runtime_dependency_job(
     job = runtime_dependency_job_service.get_for_project(project_id, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Runtime dependency job not found")
-    result = job.result or {}
+    # Return normalized failure details for consistent shape with events and work orders.
+    details = runtime_dependency_failure_details(job)
+    # Preserve raw payload/result/error for audit compatibility.
     return {
-        "job_id": job.job_id,
-        "status": job.status,
-        "created_at": job.created_at,
-        "started_at": job.started_at,
-        "finished_at": job.finished_at,
+        **details,
         "payload": job.payload,
-        "result": result or None,
+        "result": job.result,
         "error": job.error,
-        "ok": result.get("ok") if result else None,
-        "message": result.get("message") if result else None,
-        "runtime": result.get("runtime") if result else job.payload.get("runtime"),
-        "resolved_runtime": result.get("resolved_runtime") if result else None,
-        "packages": result.get("packages") if result else job.payload.get("packages"),
-        "manager": result.get("manager") if result else job.payload.get("manager"),
-        "stdout_tail": result.get("stdout_tail") if result else None,
-        "stderr_tail": result.get("stderr_tail") if result else None,
     }
 
 
@@ -159,13 +152,66 @@ def mark_runtime_dependency_job_resolved(
     job_id: str,
     body: MarkRuntimeDependencyResolvedRequest,
     runtime_dependency_job_service: RuntimeDependencyJobService = Depends(get_runtime_dependency_job_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+    chat_session_service: ChatSessionService = Depends(get_chat_session_service),
 ) -> dict:
-    return runtime_dependency_job_service.mark_job_resolved(
+    # Owner session guard: reject btw session while auto is enabled for another owner.
+    auto_state = manager_auto_service.get_state(project_id)
+    if auto_state.enabled and auto_state.owner_session_id and auto_state.owner_session_id != body.session_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Another session owns auto mode for this project. Only the owner session may mark dependency blockers resolved.",
+        )
+
+    result = runtime_dependency_job_service.mark_job_resolved(
         project_id,
         job_id,
         session_id=body.session_id,
         resolution_message=body.resolution_message,
     )
+
+    # Chat audit: append an operational message in the owner session.
+    audit_session_id = auto_state.owner_session_id or body.session_id
+    try:
+        chat_session_service.append_messages(
+            project_id,
+            audit_session_id,
+            messages=[
+                ChatSessionMessage(
+                    id=f"dep_resolved_{job_id}_{utc_now()}",
+                    role="manager",
+                    content=(
+                        f"Marked runtime dependency job {job_id} as manually resolved. "
+                        f"{body.resolution_message}"
+                    ),
+                    state="done",
+                    timeline=[
+                        ChatSessionMessageTimelineItem(
+                            id=f"dep_resolved_timeline_{job_id}_{utc_now()}",
+                            kind="command",
+                            content=f"mark-resolved {job_id}",
+                            status="done",
+                        ),
+                    ],
+                ),
+            ],
+        )
+    except Exception:
+        # Non-blocking: chat audit failure should not fail the resolution.
+        pass
+
+    # Auto wake: if auto is enabled and owner session exists, re-evaluate workboard.
+    if auto_state.enabled and auto_state.owner_session_id:
+        try:
+            manager_auto_service.evaluate_workboard_and_maybe_signal(
+                project_id,
+                auto_state.owner_session_id,
+            )
+        except Exception:
+            # Non-blocking: evaluation failure should not fail the resolution.
+            pass
+
+    return result
 
 
 @router.post("/chat-uploads")

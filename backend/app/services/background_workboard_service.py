@@ -16,7 +16,7 @@ from app.services.background_task_service import BackgroundTaskService
 from app.services.flow_service import FlowService
 from app.services.project_service import ProjectService
 from app.services.runtime_dependency_state_service import ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES
-from app.services.runtime_dependency_state_service import dependency_blockers_by_card
+from app.services.runtime_dependency_state_service import compute_dedupe_key, dependency_blockers_by_card
 from app.services.utils import atomic_write_json, read_json, utc_now
 
 
@@ -767,12 +767,18 @@ class BackgroundWorkboardService:
         ecosystem = str(source.get("ecosystem") or result.get("ecosystem") or "unknown")
         packages = source.get("packages")
         if isinstance(packages, list):
-            pkg_str = ",".join(sorted(str(p) for p in packages))
+            packages = [str(p) for p in packages]
         else:
-            pkg_str = str(packages or "")
-        error_code = str(result.get("error_code") or result.get("reason_code") or "unknown")
+            packages = [str(packages)] if packages else []
+        error_code = str(result.get("error_code") or result.get("reason_code") or "")
         requested_package = str(result.get("requested_package") or "")
-        return f"dep:{ecosystem}:{runtime}:{pkg_str}:{error_code}:{requested_package}"
+        return compute_dedupe_key(
+            ecosystem,
+            runtime,
+            packages,
+            error_code=error_code or None,
+            requested_package=requested_package or None,
+        )
 
     @staticmethod
     def _parallel_group_for_card(parallel_batches: Any, card_id: str) -> str | None:

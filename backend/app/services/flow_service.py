@@ -148,6 +148,13 @@ class FlowService:
                             "run_id": runtime_dependency_blocker["run_id"] or None,
                             "session_id": runtime_dependency_blocker["session_id"] or None,
                             "retry_after_signal": "runtime_dependency_install_terminal",
+                            "error_code": runtime_dependency_blocker.get("error_code"),
+                            "message": runtime_dependency_blocker.get("message"),
+                            "requested_package": runtime_dependency_blocker.get("requested_package"),
+                            "attempted_candidates": runtime_dependency_blocker.get("attempted_candidates"),
+                            "fallback_available": runtime_dependency_blocker.get("fallback_available"),
+                            "retry_hint": runtime_dependency_blocker.get("retry_hint"),
+                            "dedupe_key": runtime_dependency_blocker.get("dedupe_key"),
                         }
                         if runtime_dependency_blocker
                         else None
