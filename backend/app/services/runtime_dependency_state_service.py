@@ -221,7 +221,9 @@ def _blocker_group_key(item: dict[str, Any]) -> tuple[str, str, str, str] | None
     runtime = str(payload.get("runtime") or "").strip()
     packages = payload.get("packages")
     if isinstance(packages, list):
-        normalized = ",".join(_normalize_packages_for_key(packages, ecosystem))
+        # Sort so that ["numpy", "pandas"] and ["pandas", "numpy"] share the same key,
+        # matching compute_dedupe_key() normalization.
+        normalized = ",".join(sorted(_normalize_packages_for_key(packages, ecosystem)))
     else:
         normalized = ""
     return (card_id, ecosystem, runtime, normalized)

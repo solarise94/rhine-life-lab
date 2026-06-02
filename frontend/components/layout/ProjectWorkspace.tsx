@@ -269,7 +269,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           const eventPayload = raw.payload || {};
           // Ignore manually resolved jobs to avoid re-showing the failure notice.
           if (eventPayload.resolution_status === "manually_resolved") {
-            // Optionally clear any existing dependency failure notice.
+            // Clear any existing dependency failure notice so it disappears immediately.
+            if (notice && notice.startsWith("Dependency install failed")) {
+              setNotice(projectId, null);
+            }
           } else {
             const pkg = eventPayload.requested_package || "unknown package";
             const fallback = eventPayload.fallback_available?.length
