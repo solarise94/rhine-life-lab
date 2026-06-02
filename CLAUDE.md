@@ -134,6 +134,9 @@ node --check manager-agent/src/server.js
 - `backend/app/core/config.py` — `Settings` class (pydantic-settings, env prefix `BLUEPRINT_*`), all 50+ config fields
 - `backend/app/services/worker_service.py` — Run lifecycle (~2400 lines, the most critical service)
 - `backend/app/services/manager_service.py` — Manager AI orchestration
+- `backend/app/services/runtime_dependency_job_service.py` — Background dependency installation jobs (submit, persist, events, mark-resolved)
+- `backend/app/services/runtime_dependency_state_service.py` — Normalized failure details, dedupe/cooling, blocker derivation
+- `backend/app/services/runtime_dependency_resolver_service.py` — P1 deterministic resolver: per-package classification, policy-aware status, probe cache, fallback-grammar safety
 - `backend/app/workers/command_worker.py` — bwrap sandbox command builder
 - `manager-agent/src/server.js` — Manager Agent (single file, ~2700 lines)
 - `frontend/lib/stores/workspace-ui-store.ts` — Primary Zustand UI state store

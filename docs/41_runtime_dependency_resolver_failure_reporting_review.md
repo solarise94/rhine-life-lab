@@ -1138,20 +1138,20 @@ Prompt hints are not sufficient by themselves; backend duplicate cooling remains
 
 ## Implementation Order
 
-1. Add normalized failure detail helper and unit tests.
-2. Enrich `runtime_dependency_job_changed` project events.
-3. Expand backend work order `runtime_dependency_blocker` payload.
-4. Add frontend `RuntimeDependencyBlocker` type and card detail rendering.
-5. Add project-level failed dependency notice and lazy job-detail expansion.
-6. Add in-flight duplicate suppression before background task creation.
-7. Add terminal failure cooling from persisted job history before background task creation.
-8. Align workboard dependency coalescing key with the job dedupe key.
-9. Add explicit failed dependency blocker clearing semantics and auto wake re-evaluation.
-10. Add resolver plan model and deterministic resolver service.
-11. Add `resolve_runtime_dependencies` tool and make `install_runtime_dependencies` resolver-first.
-12. Add optional fallback policy switch, defaulting to `report_only`.
+1. ✅ Add normalized failure detail helper and unit tests. (P0)
+2. ✅ Enrich `runtime_dependency_job_changed` project events. (P0)
+3. ✅ Expand backend work order `runtime_dependency_blocker` payload. (P0)
+4. ✅ Add frontend `RuntimeDependencyBlocker` type and card detail rendering. (P0)
+5. ✅ Add project-level failed dependency notice and lazy job-detail expansion. (P0)
+6. ✅ Add in-flight duplicate suppression before background task creation. (P0)
+7. ✅ Add terminal failure cooling from persisted job history before background task creation. (P0)
+8. ✅ Align workboard dependency coalescing key with the job dedupe key. (P0)
+9. ✅ Add explicit failed dependency blocker clearing semantics and auto wake re-evaluation. (P0)
+10. ✅ Add resolver plan model and deterministic resolver service. (P1)
+11. ✅ Add `resolve_runtime_dependencies` tool and make `install_runtime_dependencies` resolver-first. (P1)
+12. ✅ Add optional fallback policy switch, defaulting to `report_only`. (P1)
 
-Steps 1-9 are the OAA-2 stabilization patch. Steps 10-12 can be a follow-up PR.
+All steps (1-12) landed as of 2026-06-02.
 
 ## Test Plan
 
