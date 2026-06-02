@@ -210,38 +210,71 @@ def runtime_dependency_failure_details(job: Mapping[str, Any] | Any) -> dict[str
     return {k: v for k, v in details.items() if v is not None}
 
 
+def _blocker_group_key(item: dict[str, Any]) -> tuple[str, str, str, str] | None:
+    """Return (card_id, ecosystem, runtime, normalized_packages) for grouping blockers."""
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    card_id = str(source.get("card_id") or "").strip()
+    if not card_id:
+        return None
+    ecosystem = str(payload.get("ecosystem") or "").strip()
+    runtime = str(payload.get("runtime") or "").strip()
+    packages = payload.get("packages")
+    if isinstance(packages, list):
+        normalized = ",".join(_normalize_packages_for_key(packages, ecosystem))
+    else:
+        normalized = ""
+    return (card_id, ecosystem, runtime, normalized)
+
+
 def dependency_blockers_by_card(project_root: Path) -> dict[str, dict[str, Any]]:
-    latest_by_card: dict[str, tuple[tuple[str, str], dict[str, Any]]] = {}
+    # Group by (card_id, ecosystem, runtime, normalized_packages) so that a
+    # manually resolved job for one package set does not mask an unresolved
+    # failure for a different package set on the same card.
+    latest_by_group: dict[tuple[str, str, str, str], tuple[tuple[str, str], dict[str, Any]]] = {}
     for item in load_runtime_dependency_jobs(project_root):
-        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
-        card_id = str(source.get("card_id") or "").strip()
-        if not card_id:
+        group_key = _blocker_group_key(item)
+        if group_key is None:
             continue
         status = str(item.get("status") or "").strip()
         created_at = str(item.get("created_at") or item.get("started_at") or item.get("finished_at") or "")
         job_id = str(item.get("job_id") or "")
         current_key = (created_at, job_id)
-        existing = latest_by_card.get(card_id)
+        existing = latest_by_group.get(group_key)
         if existing is None or current_key >= existing[0]:
-            latest_by_card[card_id] = (current_key, item)
-    blockers: dict[str, dict[str, Any]] = {}
-    for card_id, (_key, item) in latest_by_card.items():
+            latest_by_group[group_key] = (current_key, item)
+
+    # Filter out groups whose latest job is manually resolved or non-blocking.
+    blocking: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for group_key, (_key, item) in latest_by_group.items():
         status = str(item.get("status") or "").strip()
         if status not in BLOCKING_RUNTIME_DEPENDENCY_JOB_STATUSES:
             continue
-        # Skip manually resolved unless a newer failed job exists (handled by
-        # picking the latest job per card above, so if the latest is resolved
-        # we skip it; if a newer failed job exists, it would be the latest).
         payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
         resolution_status = str(
             item.get("resolution_status") or payload.get("resolution_status") or ""
         ).strip()
         if resolution_status == "manually_resolved":
             continue
+        blocking[group_key] = item
+
+    # Return the latest unresolved blocker per card_id. If a card has multiple
+    # unresolved groups, the latest job wins.
+    latest_by_card: dict[str, tuple[tuple[str, str], dict[str, Any]]] = {}
+    for (card_id, _ecosystem, _runtime, _packages), item in blocking.items():
+        created_at = str(item.get("created_at") or item.get("started_at") or item.get("finished_at") or "")
+        job_id = str(item.get("job_id") or "")
+        current_key = (created_at, job_id)
+        existing = latest_by_card.get(card_id)
+        if existing is None or current_key >= existing[0]:
+            latest_by_card[card_id] = (current_key, item)
+
+    blockers: dict[str, dict[str, Any]] = {}
+    for card_id, (_key, item) in latest_by_card.items():
         payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
         source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
         details = runtime_dependency_failure_details(item)
+        status = str(item.get("status") or "").strip()
         blockers[card_id] = {
             "job_id": details.get("job_id", ""),
             "task_id": details.get("task_id", ""),

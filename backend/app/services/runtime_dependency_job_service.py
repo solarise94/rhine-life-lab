@@ -196,6 +196,10 @@ class RuntimeDependencyJobService:
                     job.project_id,
                     job.job_id,
                 )
+        # Include resolution status so consumers can distinguish manually resolved jobs.
+        resolution_status = job.payload.get("resolution_status") if isinstance(job.payload, dict) else None
+        if resolution_status:
+            payload["resolution_status"] = resolution_status
         try:
             self.project_event_service.emit(
                 job.project_id,

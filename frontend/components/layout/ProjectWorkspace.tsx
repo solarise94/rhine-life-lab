@@ -253,6 +253,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             fallback_available?: string[];
             message?: string;
             card_id?: string;
+            resolution_status?: string;
+            error_code?: string;
           };
         };
         if (raw.type === "heartbeat") {
@@ -265,15 +267,25 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           raw.job_status === "failed"
         ) {
           const eventPayload = raw.payload || {};
-          const pkg = eventPayload.requested_package || "unknown package";
-          const fallback = eventPayload.fallback_available?.length
-            ? `Fallback available: ${eventPayload.fallback_available.join(", ")}.`
-            : "";
-          const msg = eventPayload.message || "";
-          setNotice(
-            projectId,
-            `Dependency install failed: ${pkg} was not found in configured conda channels. ${fallback} ${msg}`.trim(),
-          );
+          // Ignore manually resolved jobs to avoid re-showing the failure notice.
+          if (eventPayload.resolution_status === "manually_resolved") {
+            // Optionally clear any existing dependency failure notice.
+          } else {
+            const pkg = eventPayload.requested_package || "unknown package";
+            const fallback = eventPayload.fallback_available?.length
+              ? `Fallback available: ${eventPayload.fallback_available.join(", ")}.`
+              : "";
+            const msg = eventPayload.message || "";
+            const errorCode = eventPayload.error_code;
+            let noticeText: string;
+            if (errorCode === "package_not_found_in_conda_channels") {
+              noticeText = `Dependency install failed: ${pkg} was not found in configured conda channels. ${fallback} ${msg}`.trim();
+            } else {
+              // Use the backend message directly for timeout, start_failed, compilation_failed, etc.
+              noticeText = `Dependency install failed: ${msg || pkg}`.trim();
+            }
+            setNotice(projectId, noticeText);
+          }
         }
         const runId = typeof raw.run_id === "string" ? raw.run_id : null;
         scheduleProjectEventRefresh(runId);

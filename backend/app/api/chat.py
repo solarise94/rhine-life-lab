@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 import re
 
@@ -29,6 +30,8 @@ from app.services.provider_errors import ProviderAPIError
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
 from app.services.runtime_dependency_state_service import runtime_dependency_failure_details
 from app.services.utils import parse_slash_command, sha256_file, utc_now
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["chat"])
 
@@ -198,7 +201,7 @@ def mark_runtime_dependency_job_resolved(
         )
     except Exception:
         # Non-blocking: chat audit failure should not fail the resolution.
-        pass
+        logger.exception("Chat audit failed for mark-resolved: project=%s job=%s", project_id, job_id)
 
     # Auto wake: if auto is enabled and owner session exists, re-evaluate workboard.
     if auto_state.enabled and auto_state.owner_session_id:
@@ -209,7 +212,7 @@ def mark_runtime_dependency_job_resolved(
             )
         except Exception:
             # Non-blocking: evaluation failure should not fail the resolution.
-            pass
+            logger.exception("Auto evaluate failed after mark-resolved: project=%s job=%s", project_id, job_id)
 
     return result
 
