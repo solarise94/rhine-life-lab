@@ -179,6 +179,7 @@ Judgment:
 - For blueprint/card changes, use find_cards/get_card_detail for existing cards and find_assets for inputs. Use card write tools directly once you have enough context. Do not describe a change as complete unless a write tool succeeded.
 - After start_card_run or rerun_card returns background/async_boundary/do_not_poll, do not call get_card_detail, find_assets, inspect_project_summary, or cleanup tools just to wait for that run. End the turn with the run_id unless the tool returned ok:false or pending approvals.
 - After install_runtime_dependencies returns background/job_id, do not call get_runtime_dependency_install_status, inspect_project_summary, get_card_detail, find_assets, or cleanup tools just to wait for that job. End the turn with the job_id and wait for project-state events or runtime dependency wake events.
+- If install_runtime_dependencies returns a duplicate error (duplicate_dependency_resolution_in_progress or duplicate_dependency_resolution_failure), do not retry the same package/runtime combination. Treat in-flight duplicates as wait states and terminal duplicates as non-retryable failures.
 - Do not create free-form todo plans in chat. If auto/background work needs sequencing, use backend workboard tools and item ids.
 - Dependency ATTENTION is derived, not a persisted card status. Do not treat linked_assets as current dependency truth; use card.inputs, card.outputs, and asset.depends_on. If revise_card_plan or delete_card returns dependency_attention_check_recommended, call inspect_dependency_attention before deciding whether to continue. For input_asset_outdated issues, the old asset_id is still saved in the downstream card's inputs; if current_asset_id is clear and preserves the workflow, call revise_card_plan to replace that input asset_id first, then start_card_run in upstream-first order. Do not use rerun_card for dependency repair. If the intent is ambiguous, report the ATTENTION to the user.
 - If a write tool returns ok:false, use the message/retry_hint to correct arguments and retry when the correction is clear. If it is not clear, inspect context or ask a focused question.
@@ -791,6 +792,14 @@ function dependencyInstallRetryHint(details = {}) {
       return `The source-style install path failed during compilation. Do not retry with a manager argument; use backend default conda-family install or tell the user the runtime needs manual preparation.`;
     }
     return "The install failed during compilation. Prefer a binary-backed package source when possible, or tell the user the runtime needs manual preparation.";
+  }
+  if (errorCode === "duplicate_dependency_resolution_in_progress") {
+    return `The same dependency installation is already running for this runtime (prior job: ${details.prior_job_id || "unknown"}). Do not start another install_runtime_dependencies for the same package/runtime combination. Wait for the existing job to finish or for a wake event.`;
+  }
+  if (errorCode === "duplicate_dependency_resolution_failure") {
+    const priorError = details.prior_error_code || "unknown";
+    const fallbackText = fallback.length ? ` Possible manual fallback families: ${fallback.join(", ")}.` : "";
+    return `The same dependency request already failed for this runtime (prior job: ${details.prior_job_id || "unknown"}, prior error: ${priorError}). Do not retry install_runtime_dependencies with the same package/runtime. Modify the package list, change the runtime, or ask the user to prepare the environment manually.${fallbackText}`;
   }
   return null;
 }
