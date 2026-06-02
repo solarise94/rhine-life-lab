@@ -4,9 +4,13 @@ Status: refined implementation plan.
 
 Date: 2026-06-01
 
-Last refined: 2026-06-02
+Last refined: 2026-06-02 (P1 landing pass)
 
-Repository note: as of this refinement, this is the highest numbered review document under `docs/`. There is no `docs/42_*` review document yet.
+P0 implementation status: landed in the current codebase as of 2026-06-02.
+
+P1 implementation status: landed in the current codebase as of 2026-06-02.
+
+Repository note: as of 2026-06-02, follow-up reviews continue in `docs/42_*` and `docs/43_*`.
 
 ## Summary
 
@@ -639,6 +643,20 @@ In-flight duplicate response:
 
 This is distinct from `runtime_locks`: the existing lock serializes execution after job creation, but it does not prevent multiple duplicate background tasks from being created.
 
+In-flight matching uses the 3-tuple:
+
+```text
+(ecosystem, runtime, normalized_packages)
+```
+
+only, because `error_code` and `requested_package` are not yet known before execution completes. Terminal failure cooling uses the full 5-tuple key:
+
+```text
+dep:{ecosystem}:{runtime}:{normalized_packages}:{error_code}:{requested_package}
+```
+
+A request cooled in-flight is not automatically cooled at terminal; the terminal lookup runs independently against persisted completed jobs.
+
 Suggested key:
 
 ```text
@@ -707,6 +725,9 @@ This is needed to identify hot packages, dominant error codes, and repeated proj
 Do not cool these cases by default:
 
 - `dependency_install_timeout`;
+- `dependency_install_start_failed`;
+- `dependency_install_compilation_failed`;
+- `dependency_install_failed`;
 - backend interruption/restart failures;
 - user explicitly changes package list;
 - user explicitly changes runtime;
@@ -769,7 +790,23 @@ The persisted record should keep the original failed result and add:
 }
 ```
 
-`dependency_blockers_by_card(...)` should ignore failed jobs with `resolution_status == "manually_resolved"` only if no newer failed job exists for the same card/runtime/package set.
+`dependency_blockers_by_card(...)` should derive blockers with group-latest semantics:
+
+- group jobs by `(card_id, ecosystem, runtime, normalized_packages)`;
+- within each group, only the newest job (by `created_at`, tie-broken by `job_id`) determines blocker state;
+- a `manually_resolved` job clears only its own group;
+- a newer failed job in the same group blocks again;
+- a newer succeeded job clears the group by status, not by resolution marker.
+
+Recommended regression case:
+
+```text
+T1: failed job for (card_A, R, R_env, [limma])
+T2: mark-resolved for the same group
+  -> no blocker
+T3: newer failed job for the same group
+  -> blocker is T3
+```
 
 Permission model:
 
@@ -808,13 +845,25 @@ class RuntimeDependencyResolverService:
         ...
 ```
 
+Normative decision boundaries for P1:
+
+- The resolver is a pure planning step. It must not create a background job and must not mutate runtime state.
+- `install_runtime_dependencies` must not partially install a mixed request. If any requested package is blocked or fallback-only under the active policy, the whole request returns a non-background structured failure.
+- Fallback is policy-gated. `fallback_available` is advisory unless the active fallback policy explicitly allows the specific structured fallback action.
+- Resolver output must be stable enough for Manager, frontend, workboard, and wake logic to consume without inventing a second vocabulary.
+
 Plan shape:
 
 ```json
 {
   "ok": false,
+  "tool": "resolve_runtime_dependencies",
   "ecosystem": "R",
   "runtime": "R_env",
+  "status": "partial_resolution_requires_manual_preparation",
+  "error_code": "partial_resolution_requires_manual_preparation",
+  "message": "Some packages are not installable through the configured conda channels.",
+  "request_dedupe_key": "dep:R:R_env:ggplot2,limma::",
   "packages": [
     {
       "name": "limma",
@@ -824,6 +873,7 @@ Plan shape:
       "conda_match": null,
       "fallback_available": ["bioconductor"],
       "status": "fallback_required",
+      "reason": "package_not_found_in_conda_channels",
       "message": "Not found in configured conda channels."
     },
     {
@@ -836,20 +886,26 @@ Plan shape:
       "status": "conda_installable"
     }
   ],
-  "recommended_actions": [
+  "installable": [
     {
-      "kind": "install",
       "installer": "conda",
-      "packages": ["r-ggplot2"]
-    },
-    {
-      "kind": "manual_preparation_required",
-      "packages": ["limma"],
-      "reason": "package_not_found_in_configured_channels"
+      "name": "ggplot2",
+      "candidate": "r-ggplot2"
     }
   ],
-  "error_code": "partial_resolution_requires_manual_preparation",
-  "message": "Some packages are not installable through the configured conda channels."
+  "blocked": [
+    {
+      "name": "limma",
+      "reason": "package_not_found_in_conda_channels",
+      "attempted_candidates": ["r-limma", "bioconductor-limma"],
+      "fallback_available": ["bioconductor"],
+      "recommended_action": "manual_preparation_or_policy_approved_fallback"
+    }
+  ],
+  "recommended_actions": [
+    "Do not call install_runtime_dependencies for blocked packages.",
+    "Ask for manual runtime preparation or an approved fallback policy."
+  ]
 }
 ```
 
@@ -869,16 +925,46 @@ default TTL: 1 hour
 
 The cache can be in-memory only; losing it on backend restart is acceptable.
 
+Cache invalidation must also be explicit when resolver inputs materially change:
+
+- project or runtime conda channel configuration changes;
+- resolver binary path (`mamba` / `conda` / `micromamba`) changes;
+- an operator invokes an explicit cache-clear endpoint or admin action.
+
+Losing the cache on backend restart is acceptable. Keeping stale cache entries after channel or resolver-path reconfiguration is not.
+
+Resolver status is a request-level summary, not a per-package field. P1 should initially support exactly these request-level statuses:
+
+| Request-level `status` | Meaning | Background install allowed? |
+| --- | --- | --- |
+| `fully_installable` | every requested package has an approved conda action under current policy | yes |
+| `partial_resolution_requires_manual_preparation` | at least one package is installable, but at least one other package requires manual preparation or a disallowed fallback | no |
+| `fallback_available_but_policy_disallows` | all unresolved packages have a structured fallback family, but current policy is `report_only` | no |
+| `manual_preparation_required` | request cannot proceed automatically and requires explicit user/runtime preparation | no |
+| `unsupported_source_spec` | request contains GitHub/VCS/URL/tarball/unsupported flag input | no |
+| `runtime_missing` | runtime path / executable / environment cannot be resolved | no |
+| `resolution_unknown` | bounded probes were inconclusive or failed unexpectedly | no |
+
+Per-package `status` should initially be limited to:
+
+- `conda_installable`
+- `fallback_required`
+- `manual_preparation_required`
+- `unsupported_source_spec`
+- `runtime_missing`
+- `unknown`
+
 Resolver statuses must map to P0 normalized fields so project events, workboard, UI, and Manager do not need a second vocabulary:
 
 | Resolver status | P0 `error_code` | P0 `retry_hint` |
 | --- | --- | --- |
-| `conda_installable` | none | none |
-| `fallback_required` | `package_not_found_in_conda_channels` | `choose_fallback` |
+| `fully_installable` | none | none |
+| `partial_resolution_requires_manual_preparation` | `partial_resolution_requires_manual_preparation` | `manual_preparation_required` |
+| `fallback_available_but_policy_disallows` | `package_not_found_in_conda_channels` | `choose_fallback` |
 | `manual_preparation_required` | `manual_preparation_required` | `manual_preparation_required` |
-| `source_install_required` | `github_source_install_not_supported` or `external_source_install_not_supported` | `do_not_retry_installer` |
+| `unsupported_source_spec` | `github_source_install_not_supported` or `external_source_install_not_supported` | `do_not_retry_installer` |
 | `runtime_missing` | `dependency_install_start_failed` | `manual_runtime_preparation_required` |
-| `unknown` | `dependency_resolution_unknown` | `inspect_stderr` |
+| `resolution_unknown` | `dependency_resolution_unknown` | `inspect_stderr` |
 
 ### P1.2 Split Manager Tools Into Resolve And Install
 
@@ -899,49 +985,59 @@ resolve_runtime_dependencies
 Behavior:
 
 - returns the plan without creating a background job;
-- includes `dedupe_key` and prior failure if applicable;
-- tells Manager whether install is safe, partial, blocked, or manual.
+- includes `request_dedupe_key` and prior duplicate cooling match if applicable;
+- front-loads `status`, `blocked`, and `recommended_actions`;
+- is the only supported way for Manager to ask "what would happen if I tried this dependency request?" without mutating state.
 
 Updated `install_runtime_dependencies` behavior:
 
 1. validate payload;
 2. check duplicate cooling;
 3. resolve plan;
-4. if plan is fully installable through the currently allowed backend policy, submit a background job;
-5. if plan is partial/manual/fallback-only, return a non-background structured failure.
+4. if plan status is `fully_installable`, submit a background job using the approved installer actions;
+5. if plan status is anything else, return a non-background structured failure and do not create a job.
 
 This preserves backend control over actual installation and avoids turning Manager into an installer.
 
-Manager-visible plan summary format:
+Normative request-level rule:
+
+- P1 must not execute a subset of packages from a mixed request.
+- If the caller wants only the installable subset, it must submit a new explicit request containing only that subset.
+- This keeps the environment mutation boundary explicit and avoids silent "half-installed" states.
+
+Manager behavior for partial plans must also be explicit:
+
+- if `resolver_plan.installable` is non-empty and `blocked` is non-empty, Manager may summarize the blocked subset and ask for manual preparation;
+- alternatively, Manager may submit a narrower explicit request containing only the installable subset, but only after user acknowledgement or an equally explicit project-level instruction;
+- Manager must not silently drop blocked packages and proceed as if the full request succeeded.
+
+Recommended `install_runtime_dependencies` failure shape when the resolver blocks execution:
 
 ```json
 {
   "ok": false,
-  "tool": "resolve_runtime_dependencies",
-  "runtime": "R_env",
-  "ecosystem": "R",
+  "background": false,
+  "tool": "install_runtime_dependencies",
   "status": "partial_resolution_requires_manual_preparation",
+  "error_code": "partial_resolution_requires_manual_preparation",
   "message": "Some packages are not installable through the configured conda channels.",
-  "installable": [
-    {"name": "ggplot2", "installer": "conda", "candidate": "r-ggplot2"}
-  ],
-  "blocked": [
-    {
-      "name": "limma",
-      "reason": "package_not_found_in_conda_channels",
-      "attempted_candidates": ["r-limma", "bioconductor-limma"],
-      "fallback_available": ["bioconductor"],
-      "recommended_action": "manual_preparation_or_policy_approved_fallback"
-    }
-  ],
-  "recommended_actions": [
-    "Do not call install_runtime_dependencies for blocked packages.",
-    "Ask for manual runtime preparation or an approved fallback policy."
-  ]
+  "resolver_plan": {
+    "request_dedupe_key": "dep:R:R_env:ggplot2,limma::",
+    "installable": [
+      {"name": "ggplot2", "installer": "conda", "candidate": "r-ggplot2"}
+    ],
+    "blocked": [
+      {
+        "name": "limma",
+        "reason": "package_not_found_in_conda_channels",
+        "fallback_available": ["bioconductor"],
+        "recommended_action": "manual_preparation_or_policy_approved_fallback"
+      }
+    ]
+  },
+  "retry_hint": "do_not_install_partial_request"
 }
 ```
-
-The summary should front-load `status`, `blocked`, and `recommended_actions` so Manager can follow the resolver result without reinterpreting raw package probe details.
 
 ### P1.3 Controlled Fallback Policy
 
@@ -970,9 +1066,29 @@ When set to `report_only`, fallback information is surfaced to Manager and front
 
 When set to `allow_safe_registry_install`, only structured registry installs are allowed:
 
-- `pip install <validated package>` for Python registry packages;
-- `install.packages(...)` for CRAN;
-- `BiocManager::install(...)` for Bioconductor.
+- `pip install <validated_name>` or `pip install <validated_name>==<exact_version>` for Python registry packages;
+- `install.packages("<validated_name>")` for CRAN;
+- `BiocManager::install("<validated_name>")` for Bioconductor.
+
+Normative validation rules for `allow_safe_registry_install`:
+
+- only bare package names or exact version pins are allowed;
+- package names must match the ecosystem's identifier grammar before any installer invocation;
+- no extras syntax such as `package[extra]`;
+- no editable installs;
+- no local file paths;
+- no VCS URLs;
+- no arbitrary installer flags;
+- no mixed fallback families in a single action;
+- the resolved action must be emitted by the backend resolver, not constructed by Manager text.
+
+Initial grammar requirement:
+
+```text
+^[A-Za-z0-9][A-Za-z0-9._-]*$
+```
+
+or a stricter documented ecosystem-specific grammar. Names outside the grammar must be rejected as `unsupported_source_spec` before any installer command is built.
 
 Still reject:
 
@@ -981,6 +1097,13 @@ Still reject:
 - shell snippets;
 - system package manager commands;
 - package specs containing unsupported flags.
+
+Fallback policy matrix:
+
+| Policy | Python registry package | CRAN package | Bioconductor package | GitHub / URL / tarball |
+| --- | --- | --- | --- | --- |
+| `report_only` | report only | report only | report only | reject |
+| `allow_safe_registry_install` | allowed if validated and resolver-approved | allowed if validated and resolver-approved | allowed if validated and resolver-approved | reject |
 
 ### P1.4 Manager-Agent Prompt And Tool Result Contract
 
@@ -993,7 +1116,10 @@ manager-agent/src/server.js
 Manager must treat these backend responses as hard control signals:
 
 - `duplicate_dependency_resolution_failure`;
+- `duplicate_dependency_resolution_in_progress`;
 - `partial_resolution_requires_manual_preparation`;
+- `fallback_available_but_policy_disallows`;
+- `manual_preparation_required`;
 - `package_not_found_in_conda_channels`;
 - `github_source_install_not_supported`;
 - `external_source_install_not_supported`.
@@ -1002,8 +1128,10 @@ Required behavior:
 
 ```text
 Do not retry install_runtime_dependencies with the same package/runtime.
+If install_runtime_dependencies or resolve_runtime_dependencies returns a non-background blocked status, do not transform it into a shell/install workaround.
 If fallback is only report_available, tell the user the exact manual preparation or ask for approval of an explicit fallback policy.
 If resolver returns a concrete approved install action, run install_runtime_dependencies once, then stop at the async boundary.
+Do not invent a partial-install subset. Submit a narrower explicit request only if the user or Manager intentionally chooses that subset.
 ```
 
 Prompt hints are not sufficient by themselves; backend duplicate cooling remains mandatory.
@@ -1055,9 +1183,15 @@ Add tests for:
 - project event `stdout_tail` / `stderr_tail` are truncated to the documented limit and include `truncated` metadata when needed;
 - workboard `runtime_dependency_install_failed` item uses a coalescing key aligned with backend dedupe;
 - failed dependency blocker is cleared by a newer successful job for the same card/runtime;
-- failed dependency blocker is cleared by explicit manual-resolution metadata but not by frontend notice dismissal.
+- failed dependency blocker is cleared by explicit manual-resolution metadata but not by frontend notice dismissal;
+- failed jobs for different package sets on the same card produce independent blocker groups; manually resolving one does not clear the other;
 - mark-resolved from a btw session is rejected while auto is enabled for another owner session;
 - mark-resolved triggers workboard evaluation when auto is enabled and an owner session exists.
+- re-marking an already `manually_resolved` job updates `resolved_at` and `resolution_message` and appends a second chat audit entry rather than failing.
+- a mixed request such as `[ggplot2, limma]` returns `partial_resolution_requires_manual_preparation` with non-empty `installable` and `blocked` sections.
+- under `report_only`, a fallback-only package returns `fallback_available_but_policy_disallows` and does not create a job.
+- under `allow_safe_registry_install`, the same resolver-approved fallback request may proceed with the structured registry installer action.
+- a resolver-approved package name containing shell metacharacters is rejected as `unsupported_source_spec` before any installer invocation.
 
 ### Frontend Tests Or Build Checks
 
@@ -1081,6 +1215,10 @@ Add or update checks for:
 
 ## Acceptance Criteria For Future Fix
 
+### P0 Acceptance Criteria
+
+These are implemented in the current codebase and can be validated now:
+
 1. A failed dependency job emits a project event containing `error_code`, `message`, `requested_package`, `attempted_candidates`, `fallback_available`, `retry_hint`, and `dedupe_key`.
 2. Frontend shows a clear dependency failure report without requiring the user to ask Manager.
 3. A card blocked by a failed dependency repair shows the exact failed job, failed package, attempted candidates, and fallback families in card detail.
@@ -1090,8 +1228,114 @@ Add or update checks for:
 7. Workboard dependency failure coalescing and backend dependency job cooling use compatible semantic keys.
 8. A failed runtime dependency blocker has an auditable clearing path after a newer success, card revision, or explicit manual-preparation acknowledgement.
 9. Manual-resolution acknowledgement enforces session ownership and triggers auto workboard evaluation when auto is enabled.
+
+### P1 Acceptance Criteria
+
+These are now implemented in the current codebase as of 2026-06-02:
+
 10. Resolver can classify a package list into installable, fallback-required, and manual-required groups before launching a background install.
 11. The installer remains backend-controlled and does not become arbitrary shell execution by Manager or an agent.
+
+#### P1 Landing Notes (2026-06-02, refined 2026-06-02 P1.3 tightening pass)
+
+##### Execution semantics (P1.3)
+
+- ``allow_safe_registry_install`` now genuinely changes resolver/installer behavior rather
+  than only surfacing a ``fallback_actions`` list.
+- A request where every package resolves to the SAME safe fallback family (all-pip,
+  all-cran, or all-bioconductor) under ``allow_safe_registry_install`` receives
+  ``fully_installable`` and creates a background job.
+- Mixed-installer requests (conda + any fallback, or cran + bioconductor) are
+  rejected with ``partial_resolution_requires_manual_preparation``.  The plan
+  still surfaces which packages are individually installable vs. blocked, but
+  no background job is created — the caller must submit a narrower single-family
+  request.
+- ``report_only`` (default) never creates a background job for fallback packages.
+- The ``installer_plan`` payload field carries resolver-approved structured
+  actions (resolver → job payload → sync handler).  The sync handler dispatches
+  on the installer type: conda (existing path), pip (``python -m pip install``
+  with validated bare names), cran (``install.packages``), bioconductor
+  (``BiocManager::install``).  Commands are built internally — Manager never
+  assembles them from tool text.
+- Grammar / safety is enforced at two layers: the resolver's
+  ``is_registry_fallback_action_safe`` rejects shell metacharacters, source
+  specs, extras, editable, local paths, and mixed-installer actions; the sync
+  handler re-checks names before shelling out.
+
+##### Cache key (P1.1)
+
+- ``_channel_signature`` now includes ``realpath(conda_bin)``, the configured
+  conda base, ecosystem casing, runtime name, active fallback policy, and the
+  ordered channel list (fetched once via ``conda config --show channels
+  --json``).  A swap from ``/usr/bin/mamba`` to ``/opt/conda/bin/mamba``
+  produces a different cache key.  Cache TTL is configurable via
+  ``BLUEPRINT_RUNTIME_DEPENDENCY_CACHE_TTL_SECONDS``.
+
+##### Read-only endpoint (P1.2)
+
+- ``POST /runtime-dependencies/resolve`` no longer calls ``_guard_mutation`` and
+  is intentionally available in btw mode because it never mutates runtime state.
+  The tool name is deliberately omitted from ``_MUTATING_TOOL_NAMES``.
+
+- New service: `backend/app/services/runtime_dependency_resolver_service.py`
+  exposes `RuntimeDependencyResolverService` with `resolve(project_id, payload, *, settings=None)`.
+  It returns a `RuntimeDependencyResolutionPlan` (dataclass) that serializes
+  to the JSON shape documented in P1.1, including `status`, `packages`,
+  `installable`, `blocked`, `recommended_actions`, `request_dedupe_key`, and
+  P0-aligned `error_code` / `retry_hint`.
+- Status vocabulary is closed and exactly matches the P1.1 table: every status
+  maps to a stable P0 pair via `RESOLVER_TO_P0_FIELDS`.
+- Channel probes cache results in a thread-safe in-memory cache with a default
+  TTL of 1 hour, keyed by `(channel_set_signature, package_name)`. Cache TTL
+  is configurable via `BLUEPRINT_RUNTIME_DEPENDENCY_CACHE_TTL_SECONDS` and the
+  probe timeout via `BLUEPRINT_RUNTIME_DEPENDENCY_PROBE_TIMEOUT_SECONDS`.
+- Resolver is registered in `app/api/deps.py` as
+  `get_runtime_dependency_resolver_service` and threaded through `ManagerService`
+  and `ManagerBlueprintTools`.
+- `install_runtime_dependencies` is now resolver-first. When the resolver
+  status is not `fully_installable` the call returns a non-background
+  structured failure with `resolver_plan.installable` / `resolver_plan.blocked`
+  sections and a `retry_hint` derived from the P0 mapping. No background job
+  is created for partial / fallback-only / manual-only / runtime-missing /
+  source-spec requests, even under the relaxed fallback policy.
+- New Manager tool: `resolve_runtime_dependencies`
+  (`/internal/manager-tools/projects/{project_id}/runtime-dependencies/resolve`).
+  It returns a plan plus `in_flight_duplicate` / `terminal_duplicate` hints
+  derived from the existing P0 cooling helpers, the active `fallback_policy`,
+  and (under `allow_safe_registry_install`) the structured
+  `fallback_actions` list. The new tool is registered in `manager-agent/src/server.js`
+  and marked non-mutating so it stays available in btw mode.
+- New `Settings.runtime_dependency_fallback_policy` defaults to
+  `report_only`. Operators may opt into `allow_safe_registry_install` to
+  surface structured registry actions for validated bare names. The deploy
+  script whitelist (`scripts/deploy_user_systemd.sh`) now includes the three
+  new env keys.
+- New grammar + safety helpers: `is_registry_fallback_action_safe(...)` rejects
+  shell metacharacters, source-style specs, and non-`pip`/`cran`/`bioconductor`
+  installers. `collect_fallback_actions(plan, policy=...)` translates blocked
+  resolver entries into structured actions only when the policy allows it.
+- Manager-agent prompt and tool contract updated: `install_runtime_dependencies`
+  blocked responses are summarized as non-retryable; `resolve_runtime_dependencies`
+  is treated as advisory and never mutates state; new error codes
+  (`partial_resolution_requires_manual_preparation`,
+  `fallback_available_but_policy_disallows`, `manual_preparation_required`,
+  `unsupported_source_spec`, `dependency_install_start_failed` /
+  `runtime_missing`, `dependency_resolution_unknown`) all have deterministic
+  retry hints in `dependencyInstallRetryHint(...)`.
+- Frontend `lib/types.ts` exports `RuntimeDependencyResolverPlan`,
+  `ResolverPackageEntry`, `ResolverInstallAction`, `ResolverBlockedEntry`,
+  and `ResolverRequestStatus`. `lib/api.ts` exposes
+  `api.resolveRuntimeDependencies(...)` for the new endpoint.
+- Tests:
+  - `backend/tests/test_runtime_dependency_resolver.py` — 17 unit tests
+    covering the resolver plan model, per-package status mapping, cache
+    behavior, fallback policy, and grammar/safety checks.
+  - `backend/tests/test_runtime_dependency_resolver_integration.py` — 8
+    integration tests covering resolver-first installer behavior,
+    `resolve_runtime_dependencies` plan output (including in-flight duplicate
+    hints), partial classification, source-spec rejection, fallback policy
+    behavior, and the guarantee that no background job is created when the
+    resolver blocks execution.
 
 ## Conclusion
 

@@ -155,7 +155,8 @@ Available capabilities:
 - write_project_memory stores only explicit user preferences and corrections, such as "remember this", "default to this", or "do not do this again".
 - create_card, revise_card_plan, annotate_card, and delete_card directly modify blueprint cards after backend validation.
 - configure_card_execution directly updates selected skills, MCP servers, and Python/R runtime bindings for one or more cards.
-- install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime. When fixing a specific card/run dependency issue, include source.card_id and source.run_id when known. Treat it like card execution background work: after a successful start, report the job_id and stop; do not foreground-poll the job in the same turn.
+- install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime. When fixing a specific card/run dependency issue, include source.card_id and source.run_id when known. Treat it like card execution background work: after a successful start, report the job_id and stop; do not foreground-poll the job in the same turn. Under the default report_only policy the backend uses only the conda-family solver; when the per-deploy policy is allow_safe_registry_install and the resolver approves every package as a single-family request, pip / cran / bioconductor actions may also execute through structured backend commands — never invent or pass a package manager yourself.
+- resolve_runtime_dependencies returns a resolver plan (status, installable, blocked, fallback_actions) for the same request shape as install_runtime_dependencies, without creating a background job. Use it to inspect what would happen before mutating runtime state. The plan never executes a partial install: if status is not "fully_installable", the caller must not retry install_runtime_dependencies with the same payload. If status is "partial_resolution_requires_manual_preparation" and the user has approved a narrower install, submit a new explicit request that lists only the installable subset.
 - get_runtime_dependency_install_status checks whether a previously started dependency installation job has finished. Use it for explicit user checks, recovery, or a later wake turn; do not use it to poll a just-started job in the same turn.
 - promote_workboard_item_to_todo, claim_workboard_item, complete_workboard_item, defer_workboard_item, block_workboard_item_for_user, reopen_workboard_item, and submit_claimed_workboard_items consume backend workboard items. Use them in auto/background turns and also for user-driven "continue / resume / run next / run ready cards / run several cards" requests; do not invent your own todo list.
 - start_card_run, stop_card_run, rerun_card, and review_card_run control card execution directly when execution should happen now. Reserve start_card_run for one explicit card. For frontier or batch execution, prefer get_background_workboard -> promote/claim/submit. After a successful start_card_run or rerun_card launch, do not poll card status in the same turn. Briefly report the run_id and stop so run events/wake events can carry progress.
@@ -180,13 +181,15 @@ Judgment:
 - After start_card_run or rerun_card returns background/async_boundary/do_not_poll, do not call get_card_detail, find_assets, inspect_project_summary, or cleanup tools just to wait for that run. End the turn with the run_id unless the tool returned ok:false or pending approvals.
 - After install_runtime_dependencies returns background/job_id, do not call get_runtime_dependency_install_status, inspect_project_summary, get_card_detail, find_assets, or cleanup tools just to wait for that job. End the turn with the job_id and wait for project-state events or runtime dependency wake events.
 - If install_runtime_dependencies returns a duplicate error (duplicate_dependency_resolution_in_progress or duplicate_dependency_resolution_failure), do not retry the same package/runtime combination. Treat in-flight duplicates as wait states and terminal duplicates as non-retryable failures.
+- If install_runtime_dependencies returns a non-background blocked status (status starting with "partial_resolution_", "fallback_available_", "manual_preparation_required", "unsupported_source_spec", "runtime_missing", or "resolution_unknown"), do not transform it into a shell/install workaround. Summarize the resolver_plan.installable and resolver_plan.blocked sections, tell the user exactly what blocked which package, and ask whether they want to (a) manually prepare the runtime, (b) submit a narrower explicit request for only the installable subset, or (c) approve allow_safe_registry_install fallback if the resolver surfaced a fallback_actions list. Never call install_runtime_dependencies again with the original payload after a blocked response.
+- If resolve_runtime_dependencies returns status other than "fully_installable", treat it as advisory only. Do not invent a partial install; submit a narrower explicit request only after the user has acknowledged the blocked subset. The resolver never executes anything on its own.
 - Do not create free-form todo plans in chat. If auto/background work needs sequencing, use backend workboard tools and item ids.
 - Dependency ATTENTION is derived, not a persisted card status. Do not treat linked_assets as current dependency truth; use card.inputs, card.outputs, and asset.depends_on. If revise_card_plan or delete_card returns dependency_attention_check_recommended, call inspect_dependency_attention before deciding whether to continue. For input_asset_outdated issues, the old asset_id is still saved in the downstream card's inputs; if current_asset_id is clear and preserves the workflow, call revise_card_plan to replace that input asset_id first, then start_card_run in upstream-first order. Do not use rerun_card for dependency repair. If the intent is ambiguous, report the ATTENTION to the user.
 - If a write tool returns ok:false, use the message/retry_hint to correct arguments and retry when the correction is clear. If it is not clear, inspect context or ask a focused question.
 ${webJudgmentLines.join("\n")}
 - Write project memory only when the user explicitly asks you to remember a durable preference, says a behavior should be the default, or corrects something you should avoid in future. Keep memory summaries short.
 - Card agents cannot ask the user interactively. If a card needs a non-default Python or R runtime, use configure_card_execution on that card before telling the user it is ready.
-- Card executor agents run in a constrained runtime. They must not install missing R or Python packages on their own. If runtime packages are missing or the user explicitly wants packages added to a selected non-system runtime, you may use install_runtime_dependencies with explicit package names to start a background install job, then stop the current turn and wait for the dependency-install wake event. Include source.card_id and source.run_id when you are repairing a specific card/run. Do not pass or invent a package manager; backend always picks the conda-family solver automatically. If installation fails or the missing dependency is a system tool, tell the user exactly what dependency must be prepared.
+- Card executor agents run in a constrained runtime. They must not install missing R or Python packages on their own. If runtime packages are missing or the user explicitly wants packages added to a selected non-system runtime, you may use install_runtime_dependencies with explicit package names to start a background install job, then stop the current turn and wait for the dependency-install wake event. Include source.card_id and source.run_id when you are repairing a specific card/run. Never pass or invent a package manager; the backend resolver determines the appropriate installer based on the active policy (conda by default; pip / cran / bioconductor fallbacks only under allow_safe_registry_install and only when every package in the request resolves to the same safe family). If installation fails or the missing dependency is a system tool, tell the user exactly what dependency must be prepared.
 - Search the skill/MCP library only when a card clearly may benefit from reusable execution abilities. The list/search tools are intentionally id/name-only; read one item detail only if the id/name is ambiguous.
 - If a task looks like a stable repeated workflow, search_card_templates before creating a new analysis card from scratch.
 - When a template requires script assets, ask the user which project script assets to bind before instantiate_card_template or before starting the card. Do not make card agents ask the user for bindings.
@@ -276,6 +279,10 @@ const TOOL_STATUS_LABELS = {
   install_runtime_dependencies: {
     active: "正在提交环境依赖任务",
     done: "已提交环境依赖任务",
+  },
+  resolve_runtime_dependencies: {
+    active: "正在解析环境依赖",
+    done: "已解析环境依赖",
   },
   get_runtime_dependency_install_status: {
     active: "正在检查环境依赖任务",
@@ -801,6 +808,31 @@ function dependencyInstallRetryHint(details = {}) {
     const fallbackText = fallback.length ? ` Possible manual fallback families: ${fallback.join(", ")}.` : "";
     return `The same dependency request already failed for this runtime (prior job: ${details.prior_job_id || "unknown"}, prior error: ${priorError}). Do not retry install_runtime_dependencies with the same package/runtime. Modify the package list, change the runtime, or ask the user to prepare the environment manually.${fallbackText}`;
   }
+  if (errorCode === "partial_resolution_requires_manual_preparation") {
+    return `The resolver blocked execution: some packages are not installable through the configured conda channels. Do not retry install_runtime_dependencies with the original payload. Ask the user to manually prepare the blocked packages, or submit a narrower explicit request for only the installable subset.`;
+  }
+  if (errorCode === "fallback_available_but_policy_disallows") {
+    const fallbackText = fallback.length ? ` Possible manual fallback families: ${fallback.join(", ")}.` : "";
+    return `Fallback families exist for the unresolved packages, but the active policy is report_only and will not auto-execute them.${fallbackText} Ask the user to manually prepare the runtime, or wait for an explicit allow_safe_registry_install policy.`;
+  }
+  if (errorCode === "manual_preparation_required") {
+    return "The dependency request cannot proceed automatically; ask the user to prepare the runtime manually before retrying.";
+  }
+  if (errorCode === "unsupported_source_spec" || errorCode === "github_source_install_not_supported" || errorCode === "external_source_install_not_supported") {
+    return "Do not retry install_runtime_dependencies with source URLs, GitHub repos, or tarballs. Use a registry-backed package name or ask for a separate manual environment-preparation workflow.";
+  }
+  if (errorCode === "dependency_install_start_failed" || errorCode === "runtime_missing") {
+    return "The selected runtime path could not be resolved or started. Verify the runtime exists, then retry; otherwise ask the user to prepare the runtime manually.";
+  }
+  if (errorCode === "dependency_resolution_unknown") {
+    return "The resolver could not classify the request (the underlying probe was inconclusive). Inspect the resolver plan and ask the user to confirm the package list before retrying.";
+  }
+  if (errorCode === "mixed_installer_rejected") {
+    return "Mixed-installer plans (e.g. conda + pip, or cran + bioconductor) are rejected. Narrow the request to a single installer family, or ask the user to split it into separate single-family calls.";
+  }
+  if (errorCode === "unsupported_installer") {
+    return "The installer type requested is not supported. Ask the user to select a supported package manager or prepare the runtime manually.";
+  }
   return null;
 }
 
@@ -965,6 +997,27 @@ function summarizeToolPayload(toolName, payload) {
       error_code: payload.error_code,
       attempted_candidates: compactItems(payload.attempted_candidates, (item) => item, 5),
       fallback_available: compactItems(payload.fallback_available, (item) => item, 5),
+      message: truncateText(payload.message, 180),
+    };
+  }
+  if (toolName === "resolve_runtime_dependencies") {
+    return {
+      ok: payload.ok,
+      status: payload.status,
+      runtime: payload.runtime,
+      ecosystem: payload.ecosystem,
+      installable_count: Array.isArray(payload.installable) ? payload.installable.length : undefined,
+      blocked_count: Array.isArray(payload.blocked) ? payload.blocked.length : undefined,
+      installable: compactItems(payload.installable, (item) => item, 5),
+      blocked: compactItems(payload.blocked, (item) => ({
+        name: item?.name,
+        reason: item?.reason,
+        fallback_available: item?.fallback_available,
+      }), 5),
+      fallback_policy: payload.fallback_policy,
+      in_flight_duplicate: payload.in_flight_duplicate,
+      terminal_duplicate: payload.terminal_duplicate,
+      retry_hint: payload.retry_hint,
       message: truncateText(payload.message, 180),
     };
   }
@@ -1215,6 +1268,20 @@ function buildToolReport(toolName, details) {
         `依赖安装未启动：${details.error_code || "unknown_error"}。${requestedPackage}${attempted}${fallback}`.trim(),
       details: retryHint ? { ...details, retry_hint: retryHint } : details,
     };
+  }
+  if (toolName === "resolve_runtime_dependencies" && details.status) {
+    const blocked = Array.isArray(details.blocked) ? details.blocked : [];
+    const installable = Array.isArray(details.installable) ? details.installable : [];
+    const blockedNames = blocked
+      .map((entry) => entry && (entry.name || entry["name"]))
+      .filter(Boolean);
+    const blockedText = blockedNames.length ? ` 阻塞：${blockedNames.join(", ")}。` : "";
+    const installableText = installable.length ? ` 可装：${installable.length} 个。` : "";
+    const summary =
+      details.status === "fully_installable"
+        ? `依赖解析通过，全部 ${installable.length || 0} 个包可在当前 conda 通道安装。`
+        : `依赖解析被阻止（${details.status}）。${installableText}${blockedText}`.trim();
+    return { summary, details };
   }
   if ((toolName === "start_card_run" || toolName === "rerun_card") && details.background && details.run_id) {
     return {
@@ -1903,6 +1970,46 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           );
         } catch (error) {
           return toolErrorResult(error, { error_type: "install_runtime_dependencies_failed", tool_name: "install_runtime_dependencies" });
+        }
+      },
+    },
+    {
+      name: "resolve_runtime_dependencies",
+      label: "Resolve runtime dependencies",
+      description: "Plan-only counterpart of install_runtime_dependencies. Returns a resolver plan (status, installable, blocked, fallback_actions) for the same request shape, without creating a background job. Use this to inspect what would happen before mutating runtime state. If status is not \"fully_installable\", do NOT retry install_runtime_dependencies with the original payload; ask the user how to proceed or submit a narrower explicit request for only the installable subset.",
+      parameters: Type.Object({
+        ecosystem: Type.String({ description: "python or R" }),
+        runtime: Type.String({ description: "Selected non-system runtime name." }),
+        packages: Type.Array(Type.String({ description: "Package names or simple Python version specs." })),
+        source: Type.Optional(
+          Type.Object({
+            card_id: Type.Optional(Type.String()),
+            run_id: Type.Optional(Type.String()),
+          }),
+        ),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "resolve_runtime_dependencies",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/runtime-dependencies/resolve`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+            sessionId,
+          );
+          return toolTextResult("resolve_runtime_dependencies", payload);
+        } catch (error) {
+          return toolErrorResult(error, {
+            error_type: "resolve_runtime_dependencies_failed",
+            tool_name: "resolve_runtime_dependencies",
+          });
         }
       },
     },

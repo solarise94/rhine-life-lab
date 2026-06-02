@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from app.core.config import get_settings
 from app.services.chat_session_service import ChatSessionService
 from app.services.app_config_service import AppConfigService
 from app.services.background_task_service import BackgroundTaskService
@@ -21,6 +22,7 @@ from app.services.project_service import ProjectService
 from app.services.result_asset_service import ResultAssetService
 from app.services.report_service import ReportService
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
+from app.services.runtime_dependency_resolver_service import RuntimeDependencyResolverService
 from app.services.runtime_approval_service import RuntimeApprovalService
 from app.services.worker_service import WorkerService
 
@@ -48,6 +50,7 @@ def get_manager_service() -> ManagerService:
         get_project_service(),
         worker_service=get_worker_service(),
         runtime_dependency_job_service=get_runtime_dependency_job_service(),
+        runtime_dependency_resolver_service=get_runtime_dependency_resolver_service(),
         library_registry_service=get_library_registry_service(),
         manager_auto_service=get_manager_auto_service(),
         background_workboard_service=get_background_workboard_service(),
@@ -70,6 +73,15 @@ def get_runtime_dependency_job_service() -> RuntimeDependencyJobService:
             run_id=run_id,
             job_id=job_id,
         ),
+    )
+
+
+@lru_cache
+def get_runtime_dependency_resolver_service() -> RuntimeDependencyResolverService:
+    settings = get_settings()
+    return RuntimeDependencyResolverService(
+        probe_timeout_seconds=int(getattr(settings, "runtime_dependency_probe_timeout_seconds", 60) or 60),
+        cache_ttl_seconds=int(getattr(settings, "runtime_dependency_cache_ttl_seconds", 3600) or 3600),
     )
 
 

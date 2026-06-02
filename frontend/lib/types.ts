@@ -152,6 +152,79 @@ export interface RuntimeDependencyBlocker {
   error?: string | null;
 }
 
+export type ResolverRequestStatus =
+  | "fully_installable"
+  | "partial_resolution_requires_manual_preparation"
+  | "fallback_available_but_policy_disallows"
+  | "manual_preparation_required"
+  | "unsupported_source_spec"
+  | "runtime_missing"
+  | "resolution_unknown";
+
+export interface ResolverPackageEntry {
+  name: string;
+  normalized_name: string;
+  classification: string;
+  conda_candidates?: string[];
+  conda_match?: string | null;
+  fallback_available?: string[];
+  status:
+    | "conda_installable"
+    | "fallback_required"
+    | "manual_preparation_required"
+    | "unsupported_source_spec"
+    | "runtime_missing"
+    | "unknown";
+  reason?: string | null;
+  message?: string | null;
+}
+
+export interface ResolverInstallAction {
+  kind: "install";
+  installer: "conda" | "pip" | "cran" | "bioconductor";
+  name: string;
+  candidate?: string | null;
+  version_pin?: string | null;
+}
+
+export interface ResolverBlockedEntry {
+  name: string;
+  reason: string;
+  attempted_candidates?: string[];
+  fallback_available?: string[];
+  recommended_action?: string;
+}
+
+export interface RuntimeDependencyResolverPlan {
+  ok: boolean;
+  tool?: "resolve_runtime_dependencies";
+  ecosystem: string;
+  runtime: string;
+  status: ResolverRequestStatus;
+  error_code?: string | null;
+  message?: string | null;
+  request_dedupe_key: string;
+  packages: ResolverPackageEntry[];
+  installable: ResolverInstallAction[];
+  blocked: ResolverBlockedEntry[];
+  recommended_actions?: string[];
+  fallback_policy?: "report_only" | "allow_safe_registry_install";
+  fallback_actions?: ResolverInstallAction[];
+  in_flight_duplicate?: {
+    prior_job_id: string;
+    error_code: string;
+    retry_hint: string;
+  } | null;
+  terminal_duplicate?: {
+    prior_job_id: string;
+    prior_error_code?: string | null;
+    error_code: string;
+    dedupe_key?: string | null;
+    fallback_available?: string[] | null;
+    retry_hint: string;
+  } | null;
+}
+
 export interface WorkItem {
   card_id: string;
   title: string;

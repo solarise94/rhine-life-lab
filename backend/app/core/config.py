@@ -89,6 +89,16 @@ class Settings(BaseSettings):
     claude_code_command_json: list[str] | None = None
     codex_command_json: list[str] | None = None
 
+    # Runtime dependency resolver controls (P1).
+    # Default policy is "report_only" so fallback families (pip / cran /
+    # bioconductor) are surfaced but never auto-executed. Operators can opt
+    # into "allow_safe_registry_install" to enable structured registry installs
+    # produced by the resolver. Per-project overrides live in
+    # ``graph.metadata.dependency_policy`` and will be honored in a later pass.
+    runtime_dependency_fallback_policy: str = "report_only"
+    runtime_dependency_probe_timeout_seconds: int = 60
+    runtime_dependency_cache_ttl_seconds: int = 3600
+
     model_config = {
         "env_prefix": "BLUEPRINT_",
         "env_file": ".env",

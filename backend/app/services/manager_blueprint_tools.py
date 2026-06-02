@@ -30,6 +30,20 @@ from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.project_service import ProjectService
 from app.services.result_asset_service import ResultAssetService
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
+from app.services.runtime_dependency_resolver_service import (
+    PACKAGE_STATUS_FALLBACK_REQUIRED,
+    RESOLVER_STATUS_FALLBACK_AVAILABLE_POLICY_DISALLOWS,
+    RESOLVER_STATUS_FULLY_INSTALLABLE,
+    RESOLVER_STATUS_PARTIAL_RESOLUTION,
+    RESOLVER_STATUS_RUNTIME_MISSING,
+    RESOLVER_STATUS_UNSUPPORTED_SOURCE_SPEC,
+    RESOLVER_TO_P0_FIELDS,
+    RuntimeDependencyResolverService,
+    _contains_shell_danger as _contains_shell_danger_simple,
+    collect_fallback_actions,
+    is_registry_fallback_action_safe,
+    normalize_fallback_policy,
+)
 from app.services.runtime_dependency_state_service import (
     find_duplicate_in_flight,
     find_duplicate_terminal_failure,
@@ -145,6 +159,8 @@ class InstallRuntimeDependenciesPayload(BaseModel):
     packages: list[str] = Field(default_factory=list)
     timeout_seconds: int = 600
     source: dict[str, Any] = Field(default_factory=dict)
+    # Set by the resolver; never sent by Manager.
+    installer_plan: list[dict[str, Any]] | None = None
 
 
 class FindCardsPayload(BaseModel):
@@ -228,12 +244,14 @@ class ManagerBlueprintTools:
         project_service: ProjectService,
         worker_service: WorkerService | None = None,
         runtime_dependency_job_service: RuntimeDependencyJobService | None = None,
+        runtime_dependency_resolver_service: RuntimeDependencyResolverService | None = None,
         library_registry_service: LibraryRegistryService | None = None,
         background_workboard_service: BackgroundWorkboardService | None = None,
     ) -> None:
         self.project_service = project_service
         self.worker_service = worker_service
         self.runtime_dependency_job_service = runtime_dependency_job_service
+        self.runtime_dependency_resolver_service = runtime_dependency_resolver_service
         self.library_registry_service = library_registry_service or LibraryRegistryService(
             project_service,
             AppConfigService(project_service.settings),
@@ -1060,6 +1078,34 @@ class ManagerBlueprintTools:
                 "fallback_available": terminal_dup.get("fallback_available"),
             }
 
+        # Resolver-first planning (P1). The resolver inspects every package
+        # before we create a background job, including under the active
+        # fallback policy. When every package receives an approved action
+        # (conda or single-family safe registry), the resolver produces a
+        # structured ``installer_plan`` that the sync handler dispatches.
+        installer_plan: list[dict[str, Any]] | None = None
+        if self.runtime_dependency_resolver_service is not None:
+            plan = self.runtime_dependency_resolver_service.resolve(
+                project_id,
+                request_payload,
+                settings=self.project_service.settings,
+                policy=self._fallback_policy(),
+            )
+            if plan.status != RESOLVER_STATUS_FULLY_INSTALLABLE:
+                plan_dict = plan.to_dict()
+                return self._resolver_blocked_response(
+                    plan_dict,
+                    policy=self._fallback_policy(),
+                )
+            # Approved actions are now in plan.installable.  Serialize
+            # them so the sync handler never guesses.
+            installer_plan = [act.to_dict() for act in plan.installable]
+
+        if installer_plan is not None:
+            # Set the installer plan on the request payload so the
+            # sync handler can branch without introspecting raw packages.
+            request_payload["installer_plan"] = installer_plan
+
         job = self.runtime_dependency_job_service.submit(
             project_id,
             request_payload,
@@ -1085,6 +1131,162 @@ class ManagerBlueprintTools:
             ),
             "created_at": job.created_at,
         }
+
+    def resolve_runtime_dependencies(self, project_id: str, payload: dict, session_id: str | None = None) -> dict:
+        """Plan-only counterpart of ``install_runtime_dependencies``.
+
+        Returns the resolver plan without creating a background job. Manager
+        may call this to ask "what would happen if I tried this request?"
+        before deciding to install.
+        """
+        if self.runtime_dependency_resolver_service is None:
+            raise ManagerPlanningError("runtime dependency resolver service is unavailable.")
+        try:
+            request_payload = self._validated_runtime_dependency_payload(project_id, payload, session_id=session_id)
+        except DependencyResolutionError as exc:
+            payload_dict = dict(exc.payload)
+            payload_dict.setdefault("status", self._status_for_error_code(payload_dict.get("error_code")))
+            payload_dict.setdefault(
+                "retry_hint", self._retry_hint_for_error_code(payload_dict.get("error_code"))
+            )
+            return {
+                "ok": False,
+                "tool": "resolve_runtime_dependencies",
+                "background": False,
+                "async_boundary": False,
+                "do_not_poll": False,
+                "wait_for_wake": False,
+                **payload_dict,
+            }
+        except ValidationError as exc:
+            raise ManagerPlanningError(f"Invalid resolve_runtime_dependencies payload: {exc}") from exc
+
+        project_path = self.project_service.project_path(project_id)
+        in_flight = find_duplicate_in_flight(
+            project_path,
+            request_payload["ecosystem"],
+            request_payload["runtime"],
+            request_payload["packages"],
+        )
+        terminal = find_duplicate_terminal_failure(
+            project_path,
+            request_payload["ecosystem"],
+            request_payload["runtime"],
+            request_payload["packages"],
+        )
+
+        plan = self.runtime_dependency_resolver_service.resolve(
+            project_id,
+            request_payload,
+            settings=self.project_service.settings,
+            policy=self._fallback_policy(),
+        )
+        plan_dict = plan.to_dict()
+        plan_dict["ok"] = plan.status == RESOLVER_STATUS_FULLY_INSTALLABLE
+        plan_dict["background"] = False
+        plan_dict["async_boundary"] = False
+        plan_dict["do_not_poll"] = False
+        plan_dict["wait_for_wake"] = False
+        if in_flight is not None:
+            plan_dict["in_flight_duplicate"] = {
+                "prior_job_id": in_flight["prior_job_id"],
+                "error_code": "duplicate_dependency_resolution_in_progress",
+                "retry_hint": "wait_for_existing_dependency_job",
+            }
+        if terminal is not None and terminal.get("prior_status") == "failed":
+            plan_dict["terminal_duplicate"] = {
+                "prior_job_id": terminal["prior_job_id"],
+                "prior_error_code": terminal.get("prior_error_code"),
+                "error_code": "duplicate_dependency_resolution_failure",
+                "dedupe_key": terminal.get("dedupe_key"),
+                "fallback_available": terminal.get("fallback_available"),
+                "retry_hint": (
+                    "do_not_retry_same_conda_request; modify package list, change runtime, "
+                    "or mark manually resolved"
+                ),
+            }
+        # Surface fallback policy so Manager can decide whether to suggest a
+        # narrower fallback request.
+        plan_dict["fallback_policy"] = self._fallback_policy()
+        if plan_dict["fallback_policy"] == "allow_safe_registry_install":
+            plan_dict["fallback_actions"] = [
+                action.to_dict()
+                for action in collect_fallback_actions(plan, policy=plan_dict["fallback_policy"])
+                if is_registry_fallback_action_safe(action)
+            ]
+        return plan_dict
+
+    @staticmethod
+    def _status_for_error_code(error_code: str | None) -> str:
+        mapping = {
+            "github_source_install_not_supported": RESOLVER_STATUS_UNSUPPORTED_SOURCE_SPEC,
+            "external_source_install_not_supported": RESOLVER_STATUS_UNSUPPORTED_SOURCE_SPEC,
+            "dependency_install_start_failed": RESOLVER_STATUS_RUNTIME_MISSING,
+            "package_not_found_in_conda_channels": "fallback_available_but_policy_disallows",
+            "manual_preparation_required": "manual_preparation_required",
+        }
+        if not error_code:
+            return "resolution_unknown"
+        return mapping.get(error_code, "resolution_unknown")
+
+    @staticmethod
+    def _retry_hint_for_error_code(error_code: str | None) -> str:
+        mapping = {
+            "github_source_install_not_supported": "do_not_retry_installer",
+            "external_source_install_not_supported": "do_not_retry_installer",
+            "dependency_install_start_failed": "manual_runtime_preparation_required",
+            "package_not_found_in_conda_channels": "choose_fallback",
+            "manual_preparation_required": "manual_preparation_required",
+        }
+        if not error_code:
+            return "manual_preparation_required"
+        return mapping.get(error_code, "manual_preparation_required")
+
+    def _resolver_blocked_response(self, plan_dict: dict[str, Any], *, policy: str) -> dict[str, Any]:
+        """Build the structured non-background response when the resolver blocks execution."""
+        status = plan_dict.get("status") or ""
+        retry_hint_map = {
+            RESOLVER_STATUS_PARTIAL_RESOLUTION: "do_not_install_partial_request",
+            RESOLVER_STATUS_FALLBACK_AVAILABLE_POLICY_DISALLOWS: "choose_fallback",
+            RESOLVER_STATUS_RUNTIME_MISSING: "manual_runtime_preparation_required",
+            RESOLVER_STATUS_UNSUPPORTED_SOURCE_SPEC: "do_not_retry_installer",
+        }
+        retry_hint = retry_hint_map.get(status, "manual_preparation_required")
+        return {
+            "ok": False,
+            "background": False,
+            "async_boundary": False,
+            "do_not_poll": False,
+            "wait_for_wake": False,
+            "status": status,
+            "error_code": plan_dict.get("error_code") or status,
+            "message": plan_dict.get("message") or "The resolver blocked execution; do not submit the same request.",
+            "retry_hint": retry_hint,
+            "resolver_plan": {
+                "request_dedupe_key": plan_dict.get("request_dedupe_key", ""),
+                "installable": plan_dict.get("installable", []),
+                "blocked": plan_dict.get("blocked", []),
+            },
+            "fallback_policy": policy,
+            "fallback_available": self._fallback_families_from_plan(plan_dict),
+        }
+
+    @staticmethod
+    def _fallback_families_from_plan(plan_dict: dict[str, Any]) -> list[str]:
+        families: list[str] = []
+        for entry in plan_dict.get("packages", []):
+            for family in entry.get("fallback_available", []) or []:
+                if family not in families:
+                    families.append(family)
+        return families
+
+    def _fallback_policy(self) -> str:
+        settings = getattr(self.project_service, "settings", None)
+        if settings is None:
+            return "report_only"
+        return normalize_fallback_policy(
+            getattr(settings, "runtime_dependency_fallback_policy", None)
+        )
 
     def get_runtime_dependency_install_status(self, project_id: str, job_id: str) -> dict:
         if self.runtime_dependency_job_service is None:
@@ -1136,6 +1338,28 @@ class ManagerBlueprintTools:
         if not runtime or runtime == "__system__":
             raise ManagerPlanningError("install_runtime_dependencies requires a selected non-system runtime.")
         timeout = max(30, min(int(request.timeout_seconds or 600), 1800))
+        started_at = utc_now()
+
+        # P1.3: if the resolver attached an installer_plan from the approved
+        # action set, dispatch directly on those structured actions. The
+        # fallback plan is only set when the resolver has already verified
+        # every action is safe (grammar-checked, single-family). We do not
+        # allow partial or mixed-installer execution here — the resolver
+        # blocks those before job creation.
+        installer_plan = payload.get("installer_plan")
+        if installer_plan and isinstance(installer_plan, list):
+            return self._install_from_plan(
+                project_id,
+                ecosystem=ecosystem,
+                runtime=runtime,
+                packages=packages,
+                installer_plan=installer_plan,
+                timeout=timeout,
+                started_at=started_at,
+            )
+
+        # Legacy path (no resolver, or resolver not available): fall through
+        # to the old per-ecosystem command builder.
         manager_name = self._dependency_manager_label(ecosystem)
         try:
             if ecosystem == "python":
@@ -1143,21 +1367,148 @@ class ManagerBlueprintTools:
             else:
                 command, resolved_runtime = self._r_dependency_command(runtime, packages)
         except DependencyResolutionError as exc:
-            payload = dict(exc.payload)
-            payload.update(
+            result = dict(exc.payload)
+            result.update(
                 {
                     "ok": False,
                     "ecosystem": ecosystem,
                     "runtime": runtime,
                     "packages": packages,
                     "manager": manager_name,
-                    "started_at": utc_now(),
+                    "started_at": started_at,
                     "finished_at": utc_now(),
                 }
             )
-            return payload
-        started_at = utc_now()
-        run_env = self._dependency_subprocess_env(ecosystem, manager_name, resolved_runtime)
+            return result
+        return self._run_dependency_command(
+            project_id,
+            command,
+            ecosystem=ecosystem,
+            runtime=runtime,
+            resolved_runtime=resolved_runtime or "",
+            packages=packages,
+            manager_name=manager_name or "conda",
+            timeout=timeout,
+            started_at=started_at,
+        )
+
+    def _install_from_plan(
+        self,
+        project_id: str,
+        *,
+        ecosystem: str,
+        runtime: str,
+        packages: list[str],
+        installer_plan: list[dict[str, Any]],
+        timeout: int,
+        started_at: str,
+    ) -> dict:
+        """Execute a resolver-approved installer_plan.
+
+        The plan is guaranteed by the resolver to contain a single installer
+        type for the entire request. We validate that invariant here so a
+        corrupted payload cannot bypass the safety boundary, then build the
+        command internally — never from Manager-provided text.
+        """
+        installer_types = {str(item.get("installer", "")).strip().lower() for item in installer_plan}
+        if len(installer_types) != 1:
+            return {
+                "ok": False,
+                "error_code": "mixed_installer_rejected",
+                "ecosystem": ecosystem,
+                "runtime": runtime,
+                "packages": packages,
+                "manager": "backend",
+                "message": "Mixed-installer plans are not executable. Submit a narrower single-family request.",
+                "started_at": started_at,
+                "finished_at": utc_now(),
+            }
+        installer_type = next(iter(installer_types))
+        names = [str(item.get("name", "")).strip() for item in installer_plan if item.get("name")]
+
+        if installer_type == "conda":
+            manager_name = "conda"
+            # Use resolver-approved conda candidates from the plan to
+            # avoid a redundant channel probe.
+            conda_packages = [
+                str(item.get("candidate") or item.get("name", "")).strip()
+                for item in installer_plan
+                if (item.get("candidate") or item.get("name"))
+            ]
+            if not conda_packages:
+                return {
+                    "ok": False,
+                    "error_code": "package_not_found_in_conda_channels",
+                    "ecosystem": ecosystem,
+                    "runtime": runtime,
+                    "packages": packages,
+                    "manager": manager_name,
+                    "message": "No conda candidates found in the installer_plan.",
+                    "started_at": started_at,
+                    "finished_at": utc_now(),
+                }
+            resolved_runtime, conda_bin = self._resolve_runtime_and_solver(runtime, ecosystem)
+            command = [str(conda_bin), "install", "-y", "-p", str(resolved_runtime), *conda_packages]
+            return self._run_dependency_command(
+                project_id,
+                command,
+                ecosystem=ecosystem,
+                runtime=runtime,
+                resolved_runtime=resolved_runtime or "",
+                packages=packages,
+                manager_name=manager_name,
+                timeout=timeout,
+                started_at=started_at,
+            )
+
+        if installer_type == "pip":
+            return self._run_pip_install(
+                project_id,
+                ecosystem=ecosystem,
+                runtime=runtime,
+                names=names,
+                timeout=timeout,
+                started_at=started_at,
+            )
+
+        if installer_type in {"cran", "bioconductor"}:
+            return self._run_r_registry_install(
+                project_id,
+                ecosystem=ecosystem,
+                runtime=runtime,
+                names=names,
+                installer_type=installer_type,
+                timeout=timeout,
+                started_at=started_at,
+            )
+
+        return {
+            "ok": False,
+            "error_code": "unsupported_installer",
+            "ecosystem": ecosystem,
+            "runtime": runtime,
+            "packages": packages,
+            "manager": "backend",
+            "message": f"Installer {installer_type!r} is not supported.",
+            "started_at": started_at,
+            "finished_at": utc_now(),
+        }
+
+    def _run_dependency_command(
+        self,
+        project_id: str,
+        command: list[str],
+        *,
+        ecosystem: str,
+        runtime: str,
+        resolved_runtime: str,
+        packages: list[str],
+        manager_name: str,
+        timeout: int,
+        started_at: str,
+    ) -> dict:
+        """Run a single subprocess command for dependency installation."""
+        run_env = self._dependency_subprocess_env(ecosystem, manager_name, resolved_runtime) if ecosystem == "R" and manager_name != "conda" else None
         try:
             result = subprocess.run(
                 command,
@@ -1199,14 +1550,9 @@ class ManagerBlueprintTools:
                 "finished_at": utc_now(),
             }
         ok = result.returncode == 0
-        if ok and ecosystem == "R" and manager_name != "conda" and self._is_r_compilation_failure(result.stderr):
-            ok = False
         error_code = None
         if not ok:
-            if ecosystem == "R" and manager_name != "conda" and self._is_r_compilation_failure(result.stderr):
-                error_code = "dependency_install_compilation_failed"
-            if error_code is None:
-                error_code = "dependency_install_failed"
+            error_code = "dependency_install_failed"
         return {
             "ok": ok,
             "error_code": error_code,
@@ -1216,12 +1562,167 @@ class ManagerBlueprintTools:
             "packages": packages,
             "manager": manager_name,
             "returncode": result.returncode,
-            "message": "Dependencies installed." if ok else "Dependency installation failed; ask the user to prepare the runtime manually if the error is not immediately fixable.",
+            "message": "Dependencies installed." if ok else "Dependency installation failed.",
             "stdout_tail": self._tail_text(result.stdout),
             "stderr_tail": self._tail_text(result.stderr),
             "started_at": started_at,
             "finished_at": utc_now(),
         }
+
+    def _run_pip_install(
+        self,
+        project_id: str,
+        *,
+        ecosystem: str,
+        runtime: str,
+        names: list[str],
+        timeout: int,
+        started_at: str,
+    ) -> dict:
+        """Structured pip install — no Manager-built text."""
+        from app.workers.command_worker import CommandTemplateWorkerAdapter
+        conda_base, env_path = CommandTemplateWorkerAdapter._resolve_conda_runtime(
+            runtime, self.project_service.settings
+        )
+        if not env_path.exists():
+            return {
+                "ok": False,
+                "error_code": "dependency_install_start_failed",
+                "ecosystem": ecosystem,
+                "runtime": runtime,
+                "resolved_runtime": str(env_path),
+                "packages": names,
+                "manager": "pip",
+                "message": f"Python runtime not found: {env_path}",
+                "stdout_tail": "",
+                "stderr_tail": "",
+                "started_at": started_at,
+                "finished_at": utc_now(),
+            }
+        python_bin = env_path / "bin" / "python"
+        if not python_bin.exists():
+            return {
+                "ok": False,
+                "error_code": "dependency_install_start_failed",
+                "ecosystem": ecosystem,
+                "runtime": runtime,
+                "resolved_runtime": str(env_path),
+                "packages": names,
+                "manager": "pip",
+                "message": f"Python executable not found for runtime: {runtime}",
+                "stdout_tail": "",
+                "stderr_tail": "",
+                "started_at": started_at,
+                "finished_at": utc_now(),
+            }
+        # Use resolver-approved bare names; reject any that survived the
+        # safety grammar by checking again before shelling out.
+        safe_names: list[str] = []
+        for name in names:
+            stripped = str(name or "").strip()
+            if not stripped or _contains_shell_danger_simple(stripped):
+                return {
+                    "ok": False,
+                    "error_code": "unsupported_source_spec",
+                    "ecosystem": ecosystem,
+                    "runtime": runtime,
+                    "resolved_runtime": str(env_path),
+                    "packages": names,
+                    "manager": "pip",
+                    "message": f"Rejected unsafe package name: {stripped!r}.",
+                    "started_at": started_at,
+                    "finished_at": utc_now(),
+                }
+            safe_names.append(stripped)
+        command = [str(python_bin), "-m", "pip", "install", *safe_names]
+        return self._run_dependency_command(
+            project_id,
+            command,
+            ecosystem=ecosystem,
+            runtime=runtime,
+            resolved_runtime=str(env_path),
+            packages=safe_names,
+            manager_name="pip",
+            timeout=timeout,
+            started_at=started_at,
+        )
+
+    def _run_r_registry_install(
+        self,
+        project_id: str,
+        *,
+        ecosystem: str,
+        runtime: str,
+        names: list[str],
+        installer_type: str,
+        timeout: int,
+        started_at: str,
+    ) -> dict:
+        """Structured CRAN / Bioconductor install via Rscript."""
+        from app.workers.command_worker import CommandTemplateWorkerAdapter
+        rscript = CommandTemplateWorkerAdapter._resolve_rscript_runtime(
+            runtime, self.project_service.settings
+        )
+        if rscript is None or not rscript.exists():
+            return {
+                "ok": False,
+                "error_code": "dependency_install_start_failed",
+                "ecosystem": ecosystem,
+                "runtime": runtime,
+                "resolved_runtime": str(rscript) if rscript else runtime,
+                "packages": names,
+                "manager": installer_type,
+                "message": f"R runtime not found: {runtime}",
+                "stdout_tail": "",
+                "stderr_tail": "",
+                "started_at": started_at,
+                "finished_at": utc_now(),
+            }
+        env_path = rscript.parent.parent
+        # Safety check: only bare R package names accepted.
+        safe_names: list[str] = []
+        for name in names:
+            stripped = str(name or "").strip()
+            if not stripped or _contains_shell_danger_simple(stripped) or "/" in stripped:
+                return {
+                    "ok": False,
+                    "error_code": "unsupported_source_spec",
+                    "ecosystem": ecosystem,
+                    "runtime": runtime,
+                    "resolved_runtime": str(env_path),
+                    "packages": names,
+                    "manager": installer_type,
+                    "message": f"Rejected unsafe package name: {stripped!r}.",
+                    "started_at": started_at,
+                    "finished_at": utc_now(),
+                }
+            safe_names.append(stripped)
+        import json as _json
+        package_vector = "c(" + ", ".join(_json.dumps(item) for item in safe_names) + ")"
+        if installer_type == "cran":
+            expression = (
+                'options(repos=c(CRAN="https://cloud.r-project.org")); '
+                f"install.packages({package_vector}, dependencies=TRUE)"
+            )
+        else:
+            expression = (
+                'options(repos=c(CRAN="https://cloud.r-project.org")); '
+                'if (!requireNamespace("BiocManager", quietly=TRUE)) install.packages("BiocManager"); '
+                f"BiocManager::install({package_vector}, ask=FALSE, update=FALSE)"
+            )
+        command = [str(rscript), "--vanilla", "-e", expression]
+        run_env = self._dependency_subprocess_env(ecosystem, installer_type, str(rscript))
+        return self._run_dependency_command(
+            project_id,
+            command,
+            ecosystem=ecosystem,
+            runtime=runtime,
+            resolved_runtime=str(env_path),
+            packages=safe_names,
+            manager_name=installer_type,
+            timeout=timeout,
+            started_at=started_at,
+        )
 
     def _validated_runtime_dependency_payload(self, project_id: str, payload: dict, *, session_id: str | None = None) -> dict[str, Any]:
         request = InstallRuntimeDependenciesPayload.model_validate(payload)
@@ -2032,6 +2533,19 @@ class ManagerBlueprintTools:
                 f"BiocManager::install({package_vector}, ask=FALSE, update=FALSE)"
             )
         return [str(rscript), "--vanilla", "-e", expression], str(rscript)
+
+    def _resolve_runtime_and_solver(
+        self, runtime: str, ecosystem: str
+    ) -> tuple[Path, Path]:
+        """Return (resolved_runtime_path, conda_bin) without package probing."""
+        from app.workers.command_worker import CommandTemplateWorkerAdapter
+        conda_base, env_path = CommandTemplateWorkerAdapter._resolve_conda_runtime(
+            runtime, self.project_service.settings
+        )
+        if not env_path.exists():
+            raise ManagerPlanningError(f"Runtime not found: {runtime}")
+        conda_bin = self._resolve_conda_solver(conda_base)
+        return env_path, conda_bin
 
     @staticmethod
     def _dependency_manager_label(ecosystem: str) -> str:

@@ -32,6 +32,7 @@ import {
   UpdateProjectRuntimePreferencesPayload,
   RuntimeApprovalDecision,
   WorkOrder,
+  RuntimeDependencyResolverPlan,
 } from "./types";
 import type { ChatTokenUsage } from "./types";
 
@@ -466,6 +467,25 @@ export const api = {
       stdout_tail?: string | null;
       stderr_tail?: string | null;
     }>(`/projects/${projectId}/runtime-dependency-jobs/${jobId}`);
+  },
+  resolveRuntimeDependencies(
+    projectId: string,
+    payload: {
+      ecosystem: string;
+      runtime: string;
+      packages: string[];
+      source?: { card_id?: string; run_id?: string } | null;
+    },
+    sessionId?: string | null,
+  ) {
+    return request<RuntimeDependencyResolverPlan>(
+      `/internal/manager-tools/projects/${projectId}/runtime-dependencies/resolve`,
+      {
+        method: "POST",
+        body: JSON.stringify({ ...payload, source: payload.source ?? {} }),
+        headers: sessionId ? { "x-blueprint-session-id": sessionId } : undefined,
+      },
+    );
   },
   markRuntimeDependencyJobResolved(projectId: string, jobId: string, sessionId: string, resolutionMessage?: string) {
     return request<{

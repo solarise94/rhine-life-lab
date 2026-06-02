@@ -496,6 +496,28 @@ def install_runtime_dependencies(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.post("/runtime-dependencies/resolve")
+def resolve_runtime_dependencies(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    # resolve_runtime_dependencies is intentionally available in btw mode
+    # because it never mutates runtime state.  We do NOT call
+    # _guard_mutation here, and we deliberately omit this tool name from
+    # _MUTATING_TOOL_NAMES so that later additions to that set cannot
+    # inadvertently block it.
+    try:
+        return manager_service.blueprint_tools.resolve_runtime_dependencies(
+            project_id, payload, x_blueprint_session_id
+        )
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/runtime-dependencies/jobs/{job_id}")
 def get_runtime_dependency_install_status(
     project_id: str,

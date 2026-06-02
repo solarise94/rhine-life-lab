@@ -40,6 +40,7 @@ class ManagerService:
         tool_layer: ManagerToolLayer | None = None,
         worker_service: WorkerService | None = None,
         runtime_dependency_job_service: RuntimeDependencyJobService | None = None,
+        runtime_dependency_resolver_service: "RuntimeDependencyResolverService | None" = None,
         library_registry_service: LibraryRegistryService | None = None,
         manager_auto_service: ManagerAutoService | None = None,
         background_workboard_service: BackgroundWorkboardService | None = None,
@@ -56,6 +57,7 @@ class ManagerService:
             project_service=self.project_service,
             worker_service=worker_service,
             runtime_dependency_job_service=runtime_dependency_job_service,
+            runtime_dependency_resolver_service=runtime_dependency_resolver_service,
             library_registry_service=library_registry_service,
             background_workboard_service=background_workboard_service,
         )
