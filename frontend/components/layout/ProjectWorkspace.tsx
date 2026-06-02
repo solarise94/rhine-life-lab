@@ -104,6 +104,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const projectRefreshTimerRef = useRef<number | null>(null);
   const projectDelayedRefreshTimerRef = useRef<number | null>(null);
   const currentChatSessionIdRef = useRef<string | null>(null);
+  const noticeRef = useRef<string | null>(null);
   const selectedCardId = useWorkspaceUiStore((s) => s.selectedCardByProject[projectId]);
   const cardInteractionOrder = useWorkspaceUiStore(
     (s) => s.cardInteractionOrderByProject[projectId] ?? EMPTY_CARD_INTERACTION_ORDER,
@@ -118,6 +119,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const currentChatSessionId = useWorkspaceUiStore((s) => s.currentChatSessionIdByProject[projectId] ?? null);
   currentChatSessionIdRef.current = currentChatSessionId;
   const notice = useWorkspaceUiStore((s) => s.noticesByProject[projectId] ?? null);
+  noticeRef.current = notice;
   const setSelectedCard = useWorkspaceUiStore((s) => s.setSelectedCard);
   const setSelectedWorker = useWorkspaceUiStore((s) => s.setSelectedWorker);
   const setSelectedProfile = useWorkspaceUiStore((s) => s.setSelectedProfile);
@@ -270,7 +272,9 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           // Ignore manually resolved jobs to avoid re-showing the failure notice.
           if (eventPayload.resolution_status === "manually_resolved") {
             // Clear any existing dependency failure notice so it disappears immediately.
-            if (notice && notice.startsWith("Dependency install failed")) {
+            // Read from noticeRef to avoid stale closure value.
+            const currentNotice = noticeRef.current;
+            if (currentNotice && currentNotice.startsWith("Dependency install failed")) {
               setNotice(projectId, null);
             }
           } else {

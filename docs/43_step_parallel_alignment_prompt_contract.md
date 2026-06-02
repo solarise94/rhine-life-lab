@@ -87,20 +87,38 @@ batch 2: [card_4]
      batch in this turn."
    - 对 frontier 规划没有 "对齐 parallel_group" 的激励。
 
+8. **"单 turn 单任务" 歧义约束**（system prompt + wake prompt + 设计文档）
+   - `manager-agent/src/server.js:172`：
+     "In auto/background turns, call get_background_workboard first.
+     **Consume at most one actionable workboard item or one claimed run batch
+     per turn.**"
+   - `backend/app/services/manager_wake_processor.py:246`：同一句话在 wake
+     prompt 里再次重复。
+   - `docs/32_unified_background_task_supervisor.md:360`：
+     "Each Manager turn should consume at most one action batch."
+   - `docs/36_manager_workboard_prompt_contract.md:286`：
+     "Manager should consume at most one workboard decision cycle per turn."
+   - 预期读法是 "一次 turn 要么消费 1 个零散 item，要么消费 1 个 run batch
+     （batch 可含多张卡）"；模型实际读成 "**一次 turn 只能做 1 件事**"。
+   - 结果：不会在同一 turn 里同时 `install_runtime_dependencies` +
+     `start_card_run`（即使两件完全独立）；不会在同一个 turn 里连续
+     claim 多个 ready 卡后一次性 submit；后台任务被串行化。
+   - 和下面 F 想鼓励的 "同层并行" 直接冲突。
+
 ### 校验侧
 
-8. **`AssetTimelineService.validate_card`**
+9. **`AssetTimelineService.validate_card`**
    (`backend/app/services/asset_timeline_service.py:116-170`)
    - Line 159-165: 只校验 `candidate.step < min_step`（下界），
      不校验 `candidate.step > min_step` 的上界散落。
    - 模型给 step=5 而 min_step=1，校验通过。
 
-9. **`_recommended_step`**
-   (`backend/app/services/manager_blueprint_tools.py:2677-2687`)
-   - 只返回下界 `min_step = max(asset.step + 1 for each input)`，
-     没有 "同层对齐" 逻辑，也没有返回 "当前同层已有 N 张卡" 这类参考。
+10. **`_recommended_step`**
+    (`backend/app/services/manager_blueprint_tools.py:2677-2687`)
+    - 只返回下界 `min_step = max(asset.step + 1 for each input)`，
+      没有 "同层对齐" 逻辑，也没有返回 "当前同层已有 N 张卡" 这类参考。
 
-10. **create_card 成功返回**：只返回 `{ ok, card_id, asset_ids, ... }`，
+11. **create_card 成功返回**：只返回 `{ ok, card_id, asset_ids, ... }`，
     不回传 `parallel_group` 或 `step_alignment_hint`，模型建完卡也不知道
     自己的 step 是不是和同层其他卡对齐了。
 
@@ -209,7 +227,7 @@ dependency requires it.
   independent cards of the same layer across different steps.
 ```
 
-**F. Wake prompt 增加 batch 对齐信号**
+**F. Wake prompt 增加 batch 对齐信号并解除单任务歧义**
 位置：`backend/app/services/manager_wake_processor.py:246`。
 
 原文：
@@ -219,14 +237,64 @@ Call get_background_workboard first. Consume at most one actionable
 workboard item or one claimed run batch in this turn.
 ```
 
+改为（和 J 段对齐）：
+
+```text
+Call get_background_workboard first. This turn may end with at most one
+async-boundary-yielding action (one submit_claimed_workboard_items, or one
+start_card_run / rerun_card, or one install_runtime_dependencies). You may
+combine independent non-yielding tool calls and may start one dependency
+install plus one run-yielding action in the same turn when they are truly
+independent. When planning new cards from a frontier wake, align new cards
+to the parallel_group of existing ready_to_start items that share their
+input layer.
+```
+
+**J. 单 turn 单任务歧义收紧（以 async boundary 为计量单位）**
+位置：
+- `manager-agent/src/server.js:172`（system prompt Judgment 段）
+- `backend/app/services/manager_wake_processor.py:246`（wake prompt，
+  已在 F 段一并改写）
+
+system prompt 原文：
+
+```text
+- In auto/background turns, call get_background_workboard first. Consume
+  at most one actionable workboard item or one claimed run batch per turn.
+```
+
 改为：
 
 ```text
-Call get_background_workboard first. Consume at most one actionable
-workboard item or one claimed run batch in this turn. When planning new
-cards from a frontier wake, align new cards to the parallel_group of
-existing ready_to_start items that share their input layer.
+- In auto/background turns, call get_background_workboard first. Each turn
+  should end with at most one async-boundary-yielding action batch: one
+  submit_claimed_workboard_items call, or one start_card_run / rerun_card,
+  or one install_runtime_dependencies. You may combine independent
+  non-yielding tool calls (inspect_*, find_*, get_*, configure_card_execution,
+  annotate_card, write_project_memory) freely. You may also start one
+  install_runtime_dependencies plus one run-yielding action in the same turn
+  when they are truly independent; the async boundary will still yield the
+  turn once. Do not call start_card_run repeatedly in the same turn to
+  emulate a batch — use submit_claimed_workboard_items instead.
 ```
+
+关键点：
+
+1. **async-boundary-yielding** 作为计量单位。这是 doc 32 / doc 37 已有的
+   概念：async boundary 才是 turn 结束点，而不是 "1 件事"。
+2. 显式允许 **install + run 同 turn**：`install_runtime_dependencies` 和
+   `start_card_run` 都返回 background/job_id，async boundary 会自动
+   yield。串行化它们没有收益。
+3. 显式允许 **多个非 yielding 工具 + 一个 yielding 动作**：inspect、
+   find、configure 这类工具本来就不让出 turn。
+4. 显式禁止 **重复 start_card_run 模拟 batch**：这是 doc 34 / doc 37
+   已经写明的反模式，正确路径是 `submit_claimed_workboard_items`。
+5. 和 doc 32（unified supervisor）/ doc 36（workboard prompt）/ doc 37
+   （claim/wake/stop）的 "one action batch per turn" 语义对齐：把
+   "at most one workboard item or one run batch" 的歧义消掉，文档侧的
+   "one action batch" 口径保持不变。
+
+wake prompt 同义改写已在 F 段完成，两处同步即可。
 
 ### 校验层（辅助，不替代 prompt）
 
@@ -279,6 +347,10 @@ if candidate.step is not None and candidate.step > min_step:
   但不阻断。
 - Manager 端 smoke：给 OAA-2 同类蓝图下发 "建 3 张独立 QC 卡 + 1 张汇总卡"，
   期望模型返回 step=[1,1,1,2]，不再是 [1,2,3,4]。
+- 后台并行 smoke：在一个 turn 里同时下发
+  `install_runtime_dependencies`（修某张卡缺的 R 包）+ `start_card_run`
+  （另一张已 ready 的卡），期望模型一次性完成两件后台工作而不是分两
+  个 turn。验证 J 段解除单任务歧义后后台任务不再串行化。
 
 ## 边界与不做什么
 
@@ -301,6 +373,13 @@ if candidate.step is not None and candidate.step > min_step:
     与 doc 40 的 binding 分层正交。
   - doc 41（dependency resolver 上报）：本 doc 不动 resolver 或
     attention 派生，`parallel_group` 由已有 `parallel_batches` 提供。
+- **不与 doc 32/36/37 冲突**：
+  - doc 32（unified supervisor）/ doc 36（workboard prompt）/ doc 37
+    （claim/wake/stop）的 "one action batch per turn" / "one workboard
+    decision cycle per turn" 口径保持不变。本 doc J 段只是把
+    system prompt / wake prompt 里 "one workboard item or one run batch"
+    的歧义表述改写成以 async boundary 为单位的 action batch，与那
+    三份文档的 "one batch" 语义对齐，不需要反过去修改那三份文档。
 
 ## 实施顺序建议
 
@@ -308,17 +387,24 @@ if candidate.step is not None and candidate.step > min_step:
    改完 `node --check src/server.js`。
 2. **P0 planner 两处**：D / E（`manager_planner.py`）。跑现有
    `tests/test_manager_flow.py` 看有没有回归。
-3. **P0 wake prompt**：F（`manager_wake_processor.py`）。
+3. **P0 wake + system prompt 单任务歧义**：F / J
+   （`manager_wake_processor.py` + `manager-agent/src/server.js:172`）。
+   这两条是解除后台任务串行化的核心。
 4. **P1 校验 warning**：G / H / I。补 `test_asset_timeline_service.py`
    和 `test_manager_flow.py` 两个 case。
 5. **P1 OAA-2 实测验证**：用 OAA-2 同类蓝图下发规划指令，确认模型
-   输出 step=[1,1,...,1,2,...] 而不是严格递增。
+   输出 step=[1,1,...,1,2,...] 而不是严格递增；同时下发 install + run
+   验证后台不再串行化。
 
 ## Acceptance
 
 - Manager system prompt 明确写出 "step 是并行层、不是序号"。
+- Manager system prompt 的 "at most one" 改成以 async boundary 为
+  单位的 action batch 表述，并显式允许 install + run 同 turn。
 - `create_card` / `revise_card_plan` 工具描述显式要求对齐同层。
 - Legacy planner + harness prompt 不再压制同层多卡。
-- Wake prompt 提到 `parallel_group`。
+- Wake prompt 提到 `parallel_group`，且与 system prompt 的单任务口径一致。
 - `validate_card` 对同层散落返回 warning（非 error）。
 - OAA-2 同类场景下，模型一次建 3+ 张无依赖卡时 `step` 相等。
+- 后台并行 smoke：模型在一个 turn 里同时发起 install + run 两件独立
+  后台工作，不再串行化。
