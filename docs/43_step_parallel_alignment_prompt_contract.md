@@ -122,6 +122,41 @@ batch 2: [card_4]
     不回传 `parallel_group` 或 `step_alignment_hint`，模型建完卡也不知道
     自己的 step 是不是和同层其他卡对齐了。
 
+### script_preference 传导链
+
+`AGENTS.md` 明确写过：
+
+> `script_preference` is a soft planning hint — persist in
+> `card.executor_context.instruction_blocks`, not as executor hard logic.
+
+实际代码里这条约定在四处断掉：
+
+12. **`configure_card_execution` 工具没有 `instruction_blocks` 字段**
+    (`manager-agent/src/server.js:1822-1835`)。
+    - schema 只有 `card_ids / skills / mcp_servers / runtime_bindings(conda_env, r_env)`。
+    - Manager 看到用户选了 `prefer_r` 后，**没有工具**把这个偏好写到
+      `card.executor_context.instruction_blocks`，只能在对话里说一句
+      "我建议用 R"，executor 永远收不到。
+
+13. **`ExecutorContext` 模型没有 `script_preference` 字段**
+    (`backend/app/models/executor.py`)。
+    - 只有 `instruction_blocks: list[str]`，没有独立的 `script_preference`
+      槽位；前端存的偏好和卡片执行契约之间没有显式桥接。
+
+14. **`worker_service._default_executor_context` 不读偏好**
+    (`backend/app/services/worker_service.py:1934-1937`)。
+    - 写死的 `instruction_blocks` 只有两条通用规则（"Prefer reproducible
+      scripts..." / "Summarize findings conservatively..."），**完全不读**
+      `project.runtime_preferences.script_preference`。
+    - 即使 Manager 在对话里承诺了 R，executor 跑起来还是按默认行为选
+      Python。
+
+15. **`install_runtime_dependencies` 的 `ecosystem` 没有偏好默认**
+    (`manager-agent/src/server.js:1863`)。
+    - schema：`ecosystem: Type.String({ description: "python or R" })`。
+    - 用户选了 `prefer_r`，模型装包时仍然可能 `ecosystem="python"`，
+      因为 description 没告诉它 "在 R 偏好下默认填 R"。
+
 ### 行为后果
 
 - 同层卡片被拆成多个 step → UI 时间轴出现假的串行化。
@@ -130,6 +165,10 @@ batch 2: [card_4]
 - auto 模式下 `submit_claimed_workboard_items` 按 workboard batch 提交，
   实际跑起来确实是并行的；但用户从蓝图上看到的是串行序号，认知负担高。
 - 模型在 revise_card_plan 修卡时也不会主动 "拉齐" 同层卡片的 step。
+- **用户选了 `prefer_r` / `prefer_python`，偏好形同虚设**：Manager
+  在对话里说 "我按你的偏好选了 R"，但 executor 实际跑的还是默认
+  Python；`install_runtime_dependencies` 的 ecosystem 也不按偏好默认。
+  整条传导链断在 Manager → 卡片 executor_context 这一跳。
 
 ## 收紧方案
 
@@ -296,6 +335,83 @@ system prompt 原文：
 
 wake prompt 同义改写已在 F 段完成，两处同步即可。
 
+### script_preference 传导链（补强偏好落地路径）
+
+**K1. `configure_card_execution` 增加 `instruction_blocks` 参数**
+位置：`manager-agent/src/server.js:1822-1835`。
+
+在 parameters 里追加：
+
+```js
+instruction_blocks: Type.Optional(
+  Type.Array(Type.String(), {
+    description: "Free-form planning hints the executor should read. "
+      + "Use this to persist selected_context.script_preference into the "
+      + "card. Keep entries short and non-binding.",
+  }),
+),
+```
+
+让 Manager 能在 create_card / revise_card_plan 之后显式调用
+`configure_card_execution` 把偏好写到 `card.executor_context.instruction_blocks`。
+
+**K2. `ExecutorContext` 模型增加 `script_preference` 字段**
+位置：`backend/app/models/executor.py`。
+
+```python
+script_preference: str | None = None
+```
+
+只用于持久化槽位，不进入 executor 硬逻辑；`worker_service` 在读它时
+拼出一条 instruction block 即可。
+
+**K3. `worker_service._default_executor_context` 读偏好**
+位置：`backend/app/services/worker_service.py:1934-1937`。
+
+在两条默认 instruction 之后追加：
+
+```python
+script_pref = getattr(card.executor_context, "script_preference", None) \
+              or project.runtime_preferences.script_preference
+if script_pref and script_pref != "auto":
+    instruction_blocks.append(
+        self._script_preference_block(script_pref)
+    )
+```
+
+`_script_preference_block` 复用 `scriptPreferenceGuidance` 同一套文案
+（"Soft script preference: prefer R/Python scripts when practical. This
+is not a hard constraint; use the other when more reliable."）。
+
+**K4. system prompt 加偏好落卡指令**
+位置：`manager-agent/src/server.js:196-197` 之后追加。
+
+```text
+- When creating or revising an analysis card and selected_context.script_preference
+  is prefer_python, prefer_r, or prefer_mixed, persist it into
+  card.executor_context by calling configure_card_execution with the matching
+  instruction_blocks entry. Do not rely on chat-side acknowledgment alone;
+  the executor does not read chat history.
+```
+
+**K5. `install_runtime_dependencies` ecosystem 加偏好默认 hint**
+位置：`manager-agent/src/server.js:1863`。
+
+把 `description: "python or R"` 改为：
+
+```text
+"python or R. When selected_context.script_preference is prefer_r, default
+ecosystem to R unless the task clearly needs a Python-only package; mirror
+for prefer_python. Do not invent a third ecosystem value."
+```
+
+**K6. wake turn 确认 userEnvelope 重发偏好**
+位置：`manager-agent/src/server.js:3113-3127`。
+
+wake turn 走的也是同一个 `userEnvelope` 构建，已经带
+`script_preference_guidance` 和 `runtime_preference_guidance`，无需改动；
+只需要在 K4 加完 prompt 后 smoke 验证 wake turn 同样把偏好落卡。
+
 ### 校验层（辅助，不替代 prompt）
 
 **G. `validate_card` 加上界 warning**
@@ -351,6 +467,13 @@ if candidate.step is not None and candidate.step > min_step:
   `install_runtime_dependencies`（修某张卡缺的 R 包）+ `start_card_run`
   （另一张已 ready 的卡），期望模型一次性完成两件后台工作而不是分两
   个 turn。验证 J 段解除单任务歧义后后台任务不再串行化。
+- script_preference 传导 smoke：项目选 `prefer_r`，下发 "建一张差异表达
+  卡并准备依赖"。验证：
+  1. Manager 在 create_card 后调用 `configure_card_execution` 把
+     `prefer_r` 写进 `card.executor_context.instruction_blocks`；
+  2. `install_runtime_dependencies` 的 `ecosystem` 默认填 `R`；
+  3. `worker_service` 构造的 task packet 里 executor prompt 包含
+     "prefer R scripts when practical" 文本。
 
 ## 边界与不做什么
 
@@ -380,6 +503,14 @@ if candidate.step is not None and candidate.step > min_step:
     system prompt / wake prompt 里 "one workboard item or one run batch"
     的歧义表述改写成以 async boundary 为单位的 action batch，与那
     三份文档的 "one batch" 语义对齐，不需要反过去修改那三份文档。
+- **K 系列 script_preference 边界**：
+  - **不把偏好改成硬约束**：`scriptPreferenceGuidance` 的 "not a hard
+    constraint" 措辞保留；R 在 DESeq2 / edgeR / limma 等任务上确实比
+    Python 更成熟，硬约束会反过来坑用户。
+  - **不动 reviewer prompt**：`REVIEWER_SYSTEM_PROMPT` 只审 contract
+    一致性，不关心 Python vs R 选择，保持中立。
+  - **不动前端**：frontend 已经正确存 `script_preference` 到
+    `ProjectRuntimePreferences` 并通过 `selected_context` 下发。
 
 ## 实施顺序建议
 
@@ -390,11 +521,17 @@ if candidate.step is not None and candidate.step > min_step:
 3. **P0 wake + system prompt 单任务歧义**：F / J
    （`manager_wake_processor.py` + `manager-agent/src/server.js:172`）。
    这两条是解除后台任务串行化的核心。
-4. **P1 校验 warning**：G / H / I。补 `test_asset_timeline_service.py`
+4. **P0 script_preference 传导**：K1 / K4 / K5
+   （`configure_card_execution` 加字段、system prompt 加落卡指令、
+   `install_runtime_dependencies.ecosystem` 加偏好 hint）。
+5. **P1 script_preference 持久化槽**：K2 / K3 / K6
+   （`ExecutorContext.script_preference`、`worker_service` 自动 append
+   instruction block、wake turn smoke 验证）。
+6. **P1 校验 warning**：G / H / I。补 `test_asset_timeline_service.py`
    和 `test_manager_flow.py` 两个 case。
-5. **P1 OAA-2 实测验证**：用 OAA-2 同类蓝图下发规划指令，确认模型
+7. **P1 OAA-2 实测验证**：用 OAA-2 同类蓝图下发规划指令，确认模型
    输出 step=[1,1,...,1,2,...] 而不是严格递增；同时下发 install + run
-   验证后台不再串行化。
+   验证后台不再串行化；在 `prefer_r` 项目下验证偏好落卡 + ecosystem 默认 R。
 
 ## Acceptance
 
@@ -408,3 +545,10 @@ if candidate.step is not None and candidate.step > min_step:
 - OAA-2 同类场景下，模型一次建 3+ 张无依赖卡时 `step` 相等。
 - 后台并行 smoke：模型在一个 turn 里同时发起 install + run 两件独立
   后台工作，不再串行化。
+- `configure_card_execution` 接受 `instruction_blocks` 参数，Manager
+  显式调用它把 `script_preference` 写进 `card.executor_context`。
+- `ExecutorContext.script_preference` 字段存在，`worker_service` 据此
+  自动 append 一条 "prefer R/Python when practical" instruction block。
+- `install_runtime_dependencies.ecosystem` 描述包含偏好默认 hint。
+- `prefer_r` 项目下跑完整 smoke：卡片落卡 / 依赖安装 / executor prompt
+  三处都能看到 R 偏好生效。
