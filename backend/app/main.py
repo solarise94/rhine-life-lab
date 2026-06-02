@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import advanced, app_settings, chat, chat_sessions, diagnostics, executor_profiles, files, library, manager_auto, manager_tools, project_events, projects, report, results, runs
-from app.api.deps import get_app_config_service, get_manager_wake_processor, get_worker_service
+from app.api.deps import get_app_config_service, get_manager_auto_service, get_worker_service, inject_wake_dispatch
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -13,7 +13,11 @@ settings = get_settings()
 def initialize_runtime_services() -> None:
     get_app_config_service()
     get_worker_service()
-    get_manager_wake_processor().start()
+    # Doc 42: Initialize ManagerAutoService and inject wake dispatch.
+    # inject_wake_dispatch must be called after all services are constructed
+    # to avoid circular dependency through ChatSessionService.
+    get_manager_auto_service()
+    inject_wake_dispatch()
 
 
 @asynccontextmanager
@@ -22,7 +26,7 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
-        get_manager_wake_processor().stop()
+        pass
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)

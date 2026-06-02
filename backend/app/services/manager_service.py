@@ -253,9 +253,14 @@ class ManagerService:
                 "owner_session_id": None,
                 "btw_mode": False,
                 "state": "idle",
-                "wake_allowed": False,
                 "scope_objective": None,
-                "expires_at": None,
+                "fuel_revision": 0,
+                "last_notified_revision": 0,
+                "wake_in_flight": False,
+                "completion_notified": False,
+                "chain_count": 0,
+                "stop_reason": None,
+                "finished_at": None,
             }
         view = self.manager_auto_service.get_view(project_id, session_id)
         return {
@@ -263,13 +268,16 @@ class ManagerService:
             "owner_session_id": view.state.owner_session_id,
             "btw_mode": view.btw_mode,
             "state": view.state.state,
-            "mode": view.state.mode,
-            "view_workboard": view.state.view_workboard,
-            "consume_workboard": view.state.consume_workboard,
             "pending_directives": [item.model_dump() for item in view.state.pending_directives if item.status == "pending"],
-            "wake_allowed": view.state.wake_allowed,
             "scope_objective": view.state.scope_objective,
-            "expires_at": view.state.expires_at,
+            # Doc 42 latch fields
+            "fuel_revision": view.state.fuel_revision,
+            "last_notified_revision": view.state.last_notified_revision,
+            "wake_in_flight": view.state.wake_in_flight,
+            "completion_notified": view.state.completion_notified,
+            "chain_count": view.state.chain_count,
+            "stop_reason": view.state.stop_reason,
+            "finished_at": view.state.finished_at,
         }
 
     def _save_or_answer(self, project_id: str, snapshot: dict, draft: ManagerPlanDraft) -> ChatResponse:

@@ -158,7 +158,8 @@ Available capabilities:
 - install_runtime_dependencies starts a background job that installs explicitly named Python/R packages into an already selected non-system runtime. When fixing a specific card/run dependency issue, include source.card_id and source.run_id when known. Treat it like card execution background work: after a successful start, report the job_id and stop; do not foreground-poll the job in the same turn. Under the default report_only policy the backend uses only the conda-family solver; when the per-deploy policy is allow_safe_registry_install and the resolver approves every package as a single-family request, pip / cran / bioconductor actions may also execute through structured backend commands — never invent or pass a package manager yourself.
 - resolve_runtime_dependencies returns a resolver plan (status, installable, blocked, fallback_actions) for the same request shape as install_runtime_dependencies, without creating a background job. Use it to inspect what would happen before mutating runtime state. The plan never executes a partial install: if status is not "fully_installable", the caller must not retry install_runtime_dependencies with the same payload. If status is "partial_resolution_requires_manual_preparation" and the user has approved a narrower install, submit a new explicit request that lists only the installable subset.
 - get_runtime_dependency_install_status checks whether a previously started dependency installation job has finished. Use it for explicit user checks, recovery, or a later wake turn; do not use it to poll a just-started job in the same turn.
-- promote_workboard_item_to_todo, claim_workboard_item, complete_workboard_item, defer_workboard_item, block_workboard_item_for_user, reopen_workboard_item, and submit_claimed_workboard_items consume backend workboard items. Use them in auto/background turns and also for user-driven "continue / resume / run next / run ready cards / run several cards" requests; do not invent your own todo list.
+- promote_workboard_item_to_todo, claim_workboard_item, complete_workboard_item, defer_workboard_item, block_workboard_item_for_user, reopen_workboard_item, skip_workboard_item, and submit_claimed_workboard_items consume backend workboard items. Use them in auto/background turns and also for user-driven "continue / resume / run next / run ready cards / run several cards" requests; do not invent your own todo list.
+- finish_auto_episode confirms the current auto episode is complete and transitions it to finished. Valid only when the auto state is "complete". After calling this, the episode terminates and no further auto wakes occur.
 - start_card_run, stop_card_run, rerun_card, and review_card_run control card execution directly when execution should happen now. Reserve start_card_run for one explicit card. For frontier or batch execution, prefer get_background_workboard -> promote/claim/submit. After a successful start_card_run or rerun_card launch, do not poll card status in the same turn. Briefly report the run_id and stop so run events/wake events can carry progress.
 - cleanup_run_history removes old finished run execution files/caches when they are no longer needed; by default it preserves runs that own valid accepted assets.
 - search_card_templates, save_card_template, and instantiate_card_template manage reusable manager-only card templates.
@@ -300,6 +301,10 @@ const TOOL_STATUS_LABELS = {
     active: "正在完成工作项",
     done: "已完成工作项",
   },
+  skip_workboard_item: {
+    active: "正在跳过工作项",
+    done: "已跳过工作项",
+  },
   defer_workboard_item: {
     active: "正在延后工作项",
     done: "已延后工作项",
@@ -387,6 +392,10 @@ const TOOL_STATUS_LABELS = {
   web_extract: {
     active: "正在读取网页",
     done: "已读取网页",
+  },
+  finish_auto_episode: {
+    active: "正在完成自动轮次",
+    done: "已确认完成",
   },
 };
 
@@ -1299,6 +1308,11 @@ function buildToolReport(toolName, details) {
       details,
     };
   }
+  if (toolName === "finish_auto_episode" && details.ok) {
+    return {
+      summary: `自动轮次已确认完成。${details.complete_message || ""}`,
+    };
+  }
   if (toolName === "submit_claimed_workboard_items" && details.background && details.run_id) {
     const startedCount = Number(details.started_count || 1);
     const batchLabel = startedCount > 1
@@ -2123,6 +2137,32 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
       },
     },
     {
+      name: "skip_workboard_item",
+      label: "Skip workboard item",
+      description: "Skip a workboard todo item — the only explicit way to exit todo fuel. Marks the item as done and sets fuel_consumed_at.",
+      parameters: Type.Object({
+        item_id: Type.String(),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "skip_workboard_item",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/background-workboard/skip`,
+            { method: "POST", body: params },
+            signal,
+            sessionId,
+          );
+          return toolTextResult("skip_workboard_item", payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "skip_workboard_item_failed", tool_name: "skip_workboard_item" });
+        }
+      },
+    },
+    {
       name: "defer_workboard_item",
       label: "Defer workboard item",
       description: "Defer a workboard item to a later turn when another action batch should happen first.",
@@ -2223,6 +2263,32 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           return toolTextResult("submit_claimed_workboard_items", payload, isRunAsyncBoundaryPayload("submit_claimed_workboard_items", payload));
         } catch (error) {
           return toolErrorResult(error, { error_type: "submit_claimed_workboard_items_failed", tool_name: "submit_claimed_workboard_items" });
+        }
+      },
+    },
+    {
+      name: "finish_auto_episode",
+      label: "Finish auto episode",
+      description: "Confirm that the current auto episode is complete and transition to finished state. Valid only when the auto state is 'complete'. Provide a complete_message summarizing the objective, completion status, outputs, and remaining caveats.",
+      parameters: Type.Object({
+        complete_message: Type.String(),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "finish_auto_episode",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/finish-auto-episode`,
+            { method: "POST", body: params },
+            signal,
+            sessionId,
+          );
+          return toolTextResult("finish_auto_episode", payload);
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "finish_auto_episode_failed", tool_name: "finish_auto_episode" });
         }
       },
     },
@@ -2655,10 +2721,12 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     "promote_workboard_item_to_todo",
     "claim_workboard_item",
     "complete_workboard_item",
+    "skip_workboard_item",
     "defer_workboard_item",
     "block_workboard_item_for_user",
     "reopen_workboard_item",
     "submit_claimed_workboard_items",
+    "finish_auto_episode",
     "start_card_run",
     "stop_card_run",
     "rerun_card",
@@ -3238,7 +3306,7 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
         ? "This session is in /btw mode. Answer questions, inspect status, explain logs, and use read-only tools only. Do not mutate blueprint or execution state."
         : "Answer naturally. Decide whether project tools are needed. If the user asks to continue, resume, run the next step, run ready cards, or start multiple cards, read get_background_workboard first and prefer the workboard claim/submit path. If you change the blueprint, remember that cards are the blueprint units and use create_card, revise_card_plan, annotate_card, delete_card, configure_card_execution, run-control, or template tools directly as needed. After ok:false tool results, correct and retry when the fix is clear.") +
       (payload.auto_mode?.enabled && !payload.auto_mode?.btw_mode
-        ? " Scoped workboard wake permission is enabled for this session. Keep the project moving, prefer safe routine fixes, and treat pending directives as higher-priority steering."
+        ? " Auto episode is active for this session. The backend will send workboard_evaluate wakes when the workboard has fuel (todo items, completion signals, or blocker signals) and complete_evaluate wakes when all work appears done. On each wake, call get_background_workboard first, consume at most one item or batch per turn, and stop after reporting ids to let async-boundary yield the turn. When you receive a complete_evaluate wake, inspect the project state: if the objective is truly done, call finish_auto_episode to end the episode with a summary; if more work is needed, create new todo fuel or adjust cards to generate new signals. Todo items only accept planned cards; the only explicit todo exit is skip (not done); todo items auto-exit when their card is submitted or started."
         : ""),
   };
   const abortController = new AbortController();

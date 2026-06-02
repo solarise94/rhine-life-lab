@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from hashlib import sha1
 import json
@@ -10,7 +11,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from app.models.background import BackgroundWorkboardState, BackgroundWorkboardView, WorkboardItemRecord
+from app.models.background import BackgroundWorkboardState, BackgroundWorkboardView, FuelKind, WorkboardFuelSnapshot, WorkboardItemRecord
+from app.models.cards import Card
 from app.models.runs import ExecutorFailureReport
 from app.services.background_task_service import BackgroundTaskService
 from app.services.flow_service import FlowService
@@ -31,13 +33,34 @@ class BackgroundWorkboardService:
         self.flow_service = FlowService(project_service)
         self._locks: dict[str, RLock] = {}
         self._locks_guard = RLock()
+        self._fuel_change_callback: Callable[[str], None] | None = None
+
+    def set_fuel_change_callback(self, cb: Callable[[str], None]) -> None:
+        self._fuel_change_callback = cb
+
+    def _notify_fuel_changed(self, project_id: str) -> None:
+        if self._fuel_change_callback is not None:
+            try:
+                self._fuel_change_callback(project_id)
+            except Exception:
+                logger.exception("fuel_change_callback failed for project=%s", project_id)
 
     def get_workboard(self, project_id: str, *, session_id: str | None = None) -> BackgroundWorkboardView:
         with self._lock_for(project_id):
             state = self._load_state(project_id)
             changed = self._release_expired_claims(state)
+            # Doc 42: Auto-exit todo fuel when the referenced card leaves planned
+            fuel_auto_exited = self._auto_exit_todo_fuel(project_id, state)
+            if fuel_auto_exited:
+                changed = True
+            # Doc 42: Persist signals for terminal card states; invalidate stale signals
+            signal_changed = self._reconcile_signal_fuel(project_id, state)
+            if signal_changed:
+                changed = True
             if changed:
                 self._save_state(project_id, state)
+            if fuel_auto_exited or signal_changed:
+                self._notify_fuel_changed(project_id)
             derived = self._derived_items(project_id, state=state)
             merged = self._merge_items(derived, state.items)
             view = self._build_view(project_id, merged, session_id=session_id)
@@ -51,30 +74,57 @@ class BackgroundWorkboardService:
         with self._lock_for(project_id):
             state = self._load_state(project_id)
             source = self._find_view_item(project_id, item_id, session_id=session_id, state=state)
-            if source is None:
-                raise HTTPException(status_code=404, detail=f"Workboard item not found: {item_id}")
-            if source["lane"] != "ready_to_start":
-                raise HTTPException(status_code=409, detail=f"Only ready_to_start items may be promoted in P0. Got {source['lane']}.")
+
+            # Determine card_id: either from the view item or treat item_id as a card_id
+            card_id = None
+            source_lane = None
+            title = None
+            task_id = None
+            if source is not None:
+                card_id = source.get("card_id")
+                source_lane = source.get("lane")
+                title = source.get("title")
+                task_id = source.get("task_id")
+            # If no view item found, try treating item_id as a direct card_id reference
+            if card_id is None:
+                direct_card = self._load_card(project_id, item_id)
+                if direct_card is not None and direct_card.status == "planned":
+                    card_id = item_id
+                    title = direct_card.title
+                elif source is None:
+                    raise HTTPException(status_code=404, detail=f"Workboard item not found: {item_id}")
+
+            # Doc 42: todo only accepts cards that are currently planned
+            if card_id:
+                card = self._load_card(project_id, card_id)
+                if card is not None and card.status != "planned":
+                    raise HTTPException(status_code=409, detail=f"Card {card_id} is not planned (current status: {card.status}). Only planned cards may be added as todo fuel.")
+
             todo_id = f"todo:{session_id}:{item_id}"
             existing = state.items.get(todo_id)
             if existing and existing.status != "done":
                 return existing
+            now = utc_now()
             record = WorkboardItemRecord(
                 item_id=todo_id,
                 lane="todo",
                 kind="start_ready_card",
-                title=source.get("title"),
-                card_id=source.get("card_id"),
-                task_id=source.get("task_id"),
+                title=title,
+                card_id=card_id,
+                task_id=task_id,
                 source_item_id=item_id,
-                source_lane="ready_to_start",
+                source_lane=source_lane or "ready_to_start",
                 status="pending",
                 action_type="start_card_run",
-                payload={"card_id": source.get("card_id")},
-                updated_at=utc_now(),
+                payload={"card_id": card_id},
+                updated_at=now,
+                # Doc 42 fuel fields
+                fuel_kind="todo",
+                fuel_added_at=now,
             )
             state.items[todo_id] = record
             self._save_state(project_id, state)
+            self._notify_fuel_changed(project_id)
             return record
 
     def claim_workboard_item(self, project_id: str, item_id: str, session_id: str, *, lease_seconds: int = 300) -> WorkboardItemRecord:
@@ -107,6 +157,37 @@ class BackgroundWorkboardService:
 
     def complete_workboard_item(self, project_id: str, item_id: str, session_id: str, *, summary: str | None = None, message: str | None = None) -> WorkboardItemRecord:
         return self._update_item_status(project_id, item_id, session_id, status="done", summary=summary, message=message)
+
+    def skip_workboard_item(self, project_id: str, item_id: str, session_id: str) -> WorkboardItemRecord:
+        """Doc 42: The only explicit exit for todo fuel — sets fuel_consumed_at and marks done."""
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id is required.")
+        with self._lock_for(project_id):
+            state = self._load_state(project_id)
+            item = state.items.get(item_id)
+            if item is None:
+                raise HTTPException(status_code=404, detail=f"Workboard item not found: {item_id}")
+            if item.lane == "todo":
+                if item.status not in {"claimed", "processing"} or item.claimed_by_session_id != session_id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Workboard item {item_id} must be claimed by the current session before it can be skipped.",
+                    )
+            now = utc_now()
+            updated = item.model_copy(
+                update={
+                    "status": "done",
+                    "fuel_consumed_at": now,
+                    "claimed_by_session_id": None,
+                    "claimed_at": None,
+                    "claim_expires_at": None,
+                    "updated_at": now,
+                }
+            )
+            state.items[item_id] = updated
+            self._save_state(project_id, state)
+            self._notify_fuel_changed(project_id)
+            return updated
 
     def defer_workboard_item(self, project_id: str, item_id: str, session_id: str, *, message: str | None = None) -> WorkboardItemRecord:
         return self._update_item_status(project_id, item_id, session_id, status="deferred", message=message)
@@ -290,6 +371,71 @@ class BackgroundWorkboardService:
         view = self.get_workboard(project_id, session_id=session_id)
         return self._semantic_wake_snapshot_from_view(view)
 
+    def mark_fuel_seen(self, project_id: str, fuel_revision: int) -> bool:
+        """Doc 42 Section 8.2 lifecycle step 2: Mark all unconsumed fuel items as seen at the given revision.
+
+        Called when an evaluate turn begins (before wake dispatch). Ensures that if the
+        Manager crashes or times out during the turn, fuel survives to the next evaluate.
+        """
+        changed = False
+        now = utc_now()
+        with self._lock_for(project_id):
+            state = self._load_state(project_id)
+            for item_id, item in list(state.items.items()):
+                if item.fuel_kind is None:
+                    continue
+                if item.fuel_consumed_at is not None:
+                    continue
+                if item.fuel_seen_at_revision is None:
+                    state.items[item_id] = item.model_copy(
+                        update={"fuel_seen_at_revision": fuel_revision, "updated_at": now}
+                    )
+                    changed = True
+            if changed:
+                self._save_state(project_id, state)
+        return changed
+
+    def get_wake_fuel(self, project_id: str, *, fuel_revision: int = 0, session_id: str | None = None) -> WorkboardFuelSnapshot:
+        """Doc 42 Section 8.3: Derived fuel snapshot — NOT persisted."""
+        view = self.get_workboard(project_id, session_id=session_id)
+        # Collect fuel items from all lanes
+        todo_count = 0
+        complete_signal_count = 0
+        block_signal_count = 0
+        top_item_ids: list[str] = []
+        top_card_ids: list[str] = []
+
+        for lane_name in ["todo", "needs_manager", "completed", "ready_to_start", "running", "blocked_for_user", "deferred"]:
+            for item in getattr(view, lane_name, []):
+                if not isinstance(item, dict):
+                    continue
+                fuel_kind = item.get("fuel_kind")
+                if not fuel_kind:
+                    continue
+                # Exclude consumed fuel
+                if item.get("fuel_consumed_at"):
+                    continue
+                if fuel_kind == "todo":
+                    todo_count += 1
+                elif fuel_kind == "complete_signal":
+                    complete_signal_count += 1
+                elif fuel_kind == "block_signal":
+                    block_signal_count += 1
+                if len(top_item_ids) < 5:
+                    top_item_ids.append(str(item.get("item_id") or ""))
+                card_id = str(item.get("card_id") or "")
+                if card_id and card_id not in top_card_ids and len(top_card_ids) < 5:
+                    top_card_ids.append(card_id)
+
+        return WorkboardFuelSnapshot(
+            todo_count=todo_count,
+            complete_signal_count=complete_signal_count,
+            block_signal_count=block_signal_count,
+            top_item_ids=top_item_ids,
+            top_card_ids=top_card_ids,
+            fuel_revision=fuel_revision,
+        )
+
     @staticmethod
     def _semantic_wake_snapshot_from_view(view: BackgroundWorkboardView) -> dict[str, Any]:
         counts = view.counts
@@ -391,6 +537,12 @@ class BackgroundWorkboardService:
                     raise HTTPException(status_code=404, detail=f"Workboard item not found: {item_id}")
                 item = WorkboardItemRecord.model_validate({**item_dict, "updated_at": utc_now()})
             if item.lane == "todo":
+                # Doc 42: reject done on todo items — only skip is the explicit exit
+                if status == "done":
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Todo workboard items cannot be marked done. Use skip_workboard_item to exit todo fuel.",
+                    )
                 if item.status not in {"claimed", "processing"} or item.claimed_by_session_id != session_id:
                     raise HTTPException(
                         status_code=409,
@@ -409,6 +561,9 @@ class BackgroundWorkboardService:
                 updated.claimed_by_session_id = None
                 updated.claimed_at = None
                 updated.claim_expires_at = None
+                # Doc 42 Fix 2: Consume signal fuel when Manager explicitly acts on it
+                if updated.fuel_kind in {"complete_signal", "block_signal"} and updated.fuel_consumed_at is None:
+                    updated.fuel_consumed_at = utc_now()
                 # Mark coalescing as handled when user/supervisor resolves the blocker
                 payload = updated.payload if isinstance(updated.payload, dict) else {}
                 coalescing_key = payload.get("coalescing_key")
@@ -427,6 +582,8 @@ class BackgroundWorkboardService:
                             )
             state.items[item_id] = updated
             self._save_state(project_id, state)
+            if updated.fuel_kind is not None:
+                self._notify_fuel_changed(project_id)
             return updated
 
     def _find_view_item(
@@ -437,7 +594,8 @@ class BackgroundWorkboardService:
         session_id: str | None,
         state: BackgroundWorkboardState,
     ) -> dict[str, Any] | None:
-        view = self._build_view(project_id, self._merge_items(self._derived_items(project_id, state=state), state.items), session_id=session_id)
+        derived_for_view = self._derived_items(project_id, state=state)
+        view = self._build_view(project_id, self._merge_items(derived_for_view, state.items), session_id=session_id)
         return self._view_index(view).get(item_id)
 
     def _derived_items(self, project_id: str, state: BackgroundWorkboardState | None = None) -> dict[str, WorkboardItemRecord]:
@@ -620,6 +778,7 @@ class BackgroundWorkboardService:
                 },
                 updated_at=utc_now(),
             )
+
         return derived
 
     def _classify_run_issue(self, project_id: str, run_id: str) -> dict[str, Any]:
@@ -711,7 +870,14 @@ class BackgroundWorkboardService:
             else:
                 if record.status == "done":
                     continue
-                if record.lane == "todo" or record.status in {"blocked_for_user", "deferred"}:
+                # Persisted fuel items (todo, signals) are kept in state.items as
+                # permanent dedup markers but must NOT appear in the view once
+                # consumed or invalidated (fuel_consumed_at is set).
+                is_active_persisted_fuel = (
+                    record.fuel_kind in {"todo", "complete_signal", "block_signal"}
+                    and record.fuel_consumed_at is None
+                )
+                if is_active_persisted_fuel or record.status in {"blocked_for_user", "deferred"}:
                     lane = record.lane
                     if record.status == "blocked_for_user":
                         lane = "blocked_for_user"
@@ -805,6 +971,146 @@ class BackgroundWorkboardService:
     def _completed_item_is_actionable(item: dict[str, Any]) -> bool:
         payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
         return bool(payload.get("actionable_wake"))
+
+    @staticmethod
+    def _has_any_signal(
+        state: BackgroundWorkboardState | None,
+        card_id: str,
+        triggered_by_status: str,
+    ) -> bool:
+        """Doc 42: Return True if ANY signal already exists for (card_id, triggered_by_status).
+
+        Edge-triggered: once a signal for a given (card_id, status) has been generated,
+        never re-emit for the same pair, regardless of consumption or invalidation.
+        Consumed/invalidated signals remain in state.items as permanent dedup markers.
+        A different status (e.g. failed after accepted) produces a new
+        `triggered_by_status` and thus a fresh signal.
+        """
+        if state is None:
+            return False
+        for item in state.items.values():
+            if (
+                item.card_id == card_id
+                and item.triggered_by_status == triggered_by_status
+                and item.fuel_kind in {"complete_signal", "block_signal"}
+            ):
+                return True
+        return False
+
+    def _auto_exit_todo_fuel(self, project_id: str, state: BackgroundWorkboardState) -> bool:
+        """Doc 42: Auto-exit todo fuel when the referenced card is no longer planned."""
+        changed = False
+        now = utc_now()
+        # Load cards once
+        cards = self.project_service.graph_store(project_id).load_cards()
+        card_statuses = {card.card_id: card.status for card in cards}
+        for item_id, item in list(state.items.items()):
+            if item.lane != "todo":
+                continue
+            if item.fuel_consumed_at is not None:
+                continue
+            card_id = item.card_id or str((item.payload or {}).get("card_id") or "")
+            if not card_id or card_id not in card_statuses:
+                continue
+            if card_statuses[card_id] != "planned":
+                state.items[item_id] = item.model_copy(
+                    update={
+                        "fuel_consumed_at": now,
+                        "updated_at": now,
+                    }
+                )
+                changed = True
+        return changed
+
+    def _reconcile_signal_fuel(self, project_id: str, state: BackgroundWorkboardState) -> bool:
+        """Doc 42: Ensure persisted signals exist for terminal card states.
+
+        - Creates a persisted complete_signal when a card enters accepted/rejected.
+        - Creates a persisted block_signal when a card enters failed.
+        - Invalidates (sets fuel_consumed_at) signals whose card has left the
+          triggering status.
+        - Skips creation if a signal for the same (card_id, triggered_by_status)
+          already exists anywhere in state.items (consumed or not — acts as a
+          permanent dedup marker).
+
+        Returns True if any item was created or invalidated.
+        """
+        changed = False
+        now = utc_now()
+        cards = self.project_service.graph_store(project_id).load_cards()
+        card_statuses = {card.card_id: card.status for card in cards}
+
+        existing_signals = {
+            (item.card_id, item.triggered_by_status)
+            for item in state.items.values()
+            if item.fuel_kind in {"complete_signal", "block_signal"}
+        }
+
+        # Creation pass: persist signals for cards in terminal states.
+        # Signal IDs are status-aware so accepted and rejected have independent
+        # dedup markers: fuel_signal:{card_id}:{status}
+        for card in cards:
+            card_id = card.card_id
+            if card.status in {"accepted", "rejected"}:
+                key = (card_id, card.status)
+                if key not in existing_signals:
+                    signal_id = f"fuel_signal:{card_id}:{card.status}"
+                    state.items[signal_id] = WorkboardItemRecord(
+                        item_id=signal_id,
+                        lane="completed",
+                        kind="card_run_reviewed",
+                        title=card.title,
+                        card_id=card_id,
+                        status="pending",
+                        summary=f"Card {card_id} completed with status {card.status}.",
+                        fuel_kind="complete_signal",
+                        fuel_added_at=now,
+                        triggered_by_status=card.status,
+                        updated_at=now,
+                    )
+                    changed = True
+            elif card.status == "failed":
+                key = (card_id, "failed")
+                if key not in existing_signals:
+                    signal_id = f"fuel_signal:{card_id}:failed"
+                    state.items[signal_id] = WorkboardItemRecord(
+                        item_id=signal_id,
+                        lane="needs_manager",
+                        kind="card_run_failed",
+                        title=card.title,
+                        card_id=card_id,
+                        status="pending",
+                        summary=f"Card {card_id} failed.",
+                        message=f"Card {card_id} failed.",
+                        fuel_kind="block_signal",
+                        fuel_added_at=now,
+                        triggered_by_status="failed",
+                        updated_at=now,
+                    )
+                    changed = True
+
+        # Invalidation pass: consume signals whose card left the triggering status
+        for item_id, item in list(state.items.items()):
+            if item.fuel_kind not in {"complete_signal", "block_signal"}:
+                continue
+            if item.fuel_consumed_at is not None:
+                continue
+            current_status = card_statuses.get(item.card_id)
+            if current_status is None or current_status != item.triggered_by_status:
+                state.items[item_id] = item.model_copy(
+                    update={"fuel_consumed_at": now, "updated_at": now}
+                )
+                changed = True
+
+        return changed
+
+    def _load_card(self, project_id: str, card_id: str) -> Card | None:
+        """Load a single card by ID."""
+        cards = self.project_service.graph_store(project_id).load_cards()
+        for card in cards:
+            if card.card_id == card_id:
+                return card
+        return None
 
     def _path(self, project_id: str) -> Path:
         return self.project_service.project_path(project_id) / "chat" / "background_workboard_state.json"

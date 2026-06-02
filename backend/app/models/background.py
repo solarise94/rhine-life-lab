@@ -9,6 +9,8 @@ BackgroundTaskType = Literal["card_run", "runtime_dependency_install", "batch_ca
 BackgroundTaskStatus = Literal["queued", "launching", "running", "waiting", "succeeded", "failed", "cancelled", "interrupted"]
 WorkboardLane = Literal["running", "todo", "needs_manager", "completed", "ready_to_start", "blocked_for_user", "deferred"]
 WorkboardConsumptionStatus = Literal["pending", "claimed", "processing", "done", "deferred", "failed", "blocked_for_user"]
+# Doc 42 fuel kinds (Section 2)
+FuelKind = Literal["todo", "complete_signal", "block_signal"]
 
 
 class BackgroundTaskAffected(BaseModel):
@@ -59,6 +61,13 @@ class WorkboardItemRecord(BaseModel):
     claimed_at: str | None = None
     claim_expires_at: str | None = None
     updated_at: str | None = None
+    # Doc 42 fuel fields (Section 8.2)
+    fuel_kind: FuelKind | None = None
+    fuel_added_at: str | None = None
+    fuel_seen_at_revision: int | None = None
+    fuel_consumed_at: str | None = None
+    # Doc 42 edge-triggered signal fields (Section 8.2)
+    triggered_by_status: str | None = None
 
 
 class BackgroundWorkboardState(BaseModel):
@@ -79,3 +88,12 @@ class BackgroundWorkboardView(BaseModel):
     blocked_for_user: list[dict[str, Any]] = Field(default_factory=list)
     deferred: list[dict[str, Any]] = Field(default_factory=list)
 
+
+# Doc 42 fuel snapshot (Section 8.3): derived, NOT persisted
+class WorkboardFuelSnapshot(BaseModel):
+    todo_count: int = 0
+    complete_signal_count: int = 0
+    block_signal_count: int = 0
+    top_item_ids: list[str] = Field(default_factory=list)
+    top_card_ids: list[str] = Field(default_factory=list)
+    fuel_revision: int = 0

@@ -26,10 +26,12 @@ _MUTATING_TOOL_NAMES = {
     "promote_workboard_item_to_todo",
     "claim_workboard_item",
     "complete_workboard_item",
+    "skip_workboard_item",
     "defer_workboard_item",
     "block_workboard_item_for_user",
     "reopen_workboard_item",
     "submit_claimed_workboard_items",
+    "finish_auto_episode",
     "start_card_run",
     "stop_card_run",
     "rerun_card",
@@ -566,6 +568,23 @@ def claim_workboard_item(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.post("/background-workboard/skip")
+def skip_workboard_item(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    _guard_mutation(project_id, "skip_workboard_item", x_blueprint_session_id, manager_auto_service)
+    try:
+        return manager_service.blueprint_tools.skip_workboard_item(project_id, payload, x_blueprint_session_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/background-workboard/complete")
 def complete_workboard_item(
     project_id: str,
@@ -657,6 +676,24 @@ def submit_claimed_workboard_items(
         return response
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/finish-auto-episode")
+def finish_auto_episode(
+    project_id: str,
+    payload: dict = {},
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+) -> dict:
+    """Doc 42 Section 6: Manager tool to finish the current auto episode."""
+    _verify_internal_token(authorization)
+    _guard_mutation(project_id, "finish_auto_episode", x_blueprint_session_id, manager_auto_service)
+    return manager_auto_service.finish_auto_episode(
+        project_id,
+        x_blueprint_session_id or "",
+        complete_message=str(payload.get("complete_message", "") or ""),
+    )
 
 
 @router.post("/runs/start")

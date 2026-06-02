@@ -10,7 +10,6 @@ from fastapi import HTTPException
 from app.models.chat import ChatRequest, ChatSessionMessage, ChatSessionMessageTimelineItem
 from app.services.chat_session_service import ChatSessionService
 from app.services.manager_auto_service import ManagerAutoService
-from app.services.manager_wake_service import ManagerWakeService
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +23,9 @@ class ManagerCommandService:
     def __init__(
         self,
         manager_auto_service: ManagerAutoService,
-        manager_wake_service: ManagerWakeService,
         chat_session_service: ChatSessionService,
     ) -> None:
         self.manager_auto_service = manager_auto_service
-        self.manager_wake_service = manager_wake_service
         self.chat_session_service = chat_session_service
 
     def handle_auto_command_stream(
@@ -122,15 +119,12 @@ class ManagerCommandService:
                 ack_message_text = "因用户停止任务，已退出 auto 模式。"
             elif command_type == "enable":
                 try:
-                    state, directive, wake_event = self.manager_auto_service.enable_auto_flow(
+                    state, directive = self.manager_auto_service.enable_auto_flow(
                         project_id,
                         request.session_id,
                         self.chat_session_service,
-                        self.manager_wake_service,
-                        mode="continuous",
                         directive_text=objective,
                         message_id=user_message_id,
-                        trigger_wake=True,
                     )
                     ack_message_text = f"已允许当前会话继续消费 workboard 并在后台唤醒。目标：{objective}"
                 except HTTPException as exc:

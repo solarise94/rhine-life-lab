@@ -456,7 +456,7 @@ if candidate.step is not None and candidate.step > min_step:
 
 ### 测试
 
-- `backend/tests/test_manager_flow.py`：补一个 case 验证同层两张无依赖卡
+- `backend/tests/test_auto_episode_flow.py`：补一个 case 验证同层两张无依赖卡
   建出来 `step` 相等。
 - `backend/tests/test_asset_timeline_service.py`：补一个 case 验证
   `validate_card` 在 `step > min_step` 且存在同层 sibling 时返回 warning
@@ -517,7 +517,7 @@ if candidate.step is not None and candidate.step > min_step:
 1. **P0 prompt 三件套**：A / B / C（manager-agent `server.js`）。
    改完 `node --check src/server.js`。
 2. **P0 planner 两处**：D / E（`manager_planner.py`）。跑现有
-   `tests/test_manager_flow.py` 看有没有回归。
+   auto-episode / fuel-buffer 测试看有没有回归。
 3. **P0 wake + system prompt 单任务歧义**：F / J
    （`manager_wake_processor.py` + `manager-agent/src/server.js:172`）。
    这两条是解除后台任务串行化的核心。
@@ -528,7 +528,7 @@ if candidate.step is not None and candidate.step > min_step:
    （`ExecutorContext.script_preference`、`worker_service` 自动 append
    instruction block、wake turn smoke 验证）。
 6. **P1 校验 warning**：G / H / I。补 `test_asset_timeline_service.py`
-   和 `test_manager_flow.py` 两个 case。
+   和 `test_auto_episode_flow.py` 两个 case。
 7. **P1 OAA-2 实测验证**：用 OAA-2 同类蓝图下发规划指令，确认模型
    输出 step=[1,1,...,1,2,...] 而不是严格递增；同时下发 install + run
    验证后台不再串行化；在 `prefer_r` 项目下验证偏好落卡 + ecosystem 默认 R。

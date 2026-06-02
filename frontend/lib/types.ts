@@ -369,30 +369,30 @@ export interface ManagerAutoDirective {
   resolution_note?: string | null;
 }
 
-export interface ManagerAutoChainLimitBasis {
-  executable_card_count: number;
-  formula: string;
-}
-
+// Doc 42: Episode state replaces legacy 8-state model
 export interface ManagerAutoState {
   enabled: boolean;
-  mode: "continuous" | "once";
   owner_session_id?: string | null;
-  state: "active" | "idle" | "running" | "thinking" | "blocked" | "completed" | "cancelled" | "stopped";
+  state: "running" | "idle" | "pending_wake" | "complete" | "finished";
   started_at?: string | null;
   last_wake_id?: string | null;
   chain_count: number;
   max_chain_count: number;
-  chain_limit_basis: ManagerAutoChainLimitBasis;
   active_run_id?: string | null;
   active_job_id?: string | null;
+  auto_scope_id?: string | null;
   stopped_at?: string | null;
   stop_reason?: string | null;
   stop_message?: string | null;
   pending_directives: ManagerAutoDirective[];
   scope_objective?: string | null;
-  wake_allowed: boolean;
-  expires_at?: string | null;
+  // Doc 42 latch fields
+  fuel_revision: number;
+  last_notified_revision: number;
+  wake_in_flight: boolean;
+  completion_notified: boolean;
+  wake_window: string[];
+  finished_at?: string | null;
 }
 
 export interface ExecutionFileEntry {

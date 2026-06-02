@@ -206,7 +206,7 @@ def mark_runtime_dependency_job_resolved(
     # Auto wake: if auto is enabled and owner session exists, re-evaluate workboard.
     if auto_state.enabled and auto_state.owner_session_id:
         try:
-            manager_auto_service.evaluate_workboard_and_maybe_signal(
+            state, wake_payload = manager_auto_service.evaluate_workboard_and_maybe_signal(
                 project_id,
                 auto_state.owner_session_id,
             )
@@ -350,7 +350,7 @@ def accept_proposal(
     session_id = request.session_id if request is not None else None
     if session_id:
         auto_state = manager_auto_service.get_state(project_id)
-        if auto_state.enabled and auto_state.owner_session_id == session_id and auto_state.consume_workboard:
+        if auto_state.enabled and auto_state.owner_session_id == session_id:
             manager_auto_service.evaluate_workboard_and_maybe_signal(project_id, session_id)
     return {"proposal": proposal, "apply_result": result, "snapshot": project_service.get_project_snapshot(project_id)}
 

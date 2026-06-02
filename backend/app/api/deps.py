@@ -12,8 +12,6 @@ from app.services.flow_service import FlowService
 from app.services.library_registry_service import LibraryRegistryService
 from app.services.manager_auto_service import ManagerAutoService
 from app.services.manifest_service import ManifestService
-from app.services.manager_wake_processor import ManagerWakeProcessor
-from app.services.manager_wake_service import ManagerWakeService
 from app.services.patch_apply import PatchApplyService
 from app.services.patch_validator import PatchValidator
 from app.services.project_file_service import ProjectFileService
@@ -161,8 +159,24 @@ def get_manager_auto_service() -> ManagerAutoService:
         get_project_service(),
         get_project_event_service(),
         get_background_workboard_service(),
-        get_manager_wake_service(),
     )
+
+
+def inject_wake_dispatch() -> None:
+    """Doc 42: Inject chat_stream_relay into ManagerAutoService for transient wake dispatch
+    and wire fuel_change_callback so fuel_revision stays in sync with actual mutations.
+
+    Must be called AFTER all services are constructed (not inside lru_cache factory)
+    to avoid circular dependency: ManagerAutoService -> ChatStreamRelay ->
+    ChatSessionService -> ManagerAutoService.
+    """
+    from app.services.chat_stream_relay import ChatStreamRelay
+    auto_svc = get_manager_auto_service()
+    if auto_svc._chat_stream_relay is None:
+        auto_svc.set_chat_stream_relay(ChatStreamRelay(get_chat_session_service(), get_manager_service()))
+    # Wire fuel_revision bump to all fuel mutation paths (Fix 1)
+    wb = get_background_workboard_service()
+    wb.set_fuel_change_callback(lambda pid: auto_svc.increment_fuel_revision(pid))
 
 
 @lru_cache
@@ -173,22 +187,6 @@ def get_background_task_service() -> BackgroundTaskService:
 @lru_cache
 def get_background_workboard_service() -> BackgroundWorkboardService:
     return BackgroundWorkboardService(get_project_service(), get_background_task_service())
-
-
-@lru_cache
-def get_manager_wake_service() -> ManagerWakeService:
-    return ManagerWakeService(get_project_service())
-
-
-@lru_cache
-def get_manager_wake_processor() -> ManagerWakeProcessor:
-    return ManagerWakeProcessor(
-        get_project_service(),
-        get_manager_auto_service(),
-        get_manager_wake_service(),
-        get_chat_session_service(),
-        get_manager_service(),
-    )
 
 
 @lru_cache
@@ -204,6 +202,5 @@ def get_manager_command_service():
     from app.services.manager_command_service import ManagerCommandService
     return ManagerCommandService(
         manager_auto_service=get_manager_auto_service(),
-        manager_wake_service=get_manager_wake_service(),
         chat_session_service=get_chat_session_service(),
     )

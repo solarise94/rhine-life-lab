@@ -366,6 +366,13 @@ class ManagerBlueprintTools:
         item = self.background_workboard_service.complete_workboard_item(project_id, request.item_id, session_id or "")
         return {"ok": True, "item": item.model_dump()}
 
+    def skip_workboard_item(self, project_id: str, payload: dict, session_id: str | None) -> dict:
+        if self.background_workboard_service is None:
+            raise ManagerPlanningError("background workboard service is unavailable.")
+        request = WorkboardItemPayload.model_validate(payload)
+        item = self.background_workboard_service.skip_workboard_item(project_id, request.item_id, session_id or "")
+        return {"ok": True, "item": item.model_dump()}
+
     def defer_workboard_item(self, project_id: str, payload: dict, session_id: str | None) -> dict:
         if self.background_workboard_service is None:
             raise ManagerPlanningError("background workboard service is unavailable.")

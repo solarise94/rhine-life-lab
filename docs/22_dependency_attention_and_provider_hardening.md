@@ -239,9 +239,9 @@ When a change would invalidate downstream cards, either create a parallel branch
 本轮相关验证：
 
 - `backend.tests.test_executor_profiles`: 41 tests OK
-- `backend.tests.test_manager_flow`: 120 tests OK
+- `backend.tests.test_fuel_buffer` + `backend.tests.test_auto_episode_flow`: OK
 - `cd frontend && npm run build`: OK
 - `cd manager-agent && node --check src/server.js`: OK
 - `git diff --check`: OK
 
-`test_manager_flow` 中出现的 reviewer 401 日志来自测试用假 key 覆盖 reviewer 基础设施失败路径，不代表本轮修改失败。
+测试期间出现的 reviewer 401 日志来自测试用假 key 覆盖 reviewer 基础设施失败路径，不代表本轮修改失败。

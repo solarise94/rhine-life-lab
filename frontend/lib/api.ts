@@ -439,6 +439,12 @@ export const api = {
       body: JSON.stringify({ session_id: sessionId, reason, message }),
     });
   },
+  finishAutoEpisode(projectId: string, sessionId: string) {
+    return request<{ ok: boolean; state: string; stopped_at?: string; error_code?: string; current_state?: string }>(
+      `/projects/${projectId}/manager-auto/finish`,
+      { method: "POST", body: JSON.stringify({ session_id: sessionId }) },
+    );
+  },
   addManagerAutoDirective(projectId: string, sessionId: string, text: string, messageId?: string | null) {
     return request<{ directive: unknown; wake_event: Record<string, unknown> | null; state: ManagerAutoState }>(
       `/projects/${projectId}/manager-auto/directives`,
