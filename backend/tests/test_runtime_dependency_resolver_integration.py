@@ -209,12 +209,12 @@ class ResolverFirstInstallerTest(unittest.TestCase):
         self._setup_conda_runtime()
         manager, _project_service, _job_service, _resolver = _build_manager(self.tmpdir)
 
-        def _mock_probe(_self, _bin, candidates, *, ecosystem):
+        def _mock_probe(_self, _bin, candidates, *, ecosystem, extra_channels=None):
             if candidates and candidates[0] == "scanpy":
                 return ProbeResult(status="found", match="scanpy")
             return ProbeResult(status="not_found")
 
-        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None):
+        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None, extra_channels=None):
             return f"mock:{getattr(conda_bin, 'name', conda_bin)}:{ecosystem}:{runtime}"
 
         installer_completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="installed\n", stderr="")
@@ -308,10 +308,10 @@ class ResolverFirstInstallerTest(unittest.TestCase):
         # Make every conda probe fail so all packages fall through to the
         # pip registry fallback.  Use patch.object on the class for
         # isolation from test ordering.
-        def _mock_probe(_self, _bin, candidates, *, ecosystem):
+        def _mock_probe(_self, _bin, candidates, *, ecosystem, extra_channels=None):
             return ProbeResult(status="not_found")
 
-        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None):
+        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None, extra_channels=None):
             return f"mock:{getattr(conda_bin, 'name', conda_bin)}:{ecosystem}:{runtime}"
 
         with patch.object(RuntimeDependencyResolverService, "_probe_conda", _mock_probe), \
@@ -342,10 +342,10 @@ class ResolverFirstInstallerTest(unittest.TestCase):
         settings.runtime_dependency_fallback_policy = "allow_safe_registry_install"
         manager, _project_service, _job_service, _resolver = _build_manager(self.tmpdir)
 
-        def _mock_probe(_self, _bin, candidates, *, ecosystem):
+        def _mock_probe(_self, _bin, candidates, *, ecosystem, extra_channels=None):
             return ProbeResult(status="not_found")
 
-        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None):
+        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None, extra_channels=None):
             return f"mock:{getattr(conda_bin, 'name', conda_bin)}:{ecosystem}:{runtime}"
 
         installer_completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="installed\n", stderr="")
@@ -445,12 +445,12 @@ class ResolverFirstInstallerTest(unittest.TestCase):
         manager, _project_service, _job_service, resolver = _build_manager(self.tmpdir)
 
         # scanpy finds conda; pydeseq2 does not.
-        def _mock_probe(_self, _bin, candidates, *, ecosystem):
+        def _mock_probe(_self, _bin, candidates, *, ecosystem, extra_channels=None):
             if candidates and candidates[0] == "scanpy":
                 return ProbeResult(status="found", match="scanpy")
             return ProbeResult(status="not_found")
 
-        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None):
+        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None, extra_channels=None):
             return f"mock:{getattr(conda_bin, 'name', conda_bin)}:{ecosystem}:{runtime}"
 
         with patch.object(RuntimeDependencyResolverService, "_probe_conda", _mock_probe), \

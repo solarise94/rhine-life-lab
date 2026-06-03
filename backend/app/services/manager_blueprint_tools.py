@@ -163,6 +163,8 @@ class InstallRuntimeDependenciesPayload(BaseModel):
     packages: list[str] = Field(default_factory=list)
     timeout_seconds: int = 600
     source: dict[str, Any] = Field(default_factory=dict)
+    # Optional per-request conda channels (e.g. ["bioconda"] for R bio pkgs).
+    channels: list[str] = Field(default_factory=list)
     # Set by the resolver; never sent by Manager.
     installer_plan: list[dict[str, Any]] | None = None
 
@@ -1389,6 +1391,7 @@ class ManagerBlueprintTools:
         # every action is safe (grammar-checked, single-family). We do not
         # allow partial or mixed-installer execution here — the resolver
         # blocks those before job creation.
+        channels = [str(c).strip() for c in (payload.get("channels") or []) if str(c).strip()]
         installer_plan = payload.get("installer_plan")
         if installer_plan and isinstance(installer_plan, list):
             return self._install_from_plan(
@@ -1399,6 +1402,7 @@ class ManagerBlueprintTools:
                 installer_plan=installer_plan,
                 timeout=timeout,
                 started_at=started_at,
+                channels=channels,
             )
 
         # Legacy path (no resolver, or resolver not available): fall through
@@ -1408,7 +1412,7 @@ class ManagerBlueprintTools:
             if ecosystem == "python":
                 command, resolved_runtime = self._python_dependency_command(runtime, packages)
             else:
-                command, resolved_runtime = self._r_dependency_command(runtime, packages)
+                command, resolved_runtime = self._r_dependency_command(runtime, packages, channels=channels)
         except DependencyResolutionError as exc:
             result = dict(exc.payload)
             result.update(
@@ -1445,6 +1449,7 @@ class ManagerBlueprintTools:
         installer_plan: list[dict[str, Any]],
         timeout: int,
         started_at: str,
+        channels: list[str] | None = None,
     ) -> dict:
         """Execute a resolver-approved installer_plan.
 
@@ -1491,7 +1496,17 @@ class ManagerBlueprintTools:
                     "finished_at": utc_now(),
                 }
             resolved_runtime, conda_bin = self._resolve_runtime_and_solver(runtime, ecosystem)
-            command = [str(conda_bin), "install", "-y", "-p", str(resolved_runtime), *conda_packages]
+            effective_channels = list(channels or [])
+            if ecosystem.lower() == "r":
+                lower_set = {c.lower() for c in effective_channels}
+                if "conda-forge" not in lower_set:
+                    effective_channels.append("conda-forge")
+                if "bioconda" not in lower_set:
+                    effective_channels.append("bioconda")
+            command = [str(conda_bin), "install", "-y", "-p", str(resolved_runtime)]
+            for ch in effective_channels:
+                command.extend(["-c", ch])
+            command.extend(conda_packages)
             return self._run_dependency_command(
                 project_id,
                 command,
@@ -1795,6 +1810,7 @@ class ManagerBlueprintTools:
             "packages": packages,
             "timeout_seconds": timeout,
             "source": source,
+            "channels": [str(c).strip() for c in (request.channels or []) if str(c).strip()],
         }
 
     def start_card_run(self, project_id: str, payload: dict) -> dict:
@@ -2543,7 +2559,7 @@ class ManagerBlueprintTools:
             raise ManagerPlanningError(f"Python executable not found for runtime: {runtime}")
         return [str(python_bin), "-m", "pip", "install", *packages], str(env_path)
 
-    def _r_dependency_command(self, runtime: str, packages: list[str]) -> tuple[list[str], str]:
+    def _r_dependency_command(self, runtime: str, packages: list[str], channels: list[str] | None = None) -> tuple[list[str], str]:
         manager_name = self._dependency_manager_label("R")
         rscript = CommandTemplateWorkerAdapter._resolve_rscript_runtime(runtime, self.project_service.settings)
         if rscript is None or not rscript.exists():
@@ -2553,16 +2569,23 @@ class ManagerBlueprintTools:
         if manager_name == "conda":
             conda_bin = self._resolve_conda_solver(conda_base)
             conda_packages = [self._resolve_conda_r_package(conda_bin, package) for package in packages]
-            return [
+            effective_channels = list(channels or [])
+            lower_set = {c.lower() for c in effective_channels}
+            if "conda-forge" not in lower_set:
+                effective_channels.append("conda-forge")
+            if "bioconda" not in lower_set:
+                effective_channels.append("bioconda")
+            cmd = [
                 str(conda_bin),
                 "install",
                 "-y",
                 "-p",
                 str(env_path),
-                "-c",
-                "conda-forge",
-                *conda_packages,
-            ], str(env_path)
+            ]
+            for ch in effective_channels:
+                cmd.extend(["-c", ch])
+            cmd.extend(conda_packages)
+            return cmd, str(env_path)
         package_vector = "c(" + ", ".join(json.dumps(item) for item in packages) + ")"
         if manager_name == "cran":
             expression = (

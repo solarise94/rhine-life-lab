@@ -386,6 +386,19 @@ class RuntimeDependencyResolverService:
         # canonical ``"report_only"`` / ``"allow_safe_registry_install"`` pair.
         self._active_policy = normalize_fallback_policy(policy)
 
+        # Optional per-request channel overrides. For R ecosystem, conda-forge
+        # and bioconda are automatically ensured because most bioinformatics R
+        # packages live on bioconda with conda-forge dependencies.
+        raw_channels = payload.get("channels") or []
+        extra_channels: list[str] = [str(c).strip() for c in raw_channels if str(c).strip()]
+        if ecosystem.lower() == "r":
+            lower_set = {c.lower() for c in extra_channels}
+            if "conda-forge" not in lower_set:
+                extra_channels.append("conda-forge")
+            if "bioconda" not in lower_set:
+                extra_channels.append("bioconda")
+        self._extra_channels = extra_channels
+
         plan = RuntimeDependencyResolutionPlan(
             ok=False,
             ecosystem=ecosystem,
@@ -506,13 +519,15 @@ class RuntimeDependencyResolverService:
         # allows.
         conda_bin = self._resolve_conda_solver(ecosystem, probe_result.resolved_path)
         channel_signature = self._channel_signature(
-            conda_bin, ecosystem, runtime, conda_base=derive_conda_base_from_runtime_path(probe_result.resolved_path)
+            conda_bin, ecosystem, runtime,
+            conda_base=derive_conda_base_from_runtime_path(probe_result.resolved_path),
+            extra_channels=self._extra_channels,
         )
 
         # Batch pre-warm: for mamba/micromamba, probe ALL candidates in one
         # subprocess call and populate the cache. This reduces 23 serial
         # repoquery invocations to 1, avoiding the 300s HTTP timeout.
-        self._batch_prefetch_conda(conda_bin, packages, ecosystem, channel_signature)
+        self._batch_prefetch_conda(conda_bin, packages, ecosystem, channel_signature, self._extra_channels)
 
         for pkg in packages:
             entry, conda_action = self._resolve_package(
@@ -583,6 +598,7 @@ class RuntimeDependencyResolverService:
         packages: list[str],
         ecosystem: str,
         channel_signature: str,
+        extra_channels: list[str] | None = None,
     ) -> None:
         """Pre-warm the probe cache with a single batched repoquery call.
 
@@ -614,7 +630,9 @@ class RuntimeDependencyResolverService:
         if not all_candidates:
             return
 
-        self._repoquery_prefetch_into_cache(conda_bin, packages, ecosystem, channel_signature, all_candidates)
+        self._repoquery_prefetch_into_cache(
+            conda_bin, packages, ecosystem, channel_signature, all_candidates, extra_channels=extra_channels
+        )
 
     def _repoquery_prefetch_into_cache(
         self,
@@ -623,6 +641,7 @@ class RuntimeDependencyResolverService:
         ecosystem: str,
         channel_signature: str,
         all_candidates: list[str],
+        extra_channels: list[str] | None = None,
     ) -> None:
         """Run one repoquery call and populate per-package cache entries.
 
@@ -630,22 +649,38 @@ class RuntimeDependencyResolverService:
         we skip caching entirely and let the per-package path handle it
         with proper error classification.
         """
+        cmd = [str(conda_bin), "repoquery", "search", "--json"]
+        for ch in (extra_channels or []):
+            cmd.extend(["-c", ch])
+        cmd.extend(all_candidates)
         try:
             result = subprocess.run(
-                [str(conda_bin), "repoquery", "search", "--json", *all_candidates],
+                cmd,
                 text=True,
                 capture_output=True,
                 timeout=self._probe_timeout,
                 check=False,
             )
-        except (subprocess.TimeoutExpired, OSError):
+        except subprocess.TimeoutExpired:
+            self._cache_for_all_packages(
+                packages, ecosystem, channel_signature,
+                ProbeResult(status="solver_error", error_code="probe_timeout",
+                            error_detail="batch repoquery timed out"),
+            )
+            return
+        except OSError:
             return
 
         if result.returncode != 0:
             stderr = (result.stderr or "")[:500]
             if _is_packages_not_found(stderr):
                 self._cache_for_all_packages(packages, ecosystem, channel_signature, ProbeResult(status="not_found"))
-            # Non-not_found errors: don't cache — let per-package path classify.
+            else:
+                self._cache_for_all_packages(
+                    packages, ecosystem, channel_signature,
+                    ProbeResult(status="solver_error", error_code="mamba_solver_error",
+                                error_detail=stderr[:200]),
+                )
             return
 
         stdout = result.stdout or ""
@@ -770,7 +805,10 @@ class RuntimeDependencyResolverService:
         cache_key = (channel_signature, candidates[0] if candidates else normalized)
         cached = self._cache.get(cache_key)
         if cached is _MISS:
-            probe_result = self._probe_conda(conda_bin, candidates, ecosystem=ecosystem)
+            probe_result = self._probe_conda(
+                conda_bin, candidates, ecosystem=ecosystem,
+                extra_channels=self._extra_channels,
+            )
             self._cache.set(cache_key, probe_result)
         else:
             probe_result = cached  # type: ignore[assignment]
@@ -1090,6 +1128,7 @@ class RuntimeDependencyResolverService:
         runtime: str,
         *,
         conda_base: Path | None = None,
+        extra_channels: list[str] | None = None,
     ) -> str:
         """Stable, content-addressable signature for the probe environment.
 
@@ -1104,7 +1143,8 @@ class RuntimeDependencyResolverService:
           ``report_only`` ↔ ``allow_safe_registry_install`` cannot poison a
           cache from the previous policy);
         - the list of channels actually configured for the solver, exposed
-          via the resolver settings.
+          via the resolver settings;
+        - any per-request extra channels (e.g. bioconda for R ecosystem).
         """
         if conda_bin is None:
             return "no-conda"
@@ -1130,6 +1170,7 @@ class RuntimeDependencyResolverService:
         runtime_str = str(runtime or "")
         policy = getattr(self, "_active_policy", "report_only")
         channels = _configured_channels(conda_bin, settings)
+        extra = extra_channels or []
         return "|".join(
             [
                 solver_realpath,
@@ -1138,6 +1179,7 @@ class RuntimeDependencyResolverService:
                 runtime_str,
                 policy,
                 ",".join(channels) if channels else "",
+                ",".join(extra) if extra else "",
             ]
         )
 
@@ -1147,6 +1189,7 @@ class RuntimeDependencyResolverService:
         candidates: list[str],
         *,
         ecosystem: str,
+        extra_channels: list[str] | None = None,
     ) -> ProbeResult:
         """Probe conda channels for the first matching candidate.
 
@@ -1159,17 +1202,26 @@ class RuntimeDependencyResolverService:
         if solver_name in {"mamba", "micromamba"}:
             # Mamba-family solvers support multi-candidate repoquery search.
             # Do not fall back to search --json to avoid divergent behavior.
-            return self._repoquery_search(conda_bin, candidates)
+            return self._repoquery_search(conda_bin, candidates, extra_channels=extra_channels)
         for candidate in candidates:
-            result = self._json_search_single(conda_bin, candidate)
+            result = self._json_search_single(conda_bin, candidate, extra_channels=extra_channels)
             if result.status in {"found", "solver_error"}:
                 return result
         return ProbeResult(status="not_found")
 
-    def _repoquery_search(self, conda_bin: Path, candidates: list[str]) -> ProbeResult:
+    def _repoquery_search(
+        self,
+        conda_bin: Path,
+        candidates: list[str],
+        extra_channels: list[str] | None = None,
+    ) -> ProbeResult:
+        cmd = [str(conda_bin), "repoquery", "search", "--json"]
+        for ch in (extra_channels or []):
+            cmd.extend(["-c", ch])
+        cmd.extend(candidates)
         try:
             result = subprocess.run(
-                [str(conda_bin), "repoquery", "search", "--json", *candidates],
+                cmd,
                 text=True,
                 capture_output=True,
                 timeout=self._probe_timeout,
@@ -1234,11 +1286,15 @@ class RuntimeDependencyResolverService:
                 pass
         return None
 
-    def _json_search_single(self, conda_bin: Path, candidate: str) -> ProbeResult:
+    def _json_search_single(self, conda_bin: Path, candidate: str, extra_channels: list[str] | None = None) -> ProbeResult:
         """Probe one conda candidate at a time (required for ``conda``)."""
+        cmd = [str(conda_bin), "search", "--json"]
+        for ch in (extra_channels or []):
+            cmd.extend(["-c", ch])
+        cmd.append(candidate)
         try:
             result = subprocess.run(
-                [str(conda_bin), "search", "--json", candidate],
+                cmd,
                 text=True,
                 capture_output=True,
                 timeout=self._probe_timeout,

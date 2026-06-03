@@ -239,7 +239,7 @@ class ResolverServiceTest(unittest.TestCase):
         calls: list[str] = []
         cache = self.resolver._cache
 
-        def _probe(conda_bin, candidates, *, ecosystem):
+        def _probe(conda_bin, candidates, *, ecosystem, extra_channels=None):
             calls.append(",".join(candidates))
             return ProbeResult(status="found", match=candidates[0]) if candidates else ProbeResult(status="not_found")
 
@@ -279,7 +279,7 @@ class ResolverServiceTest(unittest.TestCase):
     def test_invalid_grammar_specs_are_rejected_as_unsupported_source(self) -> None:
         """numpy>=1.0, package[extra], and similar non-bare specs must be unsupported_source_spec."""
         # Avoid subprocess calls from _channel_signature / _configured_channels.
-        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None):
+        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None, extra_channels=None):
             return f"mock:{getattr(conda_bin, 'name', conda_bin)}:{ecosystem}:{runtime}"
 
         with patch.object(
@@ -341,6 +341,98 @@ class ResolverServiceTest(unittest.TestCase):
                 },
             )
             self.assertNotEqual(plan4.status, "unsupported_source_spec")
+
+    def test_plain_conda_passes_extra_channels_to_json_search(self) -> None:
+        """When solver is conda (not mamba), _json_search_single receives extra_channels."""
+        captured_calls: list[list[str]] = []
+
+        def _mock_json_search(_self, conda_bin, candidate, extra_channels=None):
+            captured_calls.append(extra_channels or [])
+            return ProbeResult(status="found", match=candidate)
+
+        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None, extra_channels=None):
+            return "mock-sig"
+
+        with patch.object(
+            RuntimeDependencyResolverService,
+            "_probe_runtime",
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/r_env")),
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_resolve_conda_solver",
+            return_value=Path("/usr/bin/conda"),
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_json_search_single",
+            _mock_json_search,
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_channel_signature",
+            _mock_channel_sig,
+        ):
+            plan = self.resolver.resolve(
+                "proj",
+                {
+                    "ecosystem": "R",
+                    "runtime": "r_env",
+                    "packages": ["DESeq2"],
+                    "channels": ["bioconda"],
+                },
+            )
+        self.assertEqual(plan.packages[0].status, PACKAGE_STATUS_CONDA_INSTALLABLE)
+        self.assertTrue(len(captured_calls) >= 1)
+        self.assertIn("conda-forge", captured_calls[0])
+        self.assertIn("bioconda", captured_calls[0])
+
+    def test_batch_prefetch_timeout_caches_solver_error(self) -> None:
+        """Batch prefetch timeout must cache solver_error to prevent N serial fallback probes."""
+        per_pkg_probe_calls: list[str] = []
+
+        def _probe(_self, conda_bin, candidates, *, ecosystem, extra_channels=None):
+            per_pkg_probe_calls.append(",".join(candidates))
+            return ProbeResult(status="found", match=candidates[0]) if candidates else ProbeResult(status="not_found")
+
+        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None, extra_channels=None):
+            return "mock-sig"
+
+        subprocess_calls: list[list[str]] = []
+        def _timeout_subprocess(cmd, *args, **kwargs):
+            subprocess_calls.append(cmd if isinstance(cmd, list) else [cmd])
+            raise subprocess.TimeoutExpired(cmd="mamba repoquery", timeout=60)
+
+        with patch.object(
+            RuntimeDependencyResolverService,
+            "_probe_runtime",
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/env")),
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_resolve_conda_solver",
+            return_value=Path("/usr/bin/mamba"),
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_channel_signature",
+            _mock_channel_sig,
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_probe_conda",
+            _probe,
+        ), patch(
+            "app.services.runtime_dependency_resolver_service.subprocess.run",
+            side_effect=_timeout_subprocess,
+        ):
+            plan = self.resolver.resolve(
+                "proj",
+                {
+                    "ecosystem": "python",
+                    "runtime": "python_env",
+                    "packages": ["numpy", "pandas", "scipy"],
+                },
+            )
+        self.assertEqual(plan.status, RESOLVER_STATUS_SOLVER_ERROR)
+        for entry in plan.packages:
+            self.assertEqual(entry.status, PACKAGE_STATUS_SOLVER_ERROR)
+        self.assertEqual(per_pkg_probe_calls, [], "Per-package _probe_conda must NOT be called after batch timeout")
+        self.assertEqual(len(subprocess_calls), 1, "Only one batch subprocess call should be attempted")
 
 
 class ResolverFallbackPolicyTest(unittest.TestCase):
