@@ -650,8 +650,10 @@ class RuntimeDependencyResolverService:
         with proper error classification.
         """
         cmd = [str(conda_bin), "repoquery", "search", "--json"]
-        for ch in (extra_channels or []):
-            cmd.extend(["-c", ch])
+        if extra_channels:
+            cmd.append("--override-channels")
+            for ch in extra_channels:
+                cmd.extend(["-c", ch])
         cmd.extend(all_candidates)
         try:
             result = subprocess.run(
@@ -1216,8 +1218,10 @@ class RuntimeDependencyResolverService:
         extra_channels: list[str] | None = None,
     ) -> ProbeResult:
         cmd = [str(conda_bin), "repoquery", "search", "--json"]
-        for ch in (extra_channels or []):
-            cmd.extend(["-c", ch])
+        if extra_channels:
+            cmd.append("--override-channels")
+            for ch in extra_channels:
+                cmd.extend(["-c", ch])
         cmd.extend(candidates)
         try:
             result = subprocess.run(
@@ -1289,8 +1293,10 @@ class RuntimeDependencyResolverService:
     def _json_search_single(self, conda_bin: Path, candidate: str, extra_channels: list[str] | None = None) -> ProbeResult:
         """Probe one conda candidate at a time (required for ``conda``)."""
         cmd = [str(conda_bin), "search", "--json"]
-        for ch in (extra_channels or []):
-            cmd.extend(["-c", ch])
+        if extra_channels:
+            cmd.append("--override-channels")
+            for ch in extra_channels:
+                cmd.extend(["-c", ch])
         cmd.append(candidate)
         try:
             result = subprocess.run(
