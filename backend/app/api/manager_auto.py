@@ -36,6 +36,7 @@ class SettleManagerAutoTurnRequest(BaseModel):
 
 class FinishAutoEpisodeRequest(BaseModel):
     session_id: str
+    complete_message: str = ""
 
 
 def _status_payload(state: ManagerAutoState) -> dict:
@@ -133,5 +134,5 @@ def finish_manager_auto_episode(
 ) -> dict:
     return manager_auto_service.finish_auto_episode(
         project_id, request.session_id,
-        complete_message=getattr(request, "complete_message", "") or "",
+        complete_message=request.complete_message,
     )

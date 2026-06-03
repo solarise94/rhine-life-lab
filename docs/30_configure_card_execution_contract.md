@@ -200,7 +200,9 @@ configure_card_execution(
 )
 ```
 
-Do not expose `instruction_blocks` in this Manager-facing tool.
+**Superseded by Doc 43**: `instruction_blocks` is now exposed in the Manager-facing `configure_card_execution` tool for persisting `script_preference` and other soft planning hints. The original restriction below is no longer active.
+
+~~Do not expose `instruction_blocks` in this Manager-facing tool.~~
 
 Execution guidance should come from the card plan, system defaults, selected skills/MCP bindings, and runtime profiles. If the product later needs a dedicated instruction/note tool, it should be designed separately instead of turning `configure_card_execution` into a free-form prompt patcher.
 

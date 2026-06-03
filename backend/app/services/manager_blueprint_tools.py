@@ -77,6 +77,7 @@ class ConfigureCardExecutionPayload(BaseModel):
     skills: list[str] | None = None
     mcp_servers: list[str] | None = None
     runtime_bindings: RuntimeBindingsPayload | None = None
+    instruction_blocks: list[str] | None = None
 
 
 class StartCardRunPayload(BaseModel):
@@ -343,7 +344,10 @@ class ManagerBlueprintTools:
         if self.background_workboard_service is None:
             raise ManagerPlanningError("background workboard service is unavailable.")
         view = self.background_workboard_service.get_workboard(project_id, session_id=session_id)
-        return view.model_dump()
+        result = view.model_dump()
+        if self.worker_service is not None:
+            result["available_slots"] = self.worker_service.get_available_run_slots(project_id)
+        return result
 
     def promote_workboard_item_to_todo(self, project_id: str, payload: dict, session_id: str | None) -> dict:
         if self.background_workboard_service is None:
@@ -398,11 +402,13 @@ class ManagerBlueprintTools:
         if self.background_workboard_service is None or self.worker_service is None:
             raise ManagerPlanningError("workboard run submission is unavailable.")
         request = WorkboardSubmitPayload.model_validate(payload)
+        available_slots = self.worker_service.get_available_run_slots(project_id)
         result = self.background_workboard_service.submit_claimed_workboard_items(
             project_id,
             request.todo_item_ids,
             session_id=session_id or "",
             start_callback=lambda inner_project_id, card_id: self.worker_service.start_run(inner_project_id, card_id),
+            max_starts=available_slots,
         )
         approval_required_count = sum(
             1
@@ -422,6 +428,7 @@ class ManagerBlueprintTools:
         result["approval_required_count"] = approval_required_count
         result["rejected_count"] = rejected_count
         result["background_started_count"] = background_started_count
+        result["deferred_count"] = len(result.get("deferred") or [])
         result["background"] = background_started_count > 0
         result["async_boundary"] = bool(background_started_count > 0 and approval_required_count == 0 and rejected_count == 0)
         result["do_not_poll"] = result["async_boundary"]
@@ -439,6 +446,11 @@ class ManagerBlueprintTools:
                 )
             elif rejected_count > 0 and background_started_count == 0:
                 result["message"] = "Claimed workboard items did not start because launch approvals were rejected."
+            elif result["deferred_count"] > 0:
+                result["message"] = (
+                    f"Started {background_started_count} run(s); {result['deferred_count']} deferred due to capacity. "
+                    "Deferred items will be available on the next wake after a slot frees up."
+                )
             else:
                 result["message"] = "Started claimed workboard run batch in the background. Do not poll in this turn."
         else:
@@ -632,7 +644,7 @@ class ManagerBlueprintTools:
     def create_card(self, project_id: str, payload: dict) -> dict:
         snapshot = self.project_service.get_project_snapshot(project_id)
         card = self._normalize_create_card_payload(snapshot, payload)
-        card, errors = self.asset_timeline_service.validate_card(snapshot, card)
+        card, errors, warnings = self.asset_timeline_service.validate_card(snapshot, card)
         errors = self._append_output_role_errors(card, errors)
         if errors:
             raise CardWriteValidationError(self._card_write_error_response("create", card.card_id, errors))
@@ -655,7 +667,11 @@ class ManagerBlueprintTools:
             store.save_graph(graph)
             store.save_cards(cards)
             self._audit_card_tool(project_id, "create_card", card.card_id, payload)
-        return {"ok": True, "card": card.model_dump(), "card_id": card.card_id}
+        result = {"ok": True, "card": card.model_dump(), "card_id": card.card_id}
+        if warnings:
+            result["step_alignment_warnings"] = warnings
+        result["parallel_group"] = f"step_{card.step or 1}"
+        return result
 
     def update_card(self, project_id: str, payload: dict) -> dict:
         try:
@@ -725,7 +741,7 @@ class ManagerBlueprintTools:
             previous = cards[index]
             locked_snapshot = {**snapshot, "cards": cards, "graph": graph}
             updated = self._normalize_update_card_payload(locked_snapshot, previous, request)
-            updated, errors = self.asset_timeline_service.validate_card(locked_snapshot, updated, replacing_card_id=card_id)
+            updated, errors, warnings = self.asset_timeline_service.validate_card(locked_snapshot, updated, replacing_card_id=card_id)
             errors = self._append_output_role_errors(updated, errors)
             if errors:
                 raise CardWriteValidationError(self._card_write_error_response("revise_card_plan", card_id, errors))
@@ -738,7 +754,11 @@ class ManagerBlueprintTools:
             store.save_cards(cards)
             self._audit_card_tool(project_id, "revise_card_plan", card_id, payload)
         hint = self.dependency_attention_service.mutation_hint(self.project_service.get_project_snapshot(project_id), updated.card_id)
-        return {"ok": True, "card": updated.model_dump(), "card_id": updated.card_id, **hint}
+        result = {"ok": True, "card": updated.model_dump(), "card_id": updated.card_id, **hint}
+        if warnings:
+            result["step_alignment_warnings"] = warnings
+        result["parallel_group"] = f"step_{updated.step or 1}"
+        return result
 
     def annotate_card(self, project_id: str, payload: dict) -> dict:
         try:
@@ -888,6 +908,13 @@ class ManagerBlueprintTools:
                     context.runtime_bindings.conda_env = runtime_bindings.get("conda_env")
                 if "r_env" in runtime_bindings:
                     context.runtime_bindings.r_env = runtime_bindings.get("r_env")
+                if request.instruction_blocks is not None:
+                    new_blocks = [str(b).strip() for b in request.instruction_blocks if str(b).strip()]
+                    merged = list(context.instruction_blocks or [])
+                    for block in new_blocks:
+                        if block not in merged:
+                            merged.append(block)
+                    context.instruction_blocks = merged
                 card.executor_context = context
                 updated_cards.append(card)
                 self._audit_card_tool(project_id, "configure_card_execution", card.card_id, payload)

@@ -572,7 +572,7 @@ class ManagerAutoServiceDeriveStateTest(unittest.TestCase):
         state = ManagerAutoState.model_validate({
             "enabled": True, "state": "pending_wake", "active_run_id": "r1",
         })
-        fuel = WorkboardFuelSnapshot(todo_count=1)
+        fuel = WorkboardFuelSnapshot(todo_count=1, active_run_count=1)
         result = svc._derive_state(state, fuel)
         self.assertEqual(result, "running")
 
@@ -582,7 +582,7 @@ class ManagerAutoServiceDeriveStateTest(unittest.TestCase):
         state = ManagerAutoState.model_validate({
             "enabled": True, "state": "pending_wake", "active_run_id": "r1",
         })
-        fuel = WorkboardFuelSnapshot()
+        fuel = WorkboardFuelSnapshot(active_run_count=1)
         result = svc._derive_state(state, fuel)
         self.assertEqual(result, "idle", "N1: running + no fuel → idle")
 

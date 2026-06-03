@@ -222,9 +222,11 @@ class BackgroundWorkboardService:
         *,
         session_id: str,
         start_callback,
+        max_starts: int | None = None,
     ) -> dict[str, Any]:
         started: list[dict[str, Any]] = []
         blocked: list[dict[str, Any]] = []
+        deferred: list[dict[str, Any]] = []
         pending_starts: list[tuple[str, str]] = []
         if not session_id:
             raise HTTPException(status_code=400, detail="session_id is required.")
@@ -247,6 +249,7 @@ class BackgroundWorkboardService:
             if changed:
                 self._save_state(project_id, state)
             view_index = self._view_index(view)
+            fuel_membership_changed = False
             for item_id in item_ids:
                 item = state.items.get(item_id)
                 if item is None:
@@ -288,6 +291,7 @@ class BackgroundWorkboardService:
                         blocked.append({"item_id": item_id, "reason": "source_not_ready"})
                     item = item.model_copy(update={"status": "failed", "updated_at": utc_now(), "message": "Source card is no longer ready to start."})
                     state.items[item_id] = item
+                    fuel_membership_changed = True
                     continue
                 if not card_id:
                     blocked.append({"item_id": item_id, "reason": "missing_card_id"})
@@ -302,11 +306,41 @@ class BackgroundWorkboardService:
                 )
                 pending_starts.append((item_id, card_id))
             self._save_state(project_id, state)
+            if fuel_membership_changed:
+                self._notify_fuel_changed(project_id)
+
+        # Capacity gating: defer items beyond available slots
+        if max_starts is not None and len(pending_starts) > max_starts:
+            overflow = pending_starts[max_starts:]
+            pending_starts = pending_starts[:max_starts]
+            with self._lock_for(project_id):
+                state = self._load_state(project_id)
+                for item_id, card_id in overflow:
+                    item = state.items.get(item_id)
+                    if item is not None:
+                        state.items[item_id] = item.model_copy(
+                            update={
+                                "status": "pending",
+                                "claimed_by_session_id": None,
+                                "claimed_at": None,
+                                "claim_expires_at": None,
+                                "message": "Deferred: executor capacity full, will retry on next wake.",
+                                "updated_at": utc_now(),
+                            }
+                        )
+                    deferred.append({"item_id": item_id, "card_id": card_id, "reason": "capacity_full"})
+                self._save_state(project_id, state)
+            self._notify_fuel_changed(project_id)
 
         for item_id, card_id in pending_starts:
             try:
                 response = start_callback(project_id, card_id)
             except HTTPException as exc:
+                is_capacity_error = (
+                    exc.status_code == 409
+                    and isinstance(exc.detail, dict)
+                    and exc.detail.get("error_code") == "executor_capacity_full"
+                )
                 if isinstance(exc.detail, dict):
                     blocked.append(
                         {
@@ -324,14 +358,28 @@ class BackgroundWorkboardService:
                     state = self._load_state(project_id)
                     item = state.items.get(item_id)
                     if item is not None:
-                        state.items[item_id] = item.model_copy(
-                            update={
-                                "status": "failed",
-                                "updated_at": utc_now(),
-                                "message": str(exc.detail),
-                            }
-                        )
+                        if is_capacity_error:
+                            state.items[item_id] = item.model_copy(
+                                update={
+                                    "status": "pending",
+                                    "claimed_by_session_id": None,
+                                    "claimed_at": None,
+                                    "claim_expires_at": None,
+                                    "message": "Deferred: capacity full at start time, will retry on next wake.",
+                                    "updated_at": utc_now(),
+                                }
+                            )
+                            deferred.append({"item_id": item_id, "card_id": card_id, "reason": "capacity_full_race"})
+                        else:
+                            state.items[item_id] = item.model_copy(
+                                update={
+                                    "status": "failed",
+                                    "updated_at": utc_now(),
+                                    "message": str(exc.detail),
+                                }
+                            )
                         self._save_state(project_id, state)
+                self._notify_fuel_changed(project_id)
                 continue
             started.append(
                 {
@@ -357,6 +405,7 @@ class BackgroundWorkboardService:
                         }
                     )
                     self._save_state(project_id, state)
+            self._notify_fuel_changed(project_id)
         return {
             "ok": bool(started),
             "background": bool(started),
@@ -365,6 +414,7 @@ class BackgroundWorkboardService:
             "wait_for_wake": bool(started),
             "started": started,
             "blocked": blocked,
+            "deferred": deferred,
         }
 
     def signal_snapshot(self, project_id: str, *, session_id: str | None = None) -> dict[str, Any]:
@@ -431,6 +481,7 @@ class BackgroundWorkboardService:
             todo_count=todo_count,
             complete_signal_count=complete_signal_count,
             block_signal_count=block_signal_count,
+            active_run_count=len(view.running),
             top_item_ids=top_item_ids,
             top_card_ids=top_card_ids,
             fuel_revision=fuel_revision,
@@ -955,7 +1006,8 @@ class BackgroundWorkboardService:
                 continue
             card_ids = batch.get("card_ids")
             if isinstance(card_ids, list) and card_id in card_ids:
-                return str(batch.get("batch_id") or batch.get("step") or "")
+                step = batch.get("step") or batch.get("batch_id")
+                return f"step_{step}" if step else None
         return None
 
     @staticmethod

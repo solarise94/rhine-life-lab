@@ -113,7 +113,7 @@ class AssetTimelineService:
             "duplicate_output_assets": duplicate_outputs,
         }
 
-    def validate_card(self, snapshot: dict, candidate: Card, replacing_card_id: str | None = None) -> tuple[Card, list[str]]:
+    def validate_card(self, snapshot: dict, candidate: Card, replacing_card_id: str | None = None) -> tuple[Card, list[str], list[str]]:
         graph: GraphState = snapshot["graph"]
         existing_cards = [card for card in snapshot["cards"] if card.card_id != replacing_card_id]
         existing_asset_ids = {asset.asset_id for asset in graph.assets}
@@ -127,7 +127,7 @@ class AssetTimelineService:
         if reused_existing_assets:
             return candidate, [
                 "Planned output asset_id already exists as a materialized asset: " + ", ".join(sorted(set(reused_existing_assets)))
-            ]
+            ], []
         output_asset_ids = {
             output.asset_id
             for card in existing_cards
@@ -139,6 +139,7 @@ class AssetTimelineService:
         candidate_snapshot = {**snapshot, "cards": candidate_cards}
         timeline = self.build(snapshot["project"].project_id, candidate_snapshot)
         errors: list[str] = []
+        warnings: list[str] = []
         if duplicate_outputs or timeline["duplicate_output_assets"]:
             duplicate_assets = sorted(set(duplicate_outputs + timeline["duplicate_output_assets"]))
             errors.append("Duplicate planned output asset_id values: " + ", ".join(duplicate_assets))
@@ -163,11 +164,23 @@ class AssetTimelineService:
                 f"Card step too early: card {candidate.card_id} is step {candidate.step}, "
                 f"but its latest input asset requires step {min_step}. Increase step to at least {min_step}."
             )
+        if candidate.step is not None and candidate.step > min_step:
+            same_layer_siblings = [
+                other.title for other in existing_cards
+                if other.card_id != candidate.card_id
+                and (other.step or 1) == min_step
+            ]
+            if same_layer_siblings:
+                warnings.append(
+                    f"Card {candidate.card_id} is step {candidate.step} but its inputs only require "
+                    f"step {min_step}. {len(same_layer_siblings)} sibling card(s) are already at step "
+                    f"{min_step}; prefer aligning to the same parallel layer unless a dependency reason exists."
+                )
         if candidate.card_id in timeline["cycle_card_ids"]:
             errors.append(f"Dependency cycle detected around card {candidate.card_id}. Check card.inputs and card.outputs asset_ids.")
         if errors:
-            return candidate, errors
-        return candidate, []
+            return candidate, errors, warnings
+        return candidate, [], warnings
 
     @classmethod
     def producer_maps(
@@ -300,7 +313,8 @@ class AssetTimelineService:
         while ready:
             batch_ids = list(ready)
             ready.clear()
-            batches.append({"batch_index": len(batches), "card_ids": batch_ids})
+            step = len(batches) + 1
+            batches.append({"batch_index": len(batches), "step": step, "card_ids": batch_ids})
             scheduled.update(batch_ids)
             for card_id in batch_ids:
                 for target_id, deps in remaining.items():

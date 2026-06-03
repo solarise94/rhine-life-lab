@@ -235,7 +235,10 @@ class WorkerService:
         if execution_guard is None:
             raise HTTPException(
                 status_code=409,
-                detail="Project already has an executor run in progress. Start another run after the current run finishes review.",
+                detail={
+                    "message": "Project already has an executor run in progress. Start another run after the current run finishes review.",
+                    "error_code": "executor_capacity_full",
+                },
             )
         try:
             return self._start_run_with_execution_guard(
@@ -1460,6 +1463,16 @@ class WorkerService:
                 self._execution_semaphores[project_id] = Semaphore(max(1, int(self.project_service.settings.executor_max_concurrent_runs)))
             return self._execution_semaphores[project_id]
 
+    def get_available_run_slots(self, project_id: str) -> int:
+        """Best-effort advisory count of free executor slots (sandboxed path only).
+
+        Uses Semaphore._value which is not protected by the execution lock guard,
+        so callers must tolerate the value being stale by the time they act on it.
+        The 409 race path in submit_claimed_workboard_items handles this gracefully.
+        """
+        sem = self._execution_semaphore_for(project_id)
+        return sem._value  # type: ignore[attr-defined]
+
     def _card_lock_for(self, project_id: str, card_id: str) -> Lock:
         key = (project_id, card_id)
         with self._execution_locks_guard:
@@ -1908,8 +1921,10 @@ class WorkerService:
             if r_runtime:
                 context.runtime_bindings.r_env = r_runtime
                 context.runtime_bindings.env["BLUEPRINT_R_RUNTIME"] = r_runtime
-            return self._attach_library_bindings(project_id, context)
-        return self._attach_library_bindings(project_id, default_context)
+        else:
+            context = default_context
+        self._apply_script_preference_block(graph, card, context)
+        return self._attach_library_bindings(project_id, context)
 
     @staticmethod
     def _default_executor_context(
@@ -1946,6 +1961,23 @@ class WorkerService:
                 env=runtime_env,
             ),
         )
+
+    @staticmethod
+    def _apply_script_preference_block(graph: Any, card: Card, context: ExecutorContext) -> None:
+        """Append a soft script-preference instruction block if one is resolved."""
+        script_pref = (
+            getattr(getattr(card, "executor_context", None), "script_preference", None)
+            or (graph.metadata.get("runtime_preferences") or {}).get("script_preference")
+        )
+        if not script_pref or script_pref == "auto":
+            return
+        block = {
+            "prefer_python": "Soft script preference: prefer Python scripts when practical. This is not a hard constraint; use R when more reliable.",
+            "prefer_r": "Soft script preference: prefer R scripts when practical. This is not a hard constraint; use Python when more reliable.",
+            "prefer_mixed": "Soft script preference: use whichever language (Python or R) is most natural for each sub-task.",
+        }.get(script_pref)
+        if block and block not in (context.instruction_blocks or []):
+            context.instruction_blocks = list(context.instruction_blocks or []) + [block]
 
     @staticmethod
     def _merge_executor_context(default_context: ExecutorContext, override: ExecutorContext) -> ExecutorContext:

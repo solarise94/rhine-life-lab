@@ -363,8 +363,8 @@ class ManagerAutoService:
         owner_session_id = state.owner_session_id
         if not state.enabled or not owner_session_id:
             return state
-        clear_active_run = run_id is not None
-        clear_active_job = job_id is not None
+        clear_active_run = run_id is not None and state.active_run_id == run_id
+        clear_active_job = job_id is not None and state.active_job_id == job_id
         if clear_active_run or clear_active_job:
             state = self.set_runtime_state(
                 project_id,
@@ -383,7 +383,7 @@ class ManagerAutoService:
         if state.state == "finished":
             return "finished"
 
-        has_running = bool(state.active_run_id or state.active_job_id)
+        has_running = fuel.active_run_count > 0 or bool(state.active_job_id)
         has_wake_fuel = (fuel.todo_count + fuel.complete_signal_count + fuel.block_signal_count) > 0
 
         # If we were in complete and fuel appeared, exit complete back to pending_wake
@@ -487,13 +487,28 @@ class ManagerAutoService:
                 state.wake_in_flight = True
 
             # complete_evaluate: entering complete
-            elif state.state == "complete" and not state.completion_notified:
+            # Doc 42: same wake_in_flight mutex and wake_storm guard as workboard_evaluate
+            elif state.state == "complete" and not state.completion_notified and not state.wake_in_flight:
+                state.wake_window.append(utc_now())
+                if len(state.wake_window) > 5:
+                    next_state = self.stop(
+                        project_id,
+                        session_id,
+                        reason="wake_storm",
+                        message="自动运行已暂停：1分钟内唤醒超过5次，已触发风暴保护。",
+                    )
+                    graph.metadata["manager_auto"] = next_state.model_dump()
+                    store.save_graph(graph)
+                    self._emit_auto_event(project_id, next_state)
+                    return next_state, None
+
                 wake_payload = {
                     "kind": "complete_evaluate",
                     "prompt": "当前任务似乎已完成，请回顾任务总结情况。如果确认完成，请调用 finish_auto_episode；如果仍需继续，请调整 card 或加入新的 todo。",
                     "fuel_revision": state.fuel_revision,
                 }
                 state.completion_notified = True
+                state.wake_in_flight = True
 
             # If we stayed in pending_wake and wake_in_flight is already True,
             # don't re-emit. The latch prevents duplicate wakes.
@@ -545,8 +560,9 @@ class ManagerAutoService:
                 if directive_text:
                     message += f"\npending_directives:\n{directive_text}"
 
-                message += "\nCall get_background_workboard first. Consume at most one actionable workboard item or one claimed run batch in this turn."
+                message += "\nCall get_background_workboard first. This turn may end with at most one async-boundary-yielding action (one submit_claimed_workboard_items, or one start_card_run / rerun_card, or one install_runtime_dependencies). You may combine independent non-yielding tool calls and may start one dependency install plus one run-yielding action in the same turn when they are truly independent. When planning new cards from a frontier wake, align new cards to the parallel_group of existing ready_to_start items that share their input layer."
                 message += "\nIf you start background work, stop after reporting ids and let async-boundary yield the turn."
+                message += "\nIf a tool returns pending_approvals, rejected_approvals, manual_preparation_required, partial_resolution, fallback_available, unsupported_source_spec, or runtime_missing, do not retry or ask the user — skip/defer/block the workboard item with the reason and move on."
 
                 request = ChatRequest(
                     message=message,
@@ -572,8 +588,10 @@ class ManagerAutoService:
                         note=f"Handled with wake {wake_id}",
                     )
 
-                # After the Manager turn completes, re-evaluate
-                self.notify_turn_settled(project_id, session_id, async_boundary=True)
+                # Doc 42: Manager-agent calls /turn-settled after each auto turn.
+                # Do NOT call notify_turn_settled here — the agent is the
+                # authoritative source of turn completion. Calling it here would
+                # double-increment chain_count and risk re-dispatching a wake.
 
             except Exception:
                 logger.exception("Wake dispatch failed for project=%s kind=%s", project_id, kind)

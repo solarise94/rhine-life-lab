@@ -94,6 +94,7 @@ class WorkboardFuelSnapshot(BaseModel):
     todo_count: int = 0
     complete_signal_count: int = 0
     block_signal_count: int = 0
+    active_run_count: int = 0
     top_item_ids: list[str] = Field(default_factory=list)
     top_card_ids: list[str] = Field(default_factory=list)
     fuel_revision: int = 0

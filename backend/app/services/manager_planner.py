@@ -93,7 +93,7 @@ Preferred patterns:
 - To add a new analysis card: usually create a module first, then create a card linked to that module.
 - To add a submodule under a module group: create the module, then add it via `add_submodule`, then create its card.
 - To modify the wording of an existing card/module pair: use `update_card` for the card and `update_module` for the module.
-- For multi-step workflows, think through the full dependency chain first, but return only the next executable layer in a single proposal. Do not include downstream cards that depend on assets planned in the same proposal.
+- For multi-step workflows, think through the full dependency chain first. Return the full next parallel layer in a single proposal: include every card whose inputs already exist in project context, and assign them the same step. Omit only downstream cards whose inputs are planned outputs of cards in the same proposal.
 """
 
 CHAT_SYSTEM_PROMPT = """You are the Manager AI for Blueprint RE, a bioinformatics workflow manager.
@@ -119,7 +119,7 @@ Tool rules:
 - Direct card tools apply the requested card change immediately after validation.
 - Never claim a blueprint change has been applied unless the tool actually succeeded.
 - If a tool returns an error, explain the error clearly instead of pretending success.
-- For multi-step workflows, plan the whole sequence mentally, but when you call a proposal tool submit only the current executable layer whose inputs already exist in project context.
+- For multi-step workflows, plan the whole sequence mentally. When you call a proposal tool, submit the full next parallel layer whose inputs already exist in project context and give them the same step. Do not split independent cards of the same layer across different steps.
 
 Keep final answers concise and concrete.
 """

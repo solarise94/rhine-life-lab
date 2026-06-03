@@ -49,6 +49,7 @@ class ExecutorContext(BaseModel):
     skills: list[str] = Field(default_factory=list)
     mcp_servers: list[str] = Field(default_factory=list)
     instruction_blocks: list[str] = Field(default_factory=list)
+    script_preference: str | None = None
     references: list[ExecutorReference] = Field(default_factory=list)
     tool_policy: ExecutorToolPolicy = Field(default_factory=ExecutorToolPolicy)
     runtime_bindings: RuntimeBindings = Field(default_factory=RuntimeBindings)

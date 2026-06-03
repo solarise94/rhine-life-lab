@@ -139,6 +139,9 @@ Core model:
 - The blueprint is represented by cards. A card is the editable unit of the blueprint.
 - Data assets are referenced by asset_id. Card outputs are expected/planned assets; later card inputs can reuse those asset_ids.
 - Card step is the timeline layer. A card must be later than the assets it consumes.
+- Card step is the parallel-execution layer, not a serial sequence number. Two cards that share no dependency relationship (same min-step floor and no transitive input/output link) MUST share the same step value. Only increment step when a card consumes an asset produced by an earlier step.
+- When creating or revising multiple cards in one turn, align cards at the smallest valid step. Use get_background_workboard.ready_to_start[].parallel_group as the authoritative parallel layer for existing planned cards; new cards that belong to the same layer should reuse that step value.
+- A workboard parallel_group like "step_N" means the backend has already verified these cards can run together. Do not reassign them to different steps without a dependency reason.
 - The DAG is already visible in the UI. Do not narrate the full graph back to the user unless they explicitly ask for a graph recap.
 
 Available capabilities:
@@ -171,7 +174,7 @@ ${webCapabilityLines.join("\n")}
 
 Judgment:
 - Decide whether current project context is needed. If exact card ids, asset ids, steps, or current blueprint state matter, use inspect_project_summary or find_* first.
-- In auto/background turns, call get_background_workboard first. Consume at most one actionable workboard item or one claimed run batch per turn.
+- In auto/background turns, call get_background_workboard first. Each turn should end with at most one async-boundary-yielding action batch: one submit_claimed_workboard_items call, or one start_card_run / rerun_card, or one install_runtime_dependencies. You may combine independent non-yielding tool calls (inspect_*, find_*, get_*, configure_card_execution, annotate_card, write_project_memory) freely. You may also start one install_runtime_dependencies plus one run-yielding action in the same turn when they are truly independent; the async boundary will still yield the turn once. Do not call start_card_run repeatedly in the same turn to emulate a batch — use submit_claimed_workboard_items instead. The workboard response includes available_slots — never submit a batch larger than available_slots. Excess items will be automatically deferred and re-woken when capacity frees up.
 - If the user asks to continue, resume, start pending work, run ready cards, run the next step, or run several cards, call get_background_workboard first even outside auto mode.
 - For broad workflow additions, use inspect_project_summary and find_assets before choosing steps and asset_ids.
 - For plotting style, report style, recurring user preferences, or previously corrected behavior, read project memory when relevant.
@@ -184,6 +187,7 @@ Judgment:
 - If install_runtime_dependencies returns a duplicate error (duplicate_dependency_resolution_in_progress or duplicate_dependency_resolution_failure), do not retry the same package/runtime combination. Treat in-flight duplicates as wait states and terminal duplicates as non-retryable failures.
 - If install_runtime_dependencies returns a non-background blocked status (status starting with "partial_resolution_", "fallback_available_", "manual_preparation_required", "unsupported_source_spec", "runtime_missing", or "resolution_unknown"), do not transform it into a shell/install workaround. Summarize the resolver_plan.installable and resolver_plan.blocked sections, tell the user exactly what blocked which package, and ask whether they want to (a) manually prepare the runtime, (b) submit a narrower explicit request for only the installable subset, or (c) approve allow_safe_registry_install fallback if the resolver surfaced a fallback_actions list. Never call install_runtime_dependencies again with the original payload after a blocked response.
 - If resolve_runtime_dependencies returns status other than "fully_installable", treat it as advisory only. Do not invent a partial install; submit a narrower explicit request only after the user has acknowledged the blocked subset. The resolver never executes anything on its own.
+- In auto mode, do not ask the user to wait for authorization, manual runtime preparation, package-source approval, script binding, or other interactive choices. If a workboard item cannot pass with the current project state and safe backend tools, explicitly consume or transform it: skip the claimed todo item via skip_workboard_item, defer/block the signal with a concise reason, revise the affected card back to a planned repair state when a clear non-interactive repair exists, or create a new planned follow-up card. Do not leave the auto turn waiting for user confirmation.
 - Do not create free-form todo plans in chat. If auto/background work needs sequencing, use backend workboard tools and item ids.
 - Dependency ATTENTION is derived, not a persisted card status. Do not treat linked_assets as current dependency truth; use card.inputs, card.outputs, and asset.depends_on. If revise_card_plan or delete_card returns dependency_attention_check_recommended, call inspect_dependency_attention before deciding whether to continue. For input_asset_outdated issues, the old asset_id is still saved in the downstream card's inputs; if current_asset_id is clear and preserves the workflow, call revise_card_plan to replace that input asset_id first, then start_card_run in upstream-first order. Do not use rerun_card for dependency repair. If the intent is ambiguous, report the ATTENTION to the user.
 - If a write tool returns ok:false, use the message/retry_hint to correct arguments and retry when the correction is clear. If it is not clear, inspect context or ask a focused question.
@@ -202,13 +206,14 @@ ${webJudgmentLines.join("\n")}
 - Respect selected_context.python_runtime and selected_context.r_runtime as preferred execution runtimes when planning or updating analysis cards.
 - If script_preference is auto and a new bioinformatics card could reasonably be implemented in either Python or R, ask the user which script style they prefer when that choice materially affects the workflow.
 - When a concrete script preference is known, reflect it in the card plan and chosen implementation approach, but do not send executor_context fields in normal card write payloads.
+- When creating or revising an analysis card and selected_context.script_preference is prefer_python, prefer_r, or prefer_mixed, persist it into card.executor_context by calling configure_card_execution with the matching instruction_blocks entry. Do not rely on chat-side acknowledgment alone; the executor does not read chat history.
 - Keep final replies concise and user-facing.
 
 Card fields:
 - create_card requires title, summary, and usually outputs.
 - revise_card_plan requires exact card_id; it is a selector, not a replacement identity field.
 - annotate_card requires exact card_id and is for title/summary/note changes only. Use manager_review only when replacing the displayed note is intended; use manager_review_append to add a note while preserving existing review/status text.
-- step is optional and controls timeline grouping.
+- step is the parallel-execution layer. Cards with no mutual dependency should share the same step. Backend validates the lower bound derived from input assets; do not pad step beyond that bound.
 - Inputs are selected asset ids, shaped like { asset_id }. Use exact asset ids from find_assets or planned upstream outputs from card detail.
 - Outputs are explicit semantic contracts shaped like { role, artifact_class, description? }.
 - Do not send card_id on create. The backend generates it.
@@ -1436,9 +1441,38 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     jobId: null,
     startedCount: 0,
     batch: false,
+    installOnly: false,
   };
+  const NON_YIELDING_TOOLS = new Set([
+    "inspect_project_summary", "inspect_dependency_attention",
+    "find_cards", "find_assets",
+    "get_card_detail", "get_asset_detail", "get_project_context",
+    "get_background_workboard", "get_runtime_dependency_install_status",
+    "get_skill_library_item", "get_mcp_library_item",
+    "list_data_assets", "list_project_memory", "list_skill_library", "list_mcp_library",
+    "search_card_templates", "search_skill_library", "search_mcp_library",
+    "read_result_asset", "read_project_memory", "search_project_memory",
+    "configure_card_execution", "annotate_card", "write_project_memory",
+  ]);
   const callLoggedTool = async (toolName, toolCallId, projectId, baseUrl, token, path, options = {}, signal, sessionId = null) => {
     if (asyncBoundary.active && !(toolName === "stop_card_run" && userRequestedInterrupt)) {
+      // Non-yielding tools are always allowed after async boundary
+      if (NON_YIELDING_TOOLS.has(toolName)) {
+        return await callBackendLoggedTool(toolName, toolCallId, projectId, baseUrl, token, path, options, signal, sessionId);
+      }
+      // Allow one run-yielding action after an install-only boundary
+      const isRunYielding = ["start_card_run", "rerun_card", "submit_claimed_workboard_items"].includes(toolName);
+      if (asyncBoundary.installOnly && isRunYielding) {
+        asyncBoundary.installOnly = false;
+        const payload = await callBackendLoggedTool(toolName, toolCallId, projectId, baseUrl, token, path, options, signal, sessionId);
+        if (isRunAsyncBoundaryPayload(toolName, payload)) {
+          asyncBoundary.toolName = toolName;
+          asyncBoundary.runId = payload.run_id;
+          asyncBoundary.startedCount = Number(payload.started_count || 1);
+          asyncBoundary.batch = Boolean(payload.batch || (toolName === "submit_claimed_workboard_items" && asyncBoundary.startedCount > 1));
+        }
+        return payload;
+      }
       const backgroundLabel = asyncBoundary.batch
         ? `Background run batch (${asyncBoundary.startedCount || 0} runs${asyncBoundary.runId ? `, first run ${asyncBoundary.runId}` : ""})`
         : asyncBoundary.runId
@@ -1467,6 +1501,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
       asyncBoundary.jobId = null;
       asyncBoundary.startedCount = Number(payload.started_count || 1);
       asyncBoundary.batch = Boolean(payload.batch || (toolName === "submit_claimed_workboard_items" && asyncBoundary.startedCount > 1));
+      asyncBoundary.installOnly = false;
     } else if (isDependencyJobAsyncBoundaryPayload(toolName, payload)) {
       asyncBoundary.active = true;
       asyncBoundary.toolName = toolName;
@@ -1474,6 +1509,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
       asyncBoundary.jobId = payload.job_id;
       asyncBoundary.startedCount = 0;
       asyncBoundary.batch = false;
+      asyncBoundary.installOnly = true;
     }
     return payload;
   };
@@ -1757,10 +1793,10 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "create_card",
       label: "Create card",
-      description: "Create a new blueprint card directly. A card is a blueprint unit. Use selected input asset ids and semantic output contracts. The backend generates card_id, output asset ids, labels, formats, and default statuses. Validation errors come back as structured repair guidance.",
+      description: "Create a new blueprint card directly. A card is a blueprint unit. Use selected input asset ids and semantic output contracts. The backend generates card_id, output asset ids, labels, formats, and default statuses. Validation errors come back as structured repair guidance. Prefer the smallest valid step for each card; group independent cards at the same step so the workboard can batch them. When get_background_workboard reports existing ready cards under a parallel_group, align new cards with the same inputs to the same step.",
       parameters: Type.Object({
         title: Type.String(),
-        step: Type.Optional(Type.Number()),
+        step: Type.Optional(Type.Number({ description: "Parallel-execution layer. Cards with no mutual dependency should share the same step. Backend validates the lower bound derived from input assets; do not pad step beyond that bound." })),
         summary: Type.String(),
         inputs: Type.Optional(Type.Array(Type.Object({ asset_id: Type.String() }), { description: "Selected input asset ids. Use exact asset ids from find_assets or planned upstream outputs." })),
         outputs: Type.Optional(Type.Array(Type.Object({
@@ -1801,10 +1837,10 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "revise_card_plan",
       label: "Revise card plan",
-      description: "Revise an existing card plan. Use this only for execution-relevant changes: step, selected input asset ids, or semantic outputs. It can reset the card to planned for a new run. When repairing dependency ATTENTION/input_asset_outdated, replace the downstream input asset id here, then use start_card_run. Validation errors come back as structured repair guidance.",
+      description: "Revise an existing card plan. Use this only for execution-relevant changes: step, selected input asset ids, or semantic outputs. It can reset the card to planned for a new run. When repairing dependency ATTENTION/input_asset_outdated, replace the downstream input asset id here, then use start_card_run. Validation errors come back as structured repair guidance. When adjusting step, prefer the smallest valid value that keeps the card in its parallel layer. Do not shift a card to a later step unless a new input dependency requires it.",
       parameters: Type.Object({
         card_id: Type.String(),
-        step: Type.Optional(Type.Number()),
+        step: Type.Optional(Type.Number({ description: "Parallel-execution layer. Prefer the smallest valid value; do not pad beyond the lower bound." })),
         inputs: Type.Optional(Type.Array(Type.Object({ asset_id: Type.String() }))),
         outputs: Type.Optional(Type.Array(Type.Object({
           role: Type.String(),
@@ -1911,7 +1947,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     {
       name: "configure_card_execution",
       label: "Configure card execution",
-      description: "Update selected skills, MCP servers, and Python/R runtime bindings for one or more cards. Use this only when a card needs non-default runtimes or library/tool attachments. It is not a permission editor and does not control network, shell, env vars, working directory, or free-form instruction patches.",
+      description: "Update selected skills, MCP servers, Python/R runtime bindings, and instruction blocks for one or more cards. Use this only when a card needs non-default runtimes or library/tool attachments, or to persist script_preference into a card's executor context. It is not a permission editor and does not control network, shell, env vars, working directory, or free-form instruction patches.",
       parameters: Type.Object({
         card_ids: Type.Optional(Type.Array(Type.String())),
         skills: Type.Optional(Type.Array(Type.String())),
@@ -1920,6 +1956,11 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           Type.Object({
             conda_env: Type.Optional(Type.String()),
             r_env: Type.Optional(Type.String()),
+          }),
+        ),
+        instruction_blocks: Type.Optional(
+          Type.Array(Type.String(), {
+            description: "Free-form planning hints the executor should read. Use this to persist selected_context.script_preference into the card. Keep entries short and non-binding.",
           }),
         ),
       }),
@@ -1950,7 +1991,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
       label: "Install runtime dependencies",
       description: "Start a background job that installs explicitly named Python or R packages into an already selected non-system runtime. Use only for clear package lists. When fixing a specific card/run dependency issue, include source.card_id and source.run_id when known. Do not choose or pass an installer; backend will choose the best available conda-family solver automatically. After a successful start, report the job_id and stop this turn; do not poll status with get_runtime_dependency_install_status in the same turn.",
       parameters: Type.Object({
-        ecosystem: Type.String({ description: "python or R" }),
+        ecosystem: Type.String({ description: "python or R. When selected_context.script_preference is prefer_r, default ecosystem to R unless the task clearly needs a Python-only package; mirror for prefer_python. Do not invent a third ecosystem value." }),
         runtime: Type.String({ description: "Selected non-system runtime name, such as omicverse, rnaseq, or R_env. Do not use __system__." }),
         packages: Type.Array(Type.String({ description: "Package names or simple Python version specs." })),
         timeout_seconds: Type.Optional(Type.Number()),
@@ -1992,7 +2033,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
       label: "Resolve runtime dependencies",
       description: "Plan-only counterpart of install_runtime_dependencies. Returns a resolver plan (status, installable, blocked, fallback_actions) for the same request shape, without creating a background job. Use this to inspect what would happen before mutating runtime state. If status is not \"fully_installable\", do NOT retry install_runtime_dependencies with the original payload; ask the user how to proceed or submit a narrower explicit request for only the installable subset.",
       parameters: Type.Object({
-        ecosystem: Type.String({ description: "python or R" }),
+        ecosystem: Type.String({ description: "python or R. When selected_context.script_preference is prefer_r, default ecosystem to R unless the task clearly needs a Python-only package; mirror for prefer_python. Do not invent a third ecosystem value." }),
         runtime: Type.String({ description: "Selected non-system runtime name." }),
         packages: Type.Array(Type.String({ description: "Package names or simple Python version specs." })),
         source: Type.Optional(
@@ -3306,7 +3347,7 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
         ? "This session is in /btw mode. Answer questions, inspect status, explain logs, and use read-only tools only. Do not mutate blueprint or execution state."
         : "Answer naturally. Decide whether project tools are needed. If the user asks to continue, resume, run the next step, run ready cards, or start multiple cards, read get_background_workboard first and prefer the workboard claim/submit path. If you change the blueprint, remember that cards are the blueprint units and use create_card, revise_card_plan, annotate_card, delete_card, configure_card_execution, run-control, or template tools directly as needed. After ok:false tool results, correct and retry when the fix is clear.") +
       (payload.auto_mode?.enabled && !payload.auto_mode?.btw_mode
-        ? " Auto episode is active for this session. The backend will send workboard_evaluate wakes when the workboard has fuel (todo items, completion signals, or blocker signals) and complete_evaluate wakes when all work appears done. On each wake, call get_background_workboard first, consume at most one item or batch per turn, and stop after reporting ids to let async-boundary yield the turn. When you receive a complete_evaluate wake, inspect the project state: if the objective is truly done, call finish_auto_episode to end the episode with a summary; if more work is needed, create new todo fuel or adjust cards to generate new signals. Todo items only accept planned cards; the only explicit todo exit is skip (not done); todo items auto-exit when their card is submitted or started."
+        ? " Auto episode is active for this session. The backend will send workboard_evaluate wakes when the workboard has fuel (todo items, completion signals, or blocker signals) and complete_evaluate wakes when all work appears done. On each wake, call get_background_workboard first, consume at most one item or batch per turn, and stop after reporting ids to let async-boundary yield the turn. When you receive a complete_evaluate wake, inspect the project state: if the objective is truly done, call finish_auto_episode to end the episode with a summary; if more work is needed, create new todo fuel or adjust cards to generate new signals. Todo items only accept planned cards; the only explicit todo exit is skip (not done); todo items auto-exit when their card is submitted or started. If a tool returns pending_approvals, rejected_approvals, manual_preparation_required, partial_resolution, fallback_available, unsupported_source_spec, or runtime_missing, do not retry or ask the user — skip/defer/block the workboard item with the reason and move on."
         : ""),
   };
   const abortController = new AbortController();

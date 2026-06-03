@@ -175,6 +175,18 @@
           "title": "Instruction Blocks",
           "type": "array"
         },
+        "script_preference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Script Preference"
+        },
         "references": {
           "items": {
             "$ref": "#/$defs/ExecutorReference"
