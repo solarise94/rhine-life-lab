@@ -23,7 +23,10 @@ from app.services.manager_planner import DeepSeekManagerPlanner, ManagerPlanDraf
 from app.services.manager_service import ManagerService
 from app.services.project_service import ProjectService
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
-from app.services.runtime_dependency_resolver_service import RuntimeDependencyResolverService
+from app.services.runtime_dependency_resolver_service import (
+    ProbeResult,
+    RuntimeDependencyResolverService,
+)
 
 
 class _StubPlanner(DeepSeekManagerPlanner):
@@ -104,7 +107,7 @@ class ResolverFirstInstallerTest(unittest.TestCase):
                 return subprocess.CompletedProcess(
                     args=[],
                     returncode=0,
-                    stdout=json.dumps({"scanpy": [{"name": "scanpy", "version": "1.10.0"}]}),
+                    stdout=json.dumps({"query": {"query": "scanpy", "type": "search"}, "result": {"pkgs": [{"name": "scanpy", "version": "1.10.0"}]}}),
                     stderr="",
                 )
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
@@ -130,19 +133,21 @@ class ResolverFirstInstallerTest(unittest.TestCase):
 
     def test_resolve_runtime_dependencies_partial_classification(self) -> None:
         self._setup_conda_runtime()
+        settings = get_settings()
+        settings.runtime_dependency_fallback_policy = "report_only"
         manager, _project_service, _job_service, _resolver = _build_manager(self.tmpdir)
 
         def fake_run(command, **kwargs):
             # ggplot2 resolves to r-ggplot2; limma is not found.
-            for candidate in command[3:]:
+            for candidate in command[4:]:
                 if candidate == "r-ggplot2":
                     return subprocess.CompletedProcess(
                         args=[],
                         returncode=0,
-                        stdout=json.dumps({"r-ggplot2": [{"name": "r-ggplot2", "version": "3.5.0"}]}),
+                        stdout=json.dumps({"query": {"query": "r-ggplot2", "type": "search"}, "result": {"pkgs": [{"name": "r-ggplot2", "version": "3.5.0"}]}}),
                         stderr="",
                     )
-            return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="not found")
+            return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="PackagesNotFoundError: no match found")
 
         with patch("app.services.runtime_dependency_resolver_service.subprocess.run", side_effect=fake_run):
             plan = manager.blueprint_tools.resolve_runtime_dependencies(
@@ -168,11 +173,13 @@ class ResolverFirstInstallerTest(unittest.TestCase):
     def test_install_runtime_dependencies_resolver_blocks_execution(self) -> None:
         """When the resolver returns non-fully_installable, no background job is created."""
         self._setup_conda_runtime()
+        settings = get_settings()
+        settings.runtime_dependency_fallback_policy = "report_only"
         manager, _project_service, _job_service, _resolver = _build_manager(self.tmpdir)
 
         # Force every conda probe to fail so the resolver rejects the request.
         def fake_run(command, **kwargs):
-            return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="not found")
+            return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="PackagesNotFoundError: no match found")
 
         with patch("app.services.runtime_dependency_resolver_service.subprocess.run", side_effect=fake_run):
             response = manager.blueprint_tools.install_runtime_dependencies(
@@ -204,10 +211,10 @@ class ResolverFirstInstallerTest(unittest.TestCase):
 
         def _mock_probe(_self, _bin, candidates, *, ecosystem):
             if candidates and candidates[0] == "scanpy":
-                return "scanpy"
-            return None
+                return ProbeResult(status="found", match="scanpy")
+            return ProbeResult(status="not_found")
 
-        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime):
+        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None):
             return f"mock:{getattr(conda_bin, 'name', conda_bin)}:{ecosystem}:{runtime}"
 
         installer_completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="installed\n", stderr="")
@@ -271,7 +278,7 @@ class ResolverFirstInstallerTest(unittest.TestCase):
                 return subprocess.CompletedProcess(
                     args=[],
                     returncode=0,
-                    stdout=json.dumps({"scanpy": [{"name": "scanpy", "version": "1.10.0"}]}),
+                    stdout=json.dumps({"query": {"query": "scanpy", "type": "search"}, "result": {"pkgs": [{"name": "scanpy", "version": "1.10.0"}]}}),
                     stderr="",
                 )
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
@@ -302,9 +309,9 @@ class ResolverFirstInstallerTest(unittest.TestCase):
         # pip registry fallback.  Use patch.object on the class for
         # isolation from test ordering.
         def _mock_probe(_self, _bin, candidates, *, ecosystem):
-            return None
+            return ProbeResult(status="not_found")
 
-        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime):
+        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None):
             return f"mock:{getattr(conda_bin, 'name', conda_bin)}:{ecosystem}:{runtime}"
 
         with patch.object(RuntimeDependencyResolverService, "_probe_conda", _mock_probe), \
@@ -329,6 +336,52 @@ class ResolverFirstInstallerTest(unittest.TestCase):
             self.assertEqual(action["installer"], "pip")
             self.assertEqual(action["name"], "pydeseq2")
 
+    def test_r_dual_source_fallback_prefers_cran_and_creates_job(self) -> None:
+        self._setup_conda_runtime()
+        settings = get_settings()
+        settings.runtime_dependency_fallback_policy = "allow_safe_registry_install"
+        manager, _project_service, _job_service, _resolver = _build_manager(self.tmpdir)
+
+        def _mock_probe(_self, _bin, candidates, *, ecosystem):
+            return ProbeResult(status="not_found")
+
+        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None):
+            return f"mock:{getattr(conda_bin, 'name', conda_bin)}:{ecosystem}:{runtime}"
+
+        installer_completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="installed\n", stderr="")
+        with patch.object(RuntimeDependencyResolverService, "_probe_conda", _mock_probe), \
+             patch.object(RuntimeDependencyResolverService, "_channel_signature", _mock_channel_sig), \
+             patch("app.services.manager_blueprint_tools.subprocess.run", return_value=installer_completed):
+            plan = manager.blueprint_tools.resolve_runtime_dependencies(
+                "test-project",
+                {
+                    "ecosystem": "R",
+                    "runtime": "rnaseq",
+                    "packages": ["limma"],
+                },
+            )
+            response = manager.blueprint_tools.install_runtime_dependencies(
+                "test-project",
+                {
+                    "ecosystem": "R",
+                    "runtime": "rnaseq",
+                    "packages": ["limma"],
+                },
+            )
+
+        self.assertEqual(plan["status"], "fully_installable")
+        self.assertTrue(plan["ok"])
+        self.assertEqual(len(plan.get("fallback_actions") or []), 1)
+        self.assertEqual(plan["fallback_actions"][0]["installer"], "cran")
+        self.assertTrue(response["ok"])
+        self.assertTrue(response["background"])
+        self.assertIn("job_id", response)
+
+        jobs_path = Path(self.tmpdir) / "test-project" / "chat" / "runtime_dependency_jobs.json"
+        if jobs_path.exists():
+            payload = json.loads(jobs_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(payload), 1)
+
     def test_fallback_policy_allow_safe_registry_does_not_auto_execute(self) -> None:
         """Even under the relaxed policy, install_runtime_dependencies still blocks partial requests."""
         self._setup_conda_runtime()
@@ -337,7 +390,7 @@ class ResolverFirstInstallerTest(unittest.TestCase):
         manager, _project_service, _job_service, _resolver = _build_manager(self.tmpdir)
 
         def fake_run(command, **kwargs):
-            return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="not found")
+            return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="PackagesNotFoundError: no match found")
 
         # Under allow_safe_registry_install, a single-family all-fallback
         # request (pip for pydeseq2) is promoted to fully_installable by the
@@ -394,10 +447,10 @@ class ResolverFirstInstallerTest(unittest.TestCase):
         # scanpy finds conda; pydeseq2 does not.
         def _mock_probe(_self, _bin, candidates, *, ecosystem):
             if candidates and candidates[0] == "scanpy":
-                return "scanpy"
-            return None
+                return ProbeResult(status="found", match="scanpy")
+            return ProbeResult(status="not_found")
 
-        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime):
+        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None):
             return f"mock:{getattr(conda_bin, 'name', conda_bin)}:{ecosystem}:{runtime}"
 
         with patch.object(RuntimeDependencyResolverService, "_probe_conda", _mock_probe), \
@@ -425,8 +478,6 @@ class ResolverFirstInstallerTest(unittest.TestCase):
 
     def test_cache_key_changes_with_channel_signature(self) -> None:
         """Different conda solver paths produce distinct cache entries."""
-        from app.services.runtime_dependency_resolver_service import RuntimeDependencyResolverService
-
         resolver = RuntimeDependencyResolverService()
         key_a = resolver._channel_signature(Path("/usr/bin/mamba"), "python", "env_a")
         key_b = resolver._channel_signature(Path("/opt/conda/bin/mamba"), "python", "env_a")
@@ -446,7 +497,7 @@ class ResolverFirstInstallerTest(unittest.TestCase):
                 return subprocess.CompletedProcess(
                     args=[],
                     returncode=0,
-                    stdout=json.dumps({"scanpy": [{"name": "scanpy", "version": "1.10.0"}]}),
+                    stdout=json.dumps({"query": {"query": "scanpy", "type": "search"}, "result": {"pkgs": [{"name": "scanpy", "version": "1.10.0"}]}}),
                     stderr="",
                 )
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")

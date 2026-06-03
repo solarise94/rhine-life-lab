@@ -140,6 +140,7 @@ Rationale:
 - conda-family installation provides pre-built binaries for many R packages and avoids local compilation;
 - CRAN/Bioconductor source installation is slower, noisier, and more failure-prone inside conda R environments;
 - CRAN/Bioconductor source installation is not Manager-selectable through this tool. If needed later, it must be a backend-owned fallback with the runtime `bin` directory prepended to `PATH` so conda compiler wrappers are visible.
+- R registry fallback is backend-owned. In the current implementation, if every unresolved package can fall back through either CRAN or Bioconductor and no stronger classifier exists, the resolver may prefer CRAN as the default registry family; otherwise the response should stay non-background and report the ambiguous fallback families.
 
 Backend should default R installs to the conda-family path for conda R runtimes.
 
@@ -213,6 +214,7 @@ For R packages:
 - backend may use CRAN or Bioconductor registry information as a fallback hint source, but Manager should not have to guess the conda package name itself;
 - if the package is found in the conda-family repositories, install the resolved distribution package;
 - if not found, backend should indicate whether a manual `cran` or `bioconductor` preparation path may be sensible, without asking Manager to retry this tool with a package-manager selector.
+- if both `cran` and `bioconductor` are possible fallback hints and the backend has not classified the package to exactly one family, the current implementation may prefer `cran` as the default fallback family; otherwise it should block with an ambiguous-fallback response rather than choosing arbitrarily.
 
 This keeps the package-name burden out of the LLM and out of user chat.
 

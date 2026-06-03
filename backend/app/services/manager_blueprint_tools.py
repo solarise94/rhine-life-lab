@@ -30,12 +30,15 @@ from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.project_service import ProjectService
 from app.services.result_asset_service import ResultAssetService
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
+from app.core.config import find_conda_solver
 from app.services.runtime_dependency_resolver_service import (
     PACKAGE_STATUS_FALLBACK_REQUIRED,
+    RESOLVER_STATUS_FALLBACK_AVAILABLE_BUT_AMBIGUOUS,
     RESOLVER_STATUS_FALLBACK_AVAILABLE_POLICY_DISALLOWS,
     RESOLVER_STATUS_FULLY_INSTALLABLE,
     RESOLVER_STATUS_PARTIAL_RESOLUTION,
     RESOLVER_STATUS_RUNTIME_MISSING,
+    RESOLVER_STATUS_SOLVER_ERROR,
     RESOLVER_STATUS_UNSUPPORTED_SOURCE_SPEC,
     RESOLVER_TO_P0_FIELDS,
     RuntimeDependencyResolverService,
@@ -1258,6 +1261,8 @@ class ManagerBlueprintTools:
             "dependency_install_start_failed": RESOLVER_STATUS_RUNTIME_MISSING,
             "package_not_found_in_conda_channels": "fallback_available_but_policy_disallows",
             "manual_preparation_required": "manual_preparation_required",
+            "fallback_available_but_ambiguous": RESOLVER_STATUS_FALLBACK_AVAILABLE_BUT_AMBIGUOUS,
+            "dependency_probe_failed": RESOLVER_STATUS_SOLVER_ERROR,
         }
         if not error_code:
             return "resolution_unknown"
@@ -1271,6 +1276,8 @@ class ManagerBlueprintTools:
             "dependency_install_start_failed": "manual_runtime_preparation_required",
             "package_not_found_in_conda_channels": "choose_fallback",
             "manual_preparation_required": "manual_preparation_required",
+            "fallback_available_but_ambiguous": "manual_preparation_required",
+            "dependency_probe_failed": "inspect_stderr",
         }
         if not error_code:
             return "manual_preparation_required"
@@ -1282,8 +1289,10 @@ class ManagerBlueprintTools:
         retry_hint_map = {
             RESOLVER_STATUS_PARTIAL_RESOLUTION: "do_not_install_partial_request",
             RESOLVER_STATUS_FALLBACK_AVAILABLE_POLICY_DISALLOWS: "choose_fallback",
+            RESOLVER_STATUS_FALLBACK_AVAILABLE_BUT_AMBIGUOUS: "manual_preparation_required",
             RESOLVER_STATUS_RUNTIME_MISSING: "manual_runtime_preparation_required",
             RESOLVER_STATUS_UNSUPPORTED_SOURCE_SPEC: "do_not_retry_installer",
+            RESOLVER_STATUS_SOLVER_ERROR: "inspect_stderr",
         }
         retry_hint = retry_hint_map.get(status, "manual_preparation_required")
         return {
@@ -1317,7 +1326,7 @@ class ManagerBlueprintTools:
     def _fallback_policy(self) -> str:
         settings = getattr(self.project_service, "settings", None)
         if settings is None:
-            return "report_only"
+            return "allow_safe_registry_install"
         return normalize_fallback_policy(
             getattr(settings, "runtime_dependency_fallback_policy", None)
         )
@@ -2597,10 +2606,9 @@ class ManagerBlueprintTools:
 
     @staticmethod
     def _resolve_conda_solver(conda_base: Path) -> Path:
-        for name in ("mamba", "conda"):
-            candidate = conda_base / "bin" / name
-            if candidate.exists():
-                return candidate
+        solver = find_conda_solver(conda_base)
+        if solver is not None:
+            return solver
         micromamba = shutil.which("micromamba")
         if micromamba:
             return Path(micromamba)

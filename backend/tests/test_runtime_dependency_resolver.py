@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,15 +14,20 @@ from app.services.runtime_dependency_resolver_service import (
     PACKAGE_STATUS_FALLBACK_REQUIRED,
     PACKAGE_STATUS_MANUAL_PREPARATION_REQUIRED,
     PACKAGE_STATUS_RUNTIME_MISSING,
+    PACKAGE_STATUS_SOLVER_ERROR,
     PACKAGE_STATUS_UNSUPPORTED_SOURCE_SPEC,
+    RESOLVER_STATUS_FALLBACK_AVAILABLE_BUT_AMBIGUOUS,
     RESOLVER_STATUS_FALLBACK_AVAILABLE_POLICY_DISALLOWS,
     RESOLVER_STATUS_FULLY_INSTALLABLE,
     RESOLVER_STATUS_MANUAL_PREPARATION_REQUIRED,
     RESOLVER_STATUS_PARTIAL_RESOLUTION,
     RESOLVER_STATUS_RUNTIME_MISSING,
+    RESOLVER_STATUS_SOLVER_ERROR,
     RESOLVER_STATUS_UNSUPPORTED_SOURCE_SPEC,
     RESOLVER_TO_P0_FIELDS,
+    ProbeResult,
     RuntimeDependencyResolverService,
+    RuntimeProbeResult,
     collect_fallback_actions,
     fallback_policy_allows,
     is_registry_fallback_action_safe,
@@ -77,7 +83,7 @@ class ResolverServiceTest(unittest.TestCase):
         with patch.object(
             RuntimeDependencyResolverService,
             "_probe_runtime",
-            return_value=(True, "/tmp/env"),
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/env")),
         ), patch.object(
             RuntimeDependencyResolverService,
             "_resolve_conda_solver",
@@ -90,6 +96,7 @@ class ResolverServiceTest(unittest.TestCase):
                     "runtime": "python_env",
                     "packages": ["numpy", "pydeseq2"],
                 },
+                policy="report_only",
             )
         # No conda solver means both packages need a fallback, status falls back
         # to "fallback_available_but_policy_disallows" because both are pip-fallback.
@@ -101,7 +108,7 @@ class ResolverServiceTest(unittest.TestCase):
         with patch.object(
             RuntimeDependencyResolverService,
             "_probe_runtime",
-            return_value=(True, "/tmp/env"),
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/env")),
         ), patch.object(
             RuntimeDependencyResolverService,
             "_resolve_conda_solver",
@@ -109,7 +116,7 @@ class ResolverServiceTest(unittest.TestCase):
         ), patch.object(
             RuntimeDependencyResolverService,
             "_probe_conda",
-            return_value="numpy",
+            return_value=ProbeResult(status="found", match="numpy"),
         ):
             plan = self.resolver.resolve(
                 "proj",
@@ -129,7 +136,7 @@ class ResolverServiceTest(unittest.TestCase):
         with patch.object(
             RuntimeDependencyResolverService,
             "_probe_runtime",
-            return_value=(True, "/tmp/env"),
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/env")),
         ), patch.object(
             RuntimeDependencyResolverService,
             "_resolve_conda_solver",
@@ -137,7 +144,7 @@ class ResolverServiceTest(unittest.TestCase):
         ), patch.object(
             RuntimeDependencyResolverService,
             "_probe_conda",
-            side_effect=["r-ggplot2", None],
+            side_effect=[ProbeResult(status="found", match="r-ggplot2"), ProbeResult(status="not_found")],
         ):
             plan = self.resolver.resolve(
                 "proj",
@@ -164,7 +171,7 @@ class ResolverServiceTest(unittest.TestCase):
         with patch.object(
             RuntimeDependencyResolverService,
             "_probe_runtime",
-            return_value=(False, "Python runtime not found"),
+            return_value=RuntimeProbeResult(present=False, error_message="Python runtime not found"),
         ):
             plan = self.resolver.resolve(
                 "proj",
@@ -206,7 +213,7 @@ class ResolverServiceTest(unittest.TestCase):
         with patch.object(
             RuntimeDependencyResolverService,
             "_probe_runtime",
-            return_value=(True, "/tmp/env"),
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/env")),
         ), patch.object(
             RuntimeDependencyResolverService,
             "_resolve_conda_solver",
@@ -214,7 +221,7 @@ class ResolverServiceTest(unittest.TestCase):
         ), patch.object(
             RuntimeDependencyResolverService,
             "_probe_conda",
-            return_value="numpy",
+            return_value=ProbeResult(status="found", match="numpy"),
         ):
             plan = self.resolver.resolve(
                 "proj",
@@ -234,12 +241,12 @@ class ResolverServiceTest(unittest.TestCase):
 
         def _probe(conda_bin, candidates, *, ecosystem):
             calls.append(",".join(candidates))
-            return candidates[0] if candidates else None
+            return ProbeResult(status="found", match=candidates[0]) if candidates else ProbeResult(status="not_found")
 
         with patch.object(
             RuntimeDependencyResolverService,
             "_probe_runtime",
-            return_value=(True, "/tmp/env"),
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/env")),
         ), patch.object(
             RuntimeDependencyResolverService,
             "_resolve_conda_solver",
@@ -272,13 +279,13 @@ class ResolverServiceTest(unittest.TestCase):
     def test_invalid_grammar_specs_are_rejected_as_unsupported_source(self) -> None:
         """numpy>=1.0, package[extra], and similar non-bare specs must be unsupported_source_spec."""
         # Avoid subprocess calls from _channel_signature / _configured_channels.
-        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime):
+        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None):
             return f"mock:{getattr(conda_bin, 'name', conda_bin)}:{ecosystem}:{runtime}"
 
         with patch.object(
             RuntimeDependencyResolverService,
             "_probe_runtime",
-            return_value=(True, "/tmp/env"),
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/env")),
         ), patch.object(
             RuntimeDependencyResolverService,
             "_resolve_conda_solver",
@@ -338,14 +345,14 @@ class ResolverServiceTest(unittest.TestCase):
 
 class ResolverFallbackPolicyTest(unittest.TestCase):
     def test_normalize_policy(self) -> None:
-        self.assertEqual(normalize_fallback_policy(None), "report_only")
-        self.assertEqual(normalize_fallback_policy(""), "report_only")
+        self.assertEqual(normalize_fallback_policy(None), "allow_safe_registry_install")
+        self.assertEqual(normalize_fallback_policy(""), "allow_safe_registry_install")
         self.assertEqual(normalize_fallback_policy("report_only"), "report_only")
         self.assertEqual(
             normalize_fallback_policy("allow_safe_registry_install"),
             "allow_safe_registry_install",
         )
-        self.assertEqual(normalize_fallback_policy("unknown"), "report_only")
+        self.assertEqual(normalize_fallback_policy("unknown"), "allow_safe_registry_install")
 
     def test_fallback_policy_allows(self) -> None:
         self.assertFalse(fallback_policy_allows(None))
@@ -357,7 +364,7 @@ class ResolverFallbackPolicyTest(unittest.TestCase):
         with patch.object(
             RuntimeDependencyResolverService,
             "_probe_runtime",
-            return_value=(True, "/tmp/env"),
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/env")),
         ), patch.object(
             RuntimeDependencyResolverService,
             "_resolve_conda_solver",
@@ -365,7 +372,7 @@ class ResolverFallbackPolicyTest(unittest.TestCase):
         ), patch.object(
             RuntimeDependencyResolverService,
             "_probe_conda",
-            return_value=None,
+            return_value=ProbeResult(status="not_found"),
         ):
             plan = resolver.resolve(
                 "proj",
@@ -383,7 +390,7 @@ class ResolverFallbackPolicyTest(unittest.TestCase):
         with patch.object(
             RuntimeDependencyResolverService,
             "_probe_runtime",
-            return_value=(True, "/tmp/env"),
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/env")),
         ), patch.object(
             RuntimeDependencyResolverService,
             "_resolve_conda_solver",
@@ -391,7 +398,7 @@ class ResolverFallbackPolicyTest(unittest.TestCase):
         ), patch.object(
             RuntimeDependencyResolverService,
             "_probe_conda",
-            return_value=None,
+            return_value=ProbeResult(status="not_found"),
         ):
             plan = resolver.resolve(
                 "proj",
@@ -406,6 +413,143 @@ class ResolverFallbackPolicyTest(unittest.TestCase):
         self.assertEqual(actions[0].installer, "pip")
         self.assertEqual(actions[0].name, "pydeseq2")
         self.assertTrue(is_registry_fallback_action_safe(actions[0]))
+
+    def test_r_fallback_prefers_cran_under_allow_policy(self) -> None:
+        resolver = RuntimeDependencyResolverService()
+        with patch.object(
+            RuntimeDependencyResolverService,
+            "_probe_runtime",
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/env/bin/Rscript")),
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_resolve_conda_solver",
+            return_value=Path("/usr/bin/mamba"),
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_probe_conda",
+            return_value=ProbeResult(status="not_found"),
+        ):
+            plan = resolver.resolve(
+                "proj",
+                {
+                    "ecosystem": "R",
+                    "runtime": "R_env",
+                    "packages": ["limma"],
+                },
+                policy="allow_safe_registry_install",
+            )
+
+        self.assertEqual(plan.status, RESOLVER_STATUS_FULLY_INSTALLABLE)
+        self.assertTrue(plan.ok)
+        self.assertEqual(len(plan.installable), 1)
+        self.assertEqual(plan.installable[0].installer, "cran")
+        actions = collect_fallback_actions(plan, policy="allow_safe_registry_install")
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].installer, "cran")
+
+    def test_solver_error_classification(self) -> None:
+        """ProbeResult distinguishes 'not_found' from 'solver_error'."""
+        resolver = RuntimeDependencyResolverService()
+
+        # PackagesNotFoundError → not_found
+        not_found_result = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="PackagesNotFoundError: no match"
+        )
+        with patch("subprocess.run", return_value=not_found_result):
+            result = resolver._json_search_single(Path("/usr/bin/conda"), "numpy")
+        self.assertEqual(result.status, "not_found")
+
+        # ProxyError → solver_error
+        proxy_error_result = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="ProxyError: cannot connect"
+        )
+        with patch("subprocess.run", return_value=proxy_error_result):
+            result = resolver._json_search_single(Path("/usr/bin/conda"), "numpy")
+        self.assertEqual(result.status, "solver_error")
+        self.assertEqual(result.error_code, "conda_solver_error")
+
+        # NoWritablePkgsDirError → solver_error
+        pkgs_dir_error = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="NoWritablePkgsDirError"
+        )
+        with patch("subprocess.run", return_value=pkgs_dir_error):
+            result = resolver._json_search_single(Path("/usr/bin/conda"), "numpy")
+        self.assertEqual(result.status, "solver_error")
+
+        # Success with match → found
+        success_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"numpy": [{"name": "numpy", "version": "1.26.0"}]}',
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=success_result):
+            result = resolver._json_search_single(Path("/usr/bin/conda"), "numpy")
+        self.assertEqual(result.status, "found")
+        self.assertEqual(result.match, "numpy")
+
+    def test_solver_error_prevents_fallback(self) -> None:
+        """solver_error must not auto-fallback to CRAN/pip."""
+        resolver = RuntimeDependencyResolverService()
+        with patch.object(
+            RuntimeDependencyResolverService,
+            "_probe_runtime",
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/env")),
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_resolve_conda_solver",
+            return_value=Path("/usr/bin/conda"),
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_probe_conda",
+            return_value=ProbeResult(
+                status="solver_error",
+                error_code="conda_solver_error",
+                error_detail="ProxyError",
+            ),
+        ):
+            plan = resolver.resolve(
+                "proj",
+                {
+                    "ecosystem": "python",
+                    "runtime": "python_env",
+                    "packages": ["numpy"],
+                },
+            )
+        self.assertEqual(plan.status, RESOLVER_STATUS_SOLVER_ERROR)
+        self.assertEqual(plan.error_code, "dependency_probe_failed")
+        self.assertEqual(plan.retry_hint, "inspect_stderr")
+        self.assertEqual(plan.packages[0].status, PACKAGE_STATUS_SOLVER_ERROR)
+
+    def test_runtime_affine_solver_selection(self) -> None:
+        """Resolver picks the solver from the runtime's own conda base."""
+        resolver = RuntimeDependencyResolverService()
+        # Simulate a runtime in miniforge3 while configured base is miniconda3.
+        with patch.object(
+            RuntimeDependencyResolverService,
+            "_probe_runtime",
+            return_value=RuntimeProbeResult(
+                present=True,
+                resolved_path=Path("/home/user/miniforge3/envs/myenv"),
+            ),
+        ), patch(
+            "app.services.runtime_dependency_resolver_service.find_conda_solver"
+        ) as mock_find:
+            # First call for runtime-derived base returns mamba.
+            # Second call (fallback) would return conda, but we never reach it.
+            def _find(base):
+                if "miniforge3" in str(base):
+                    return Path("/home/user/miniforge3/bin/mamba")
+                return Path("/home/user/miniconda3/bin/conda")
+
+            mock_find.side_effect = _find
+            solver = resolver._resolve_conda_solver(
+                "python", Path("/home/user/miniforge3/envs/myenv")
+            )
+        self.assertEqual(str(solver), "/home/user/miniforge3/bin/mamba")
+        # find_conda_solver should have been called with miniforge3 first.
+        calls = [str(c.args[0]) for c in mock_find.call_args_list]
+        self.assertIn("/home/user/miniforge3", calls[0])
 
     def test_is_registry_fallback_action_safe_rejects_shell_chars(self) -> None:
         # A name with a shell metacharacter must not be allowed even under
@@ -422,6 +566,130 @@ class ResolverFallbackPolicyTest(unittest.TestCase):
             "installer": "conda",
             "name": "numpy",
         }))
+
+    def test_repoquery_parses_real_json_schema(self) -> None:
+        """Resolver parses real micromamba --json output correctly."""
+        resolver = RuntimeDependencyResolverService()
+        # Real micromamba repoquery search --json schema
+        stdout = json.dumps({
+            "query": {"query": "r-tidyverse", "type": "search"},
+            "result": {
+                "msg": "",
+                "pkgs": [
+                    {"name": "r-tidyverse", "version": "2.0.0", "build": "r41h785f33e_0"},
+                    {"name": "r-tidyverse", "version": "1.3.2", "build": "r40hc72bb7e_0"},
+                ],
+            },
+        })
+        result = resolver._parse_repoquery_output(stdout, ["r-tidyverse"])
+        self.assertEqual(result.status, "found")
+        self.assertEqual(result.match, "r-tidyverse")
+
+    def test_repoquery_parses_tabular_output(self) -> None:
+        """Resolver falls back to regex for tabular (non-JSON) mamba output."""
+        resolver = RuntimeDependencyResolverService()
+        # Simulate real mamba tabular output (no --json flag honored)
+        stdout = (
+            " Name        Version Build                       Channel        Subdir\n"
+            "──────────────────────────────────────────────────────────────────────\n"
+            " r-tidyverse 2.0.0   r41h785f33e_0 (+  8 builds) conda-forge    noarch\n"
+            " r-tidyverse 1.3.2   r40hc72bb7e_0 (+  3 builds) conda-forge    noarch\n"
+        )
+        result = resolver._parse_repoquery_output(stdout, ["r-tidyverse"])
+        self.assertEqual(result.status, "found")
+        self.assertEqual(result.match, "r-tidyverse")
+
+    def test_repoquery_not_found_json(self) -> None:
+        """Empty pkgs list in JSON means package is absent."""
+        resolver = RuntimeDependencyResolverService()
+        stdout = json.dumps({
+            "query": {"query": "nonexistent-pkg", "type": "search"},
+            "result": {"msg": "No entries matching \"nonexistent-pkg\" found", "pkgs": [], "status": "OK"},
+        })
+        result = resolver._parse_repoquery_output(stdout, ["nonexistent-pkg"])
+        self.assertEqual(result.status, "not_found")
+
+    def test_repoquery_unparseable_nonblank_returns_solver_error(self) -> None:
+        """Non-blank stdout that can't be parsed as JSON or tabular → solver_error."""
+        resolver = RuntimeDependencyResolverService()
+        stdout = "ERROR: something went wrong internally\nStack trace..."
+        result = resolver._parse_repoquery_output(stdout, ["scanpy"])
+        self.assertEqual(result.status, "solver_error")
+        self.assertEqual(result.error_code, "unknown_probe_output")
+
+    def test_repoquery_multi_candidate_json(self) -> None:
+        """Multi-candidate search finds match among multiple packages in pkgs."""
+        resolver = RuntimeDependencyResolverService()
+        stdout = json.dumps({
+            "query": {"query": "scanpy numpy", "type": "search"},
+            "result": {
+                "pkgs": [
+                    {"name": "numpy", "version": "1.26.0"},
+                    {"name": "numpy", "version": "1.25.0"},
+                    {"name": "scanpy", "version": "1.10.0"},
+                ],
+            },
+        })
+        # First candidate in the list wins
+        result = resolver._parse_repoquery_output(stdout, ["scanpy", "numpy"])
+        self.assertEqual(result.status, "found")
+        self.assertEqual(result.match, "scanpy")
+
+    def test_repoquery_json_with_progress_prefix(self) -> None:
+        """stdout with progress text before JSON is still parsed correctly."""
+        resolver = RuntimeDependencyResolverService()
+        progress = "Getting repodata from channels...\nconda-forge/linux-64  Using cache\n"
+        json_body = json.dumps({
+            "query": {"query": "scanpy", "type": "search"},
+            "result": {"pkgs": [{"name": "scanpy", "version": "1.10.0"}]},
+        })
+        result = resolver._parse_repoquery_output(progress + json_body, ["scanpy"])
+        self.assertEqual(result.status, "found")
+        self.assertEqual(result.match, "scanpy")
+
+    def test_configured_channels_micromamba_syntax(self) -> None:
+        """_configured_channels uses 'config list --json' for micromamba."""
+        from app.services.runtime_dependency_resolver_service import _configured_channels
+
+        fake_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({"channels": ["conda-forge", "defaults"]}),
+            stderr="",
+        )
+
+        def _check_command(command, **kwargs):
+            self.assertIn("config", command)
+            self.assertIn("list", command)
+            self.assertIn("--json", command)
+            self.assertNotIn("--show", command)
+            return fake_result
+
+        with patch("app.services.runtime_dependency_resolver_service.subprocess.run", side_effect=_check_command):
+            channels = _configured_channels(Path("/usr/bin/micromamba"), None)
+        self.assertEqual(channels, ["conda-forge", "defaults"])
+
+    def test_configured_channels_conda_syntax(self) -> None:
+        """_configured_channels uses '--show channels --json' for conda/mamba."""
+        from app.services.runtime_dependency_resolver_service import _configured_channels
+
+        fake_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({"channels": ["defaults", "bioconda"]}),
+            stderr="",
+        )
+
+        def _check_command(command, **kwargs):
+            self.assertIn("config", command)
+            self.assertIn("--show", command)
+            self.assertIn("--json", command)
+            self.assertNotIn("list", command)
+            return fake_result
+
+        with patch("app.services.runtime_dependency_resolver_service.subprocess.run", side_effect=_check_command):
+            channels = _configured_channels(Path("/usr/bin/mamba"), None)
+        self.assertEqual(channels, ["defaults", "bioconda"])
 
 
 if __name__ == "__main__":

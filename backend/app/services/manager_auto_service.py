@@ -562,7 +562,7 @@ class ManagerAutoService:
 
                 message += "\nCall get_background_workboard first. This turn may end with at most one async-boundary-yielding action (one submit_claimed_workboard_items, or one start_card_run / rerun_card, or one install_runtime_dependencies). You may combine independent non-yielding tool calls and may start one dependency install plus one run-yielding action in the same turn when they are truly independent. When planning new cards from a frontier wake, align new cards to the parallel_group of existing ready_to_start items that share their input layer."
                 message += "\nIf you start background work, stop after reporting ids and let async-boundary yield the turn."
-                message += "\nIf a tool returns pending_approvals, rejected_approvals, manual_preparation_required, partial_resolution, fallback_available, unsupported_source_spec, or runtime_missing, do not retry or ask the user — skip/defer/block the workboard item with the reason and move on."
+                message += "\nIf a tool returns pending_approvals, rejected_approvals, manual_preparation_required, partial_resolution, fallback_available, unsupported_source_spec, runtime_missing, or solver_error, do not retry or ask the user — skip/defer/block the workboard item with the reason and move on."
 
                 request = ChatRequest(
                     message=message,

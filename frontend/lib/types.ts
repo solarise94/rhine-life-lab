@@ -156,9 +156,11 @@ export type ResolverRequestStatus =
   | "fully_installable"
   | "partial_resolution_requires_manual_preparation"
   | "fallback_available_but_policy_disallows"
+  | "fallback_available_but_ambiguous"
   | "manual_preparation_required"
   | "unsupported_source_spec"
   | "runtime_missing"
+  | "solver_error"
   | "resolution_unknown";
 
 export interface ResolverPackageEntry {
@@ -174,6 +176,7 @@ export interface ResolverPackageEntry {
     | "manual_preparation_required"
     | "unsupported_source_spec"
     | "runtime_missing"
+    | "solver_error"
     | "unknown";
   reason?: string | null;
   message?: string | null;

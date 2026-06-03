@@ -28,6 +28,40 @@ def default_conda_base_candidates(configured_base: Path | None = None) -> list[P
     return candidates
 
 
+def find_conda_solver(conda_base: Path) -> Path | None:
+    """Search ``conda_base`` for a conda solver executable.
+
+    Prefers ``mamba``, then ``conda``, checking both ``bin/`` and ``condabin/``.
+    Returns ``None`` when no solver is found under the given base.
+    """
+    for name in ("mamba", "conda"):
+        for subdir in ("bin", "condabin"):
+            candidate = conda_base / subdir / name
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def derive_conda_base_from_runtime_path(runtime_path: Path) -> Path | None:
+    """Derive the conda base directory from a resolved runtime path.
+
+    Handles:
+    - Conda env directory (e.g. ``/home/user/miniforge3/envs/myenv``)
+    - Conda base directory (e.g. ``/home/user/miniconda3``)
+    - Rscript path (e.g. ``/home/user/miniforge3/envs/R_env/bin/Rscript``)
+
+    Returns ``None`` when ``runtime_path`` is falsy.
+    """
+    if not runtime_path:
+        return None
+    path = runtime_path
+    if path.is_file():
+        path = path.parent.parent  # Rscript -> env dir
+    if path.parent.name == "envs":
+        return path.parent.parent
+    return path
+
+
 class Settings(BaseSettings):
     app_name: str = "Blueprint RE v3"
     api_prefix: str = "/api"
@@ -90,12 +124,11 @@ class Settings(BaseSettings):
     codex_command_json: list[str] | None = None
 
     # Runtime dependency resolver controls (P1).
-    # Default policy is "report_only" so fallback families (pip / cran /
-    # bioconductor) are surfaced but never auto-executed. Operators can opt
-    # into "allow_safe_registry_install" to enable structured registry installs
-    # produced by the resolver. Per-project overrides live in
+    # Default policy is "allow_safe_registry_install" so resolver-approved
+    # single-family fallback installs (pip / cran / bioconductor) may execute
+    # through structured backend commands. Per-project overrides live in
     # ``graph.metadata.dependency_policy`` and will be honored in a later pass.
-    runtime_dependency_fallback_policy: str = "report_only"
+    runtime_dependency_fallback_policy: str = "allow_safe_registry_install"
     runtime_dependency_probe_timeout_seconds: int = 60
     runtime_dependency_cache_ttl_seconds: int = 3600
 

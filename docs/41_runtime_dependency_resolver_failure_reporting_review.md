@@ -850,6 +850,7 @@ Normative decision boundaries for P1:
 - The resolver is a pure planning step. It must not create a background job and must not mutate runtime state.
 - `install_runtime_dependencies` must not partially install a mixed request. If any requested package is blocked or fallback-only under the active policy, the whole request returns a non-background structured failure.
 - Fallback is policy-gated. `fallback_available` is advisory unless the active fallback policy explicitly allows the specific structured fallback action.
+- Fallback execution requires one safe registry family for the entire request. In the current implementation, if every unresolved R package exposes the dual-source hint `["cran", "bioconductor"]` and no stronger classifier exists, the resolver may prefer CRAN as the default registry family; otherwise ambiguous requests must not be auto-executed.
 - Resolver output must be stable enough for Manager, frontend, workboard, and wake logic to consume without inventing a second vocabulary.
 
 Plan shape:
@@ -868,10 +869,10 @@ Plan shape:
     {
       "name": "limma",
       "normalized_name": "limma",
-      "classification": "bioconductor",
+      "classification": "r-package",
       "conda_candidates": ["r-limma", "bioconductor-limma"],
       "conda_match": null,
-      "fallback_available": ["bioconductor"],
+      "fallback_available": ["cran", "bioconductor"],
       "status": "fallback_required",
       "reason": "package_not_found_in_conda_channels",
       "message": "Not found in configured conda channels."
@@ -879,10 +880,10 @@ Plan shape:
     {
       "name": "ggplot2",
       "normalized_name": "ggplot2",
-      "classification": "cran",
+      "classification": "r-package",
       "conda_candidates": ["r-ggplot2", "bioconductor-ggplot2"],
       "conda_match": "r-ggplot2",
-      "fallback_available": ["cran"],
+      "fallback_available": ["cran", "bioconductor"],
       "status": "conda_installable"
     }
   ],
@@ -898,7 +899,7 @@ Plan shape:
       "name": "limma",
       "reason": "package_not_found_in_conda_channels",
       "attempted_candidates": ["r-limma", "bioconductor-limma"],
-      "fallback_available": ["bioconductor"],
+      "fallback_available": ["cran", "bioconductor"],
       "recommended_action": "manual_preparation_or_policy_approved_fallback"
     }
   ],
@@ -937,9 +938,10 @@ Resolver status is a request-level summary, not a per-package field. P1 should i
 
 | Request-level `status` | Meaning | Background install allowed? |
 | --- | --- | --- |
-| `fully_installable` | every requested package has an approved conda action under current policy | yes |
+| `fully_installable` | every requested package has an approved conda or single-family registry action under current policy | yes |
 | `partial_resolution_requires_manual_preparation` | at least one package is installable, but at least one other package requires manual preparation or a disallowed fallback | no |
 | `fallback_available_but_policy_disallows` | all unresolved packages have a structured fallback family, but current policy is `report_only` | no |
+| `fallback_available_but_ambiguous` | fallback families are available, but the resolver cannot reduce the request to one safe registry family for every package | no |
 | `manual_preparation_required` | request cannot proceed automatically and requires explicit user/runtime preparation | no |
 | `unsupported_source_spec` | request contains GitHub/VCS/URL/tarball/unsupported flag input | no |
 | `runtime_missing` | runtime path / executable / environment cannot be resolved | no |
@@ -961,6 +963,7 @@ Resolver statuses must map to P0 normalized fields so project events, workboard,
 | `fully_installable` | none | none |
 | `partial_resolution_requires_manual_preparation` | `partial_resolution_requires_manual_preparation` | `manual_preparation_required` |
 | `fallback_available_but_policy_disallows` | `package_not_found_in_conda_channels` | `choose_fallback` |
+| `fallback_available_but_ambiguous` | `package_not_found_in_conda_channels` | `manual_preparation_required` |
 | `manual_preparation_required` | `manual_preparation_required` | `manual_preparation_required` |
 | `unsupported_source_spec` | `github_source_install_not_supported` or `external_source_install_not_supported` | `do_not_retry_installer` |
 | `runtime_missing` | `dependency_install_start_failed` | `manual_runtime_preparation_required` |
@@ -1080,6 +1083,7 @@ Normative validation rules for `allow_safe_registry_install`:
 - no VCS URLs;
 - no arbitrary installer flags;
 - no mixed fallback families in a single action;
+- no arbitrary ambiguous fallback-family selection. If a package has multiple possible fallback families and the resolver has no built-in preference or stronger classifier, return `fallback_available_but_ambiguous` instead of guessing;
 - the resolved action must be emitted by the backend resolver, not constructed by Manager text.
 
 Initial grammar requirement:
@@ -1119,6 +1123,7 @@ Manager must treat these backend responses as hard control signals:
 - `duplicate_dependency_resolution_in_progress`;
 - `partial_resolution_requires_manual_preparation`;
 - `fallback_available_but_policy_disallows`;
+- `fallback_available_but_ambiguous`;
 - `manual_preparation_required`;
 - `package_not_found_in_conda_channels`;
 - `github_source_install_not_supported`;
@@ -1191,6 +1196,7 @@ Add tests for:
 - a mixed request such as `[ggplot2, limma]` returns `partial_resolution_requires_manual_preparation` with non-empty `installable` and `blocked` sections.
 - under `report_only`, a fallback-only package returns `fallback_available_but_policy_disallows` and does not create a job.
 - under `allow_safe_registry_install`, the same resolver-approved fallback request may proceed with the structured registry installer action.
+- under `allow_safe_registry_install`, an R fallback request with dual-source `["cran", "bioconductor"]` hints now prefers `cran`, emits `cran` fallback actions, and may create a job.
 - a resolver-approved package name containing shell metacharacters is rejected as `unsupported_source_spec` before any installer invocation.
 
 ### Frontend Tests Or Build Checks
@@ -1245,6 +1251,8 @@ These are now implemented in the current codebase as of 2026-06-02:
 - A request where every package resolves to the SAME safe fallback family (all-pip,
   all-cran, or all-bioconductor) under ``allow_safe_registry_install`` receives
   ``fully_installable`` and creates a background job.
+- Current R dual-source fallback hints are normalized to ``cran`` when every
+  unresolved package includes ``cran`` and no stronger classifier is available.
 - Mixed-installer requests (conda + any fallback, or cran + bioconductor) are
   rejected with ``partial_resolution_requires_manual_preparation``.  The plan
   still surfaces which packages are individually installable vs. blocked, but
@@ -1306,8 +1314,8 @@ These are now implemented in the current codebase as of 2026-06-02:
   `fallback_actions` list. The new tool is registered in `manager-agent/src/server.js`
   and marked non-mutating so it stays available in btw mode.
 - New `Settings.runtime_dependency_fallback_policy` defaults to
-  `report_only`. Operators may opt into `allow_safe_registry_install` to
-  surface structured registry actions for validated bare names. The deploy
+  `allow_safe_registry_install`. The runtime may still be pinned back to
+  `report_only` when operators want advisory-only fallback behavior. The deploy
   script whitelist (`scripts/deploy_user_systemd.sh`) now includes the three
   new env keys.
 - New grammar + safety helpers: `is_registry_fallback_action_safe(...)` rejects

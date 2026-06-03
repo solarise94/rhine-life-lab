@@ -16,10 +16,10 @@ The resolver:
   ``mamba repoquery search`` / ``conda search --json`` invocations;
 - never executes installers and never mutates the environment.
 
-The fallback policy is enforced here as well: ``report_only`` is the default
-and never produces an executable fallback action; ``allow_safe_registry_install``
-may emit structured registry installer actions for validated bare names, but
-the actual execution is still owned by the backend installer.
+The fallback policy is enforced here as well: ``allow_safe_registry_install``
+is the current runtime default and may emit structured registry installer
+actions for validated bare names, while ``report_only`` keeps fallback families
+advisory-only. Actual execution is still owned by the backend installer.
 """
 
 from __future__ import annotations
@@ -33,6 +33,12 @@ import threading
 import time
 from typing import Any, Iterable
 
+from app.core.config import (
+    default_conda_base,
+    default_conda_base_candidates,
+    derive_conda_base_from_runtime_path,
+    find_conda_solver,
+)
 from app.services.runtime_dependency_state_service import compute_dedupe_key
 
 
@@ -44,9 +50,11 @@ from app.services.runtime_dependency_state_service import compute_dedupe_key
 RESOLVER_STATUS_FULLY_INSTALLABLE = "fully_installable"
 RESOLVER_STATUS_PARTIAL_RESOLUTION = "partial_resolution_requires_manual_preparation"
 RESOLVER_STATUS_FALLBACK_AVAILABLE_POLICY_DISALLOWS = "fallback_available_but_policy_disallows"
+RESOLVER_STATUS_FALLBACK_AVAILABLE_BUT_AMBIGUOUS = "fallback_available_but_ambiguous"
 RESOLVER_STATUS_MANUAL_PREPARATION_REQUIRED = "manual_preparation_required"
 RESOLVER_STATUS_UNSUPPORTED_SOURCE_SPEC = "unsupported_source_spec"
 RESOLVER_STATUS_RUNTIME_MISSING = "runtime_missing"
+RESOLVER_STATUS_SOLVER_ERROR = "solver_error"
 RESOLVER_STATUS_RESOLUTION_UNKNOWN = "resolution_unknown"
 
 RESOLVER_REQUEST_STATUSES: frozenset[str] = frozenset(
@@ -54,9 +62,11 @@ RESOLVER_REQUEST_STATUSES: frozenset[str] = frozenset(
         RESOLVER_STATUS_FULLY_INSTALLABLE,
         RESOLVER_STATUS_PARTIAL_RESOLUTION,
         RESOLVER_STATUS_FALLBACK_AVAILABLE_POLICY_DISALLOWS,
+        RESOLVER_STATUS_FALLBACK_AVAILABLE_BUT_AMBIGUOUS,
         RESOLVER_STATUS_MANUAL_PREPARATION_REQUIRED,
         RESOLVER_STATUS_UNSUPPORTED_SOURCE_SPEC,
         RESOLVER_STATUS_RUNTIME_MISSING,
+        RESOLVER_STATUS_SOLVER_ERROR,
         RESOLVER_STATUS_RESOLUTION_UNKNOWN,
     }
 )
@@ -67,6 +77,7 @@ PACKAGE_STATUS_FALLBACK_REQUIRED = "fallback_required"
 PACKAGE_STATUS_MANUAL_PREPARATION_REQUIRED = "manual_preparation_required"
 PACKAGE_STATUS_UNSUPPORTED_SOURCE_SPEC = "unsupported_source_spec"
 PACKAGE_STATUS_RUNTIME_MISSING = "runtime_missing"
+PACKAGE_STATUS_SOLVER_ERROR = "solver_error"
 PACKAGE_STATUS_UNKNOWN = "unknown"
 
 # Mapping from resolver request-level status to P0 normalized fields.
@@ -80,6 +91,10 @@ RESOLVER_TO_P0_FIELDS: dict[str, dict[str, str | None]] = {
         "error_code": "package_not_found_in_conda_channels",
         "retry_hint": "choose_fallback",
     },
+    RESOLVER_STATUS_FALLBACK_AVAILABLE_BUT_AMBIGUOUS: {
+        "error_code": "package_not_found_in_conda_channels",
+        "retry_hint": "manual_preparation_required",
+    },
     RESOLVER_STATUS_MANUAL_PREPARATION_REQUIRED: {
         "error_code": RESOLVER_STATUS_MANUAL_PREPARATION_REQUIRED,
         "retry_hint": "manual_preparation_required",
@@ -91,6 +106,10 @@ RESOLVER_TO_P0_FIELDS: dict[str, dict[str, str | None]] = {
     RESOLVER_STATUS_RUNTIME_MISSING: {
         "error_code": "dependency_install_start_failed",
         "retry_hint": "manual_runtime_preparation_required",
+    },
+    RESOLVER_STATUS_SOLVER_ERROR: {
+        "error_code": "dependency_probe_failed",
+        "retry_hint": "inspect_stderr",
     },
     RESOLVER_STATUS_RESOLUTION_UNKNOWN: {
         "error_code": "dependency_resolution_unknown",
@@ -127,7 +146,7 @@ SOURCE_SPEC_PATTERNS = (
 
 @dataclass
 class _CacheEntry:
-    value: dict[str, Any] | None  # None means "checked and not found"
+    value: ProbeResult | None  # None means "checked and not found"
     expires_at: float
 
 
@@ -143,7 +162,7 @@ class _ResolverCache:
         self._ttl_seconds = ttl_seconds
         self._lock = threading.Lock()
 
-    def get(self, key: tuple[str, str]) -> dict[str, Any] | None | object:
+    def get(self, key: tuple[str, str]) -> ProbeResult | None | object:
         """Return cached value or the sentinel ``_MISS`` if absent/expired.
 
         Use ``is`` checks to distinguish from a real ``None`` value.
@@ -157,7 +176,7 @@ class _ResolverCache:
                 return _MISS
             return entry.value
 
-    def set(self, key: tuple[str, str], value: dict[str, Any] | None) -> None:
+    def set(self, key: tuple[str, str], value: ProbeResult | None) -> None:
         with self._lock:
             self._entries[key] = _CacheEntry(
                 value=value,
@@ -170,6 +189,23 @@ class _ResolverCache:
 
 
 _MISS = object()
+
+
+@dataclass
+class RuntimeProbeResult:
+    """Structured return from _probe_runtime."""
+    present: bool
+    resolved_path: Path | None = None
+    error_message: str | None = None
+
+
+@dataclass
+class ProbeResult:
+    """Structured return from a conda package probe."""
+    status: str  # "found", "not_found", "solver_error"
+    match: str | None = None
+    error_code: str | None = None
+    error_detail: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +358,7 @@ class RuntimeDependencyResolverService:
         payload: dict[str, Any],
         *,
         settings: Any | None = None,
-        policy: str = "report_only",
+        policy: str = "allow_safe_registry_install",
     ) -> RuntimeDependencyResolutionPlan:
         ecosystem = str(payload.get("ecosystem") or "").strip()
         runtime = str(payload.get("runtime") or "").strip()
@@ -439,8 +475,8 @@ class RuntimeDependencyResolverService:
 
         # Try to resolve the runtime path. If we cannot find it, mark all
         # packages as runtime_missing rather than guess.
-        runtime_present, runtime_message = self._probe_runtime(runtime, ecosystem)
-        if not runtime_present:
+        probe_result = self._probe_runtime(runtime, ecosystem)
+        if not probe_result.present:
             for pkg in packages:
                 plan.packages.append(
                     ResolverPackageEntry(
@@ -451,13 +487,13 @@ class RuntimeDependencyResolverService:
                         fallback_available=_fallback_families_for(ecosystem),
                         status=PACKAGE_STATUS_RUNTIME_MISSING,
                         reason="runtime_path_unresolved",
-                        message=runtime_message,
+                        message=probe_result.error_message,
                     )
                 )
             plan.status = RESOLVER_STATUS_RUNTIME_MISSING
             plan.error_code = RESOLVER_TO_P0_FIELDS[RESOLVER_STATUS_RUNTIME_MISSING]["error_code"]
             plan.retry_hint = RESOLVER_TO_P0_FIELDS[RESOLVER_STATUS_RUNTIME_MISSING]["retry_hint"]
-            plan.message = runtime_message
+            plan.message = probe_result.error_message
             plan.recommended_actions = [
                 "Verify the selected runtime path exists and is executable before retrying.",
             ]
@@ -468,8 +504,16 @@ class RuntimeDependencyResolverService:
         # add conda actions to ``plan.installable`` yet — that decision is
         # made after we know which fallback actions, if any, the policy
         # allows.
-        conda_bin = self._resolve_conda_solver(ecosystem)
-        channel_signature = self._channel_signature(conda_bin, ecosystem, runtime)
+        conda_bin = self._resolve_conda_solver(ecosystem, probe_result.resolved_path)
+        channel_signature = self._channel_signature(
+            conda_bin, ecosystem, runtime, conda_base=derive_conda_base_from_runtime_path(probe_result.resolved_path)
+        )
+
+        # Batch pre-warm: for mamba/micromamba, probe ALL candidates in one
+        # subprocess call and populate the cache. This reduces 23 serial
+        # repoquery invocations to 1, avoiding the 300s HTTP timeout.
+        self._batch_prefetch_conda(conda_bin, packages, ecosystem, channel_signature)
+
         for pkg in packages:
             entry, conda_action = self._resolve_package(
                 pkg,
@@ -533,6 +577,149 @@ class RuntimeDependencyResolverService:
 
     # -- internals ---------------------------------------------------------
 
+    def _batch_prefetch_conda(
+        self,
+        conda_bin: Path | None,
+        packages: list[str],
+        ecosystem: str,
+        channel_signature: str,
+    ) -> None:
+        """Pre-warm the probe cache with a single batched repoquery call.
+
+        For mamba/micromamba, one repoquery subprocess can search all
+        candidates at once. This avoids N serial subprocess calls (each
+        potentially waiting for repodata fetch) and keeps total resolve
+        time well under HTTP timeout limits.
+
+        This is a best-effort optimization: if it fails for any reason,
+        the per-package path will still run normally via _probe_conda.
+        """
+        if conda_bin is None:
+            return
+        solver_name = conda_bin.name.lower()
+        if solver_name not in {"mamba", "micromamba"}:
+            return
+
+        # Collect all candidates that are not already cached.
+        all_candidates: list[str] = []
+        for pkg in packages:
+            if _looks_like_source_spec(pkg) or not _is_valid_grammar(pkg, ecosystem.lower()):
+                continue
+            candidates = _conda_candidates_for(pkg, ecosystem)
+            cache_key = (channel_signature, candidates[0] if candidates else pkg.strip().lower())
+            if self._cache.get(cache_key) is not _MISS:
+                continue
+            all_candidates.extend(candidates)
+
+        if not all_candidates:
+            return
+
+        self._repoquery_prefetch_into_cache(conda_bin, packages, ecosystem, channel_signature, all_candidates)
+
+    def _repoquery_prefetch_into_cache(
+        self,
+        conda_bin: Path,
+        packages: list[str],
+        ecosystem: str,
+        channel_signature: str,
+        all_candidates: list[str],
+    ) -> None:
+        """Run one repoquery call and populate per-package cache entries.
+
+        This is best-effort: on timeout, OS error, or unparseable output,
+        we skip caching entirely and let the per-package path handle it
+        with proper error classification.
+        """
+        try:
+            result = subprocess.run(
+                [str(conda_bin), "repoquery", "search", "--json", *all_candidates],
+                text=True,
+                capture_output=True,
+                timeout=self._probe_timeout,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return
+
+        if result.returncode != 0:
+            stderr = (result.stderr or "")[:500]
+            if _is_packages_not_found(stderr):
+                self._cache_for_all_packages(packages, ecosystem, channel_signature, ProbeResult(status="not_found"))
+            # Non-not_found errors: don't cache — let per-package path classify.
+            return
+
+        stdout = result.stdout or ""
+        found_names = self._extract_found_names(stdout, all_candidates)
+
+        if found_names is None:
+            # Unparseable output — don't cache, let per-package path handle.
+            return
+
+        # Populate cache per-package based on found_names
+        for pkg in packages:
+            if _looks_like_source_spec(pkg) or not _is_valid_grammar(pkg, ecosystem.lower()):
+                continue
+            candidates = _conda_candidates_for(pkg, ecosystem)
+            cache_key = (channel_signature, candidates[0] if candidates else pkg.strip().lower())
+            if self._cache.get(cache_key) is not _MISS:
+                continue
+            matched = None
+            for c in candidates:
+                if c in found_names:
+                    matched = c
+                    break
+            if matched:
+                self._cache.set(cache_key, ProbeResult(status="found", match=matched))
+            else:
+                self._cache.set(cache_key, ProbeResult(status="not_found"))
+
+    def _extract_found_names(self, stdout: str, candidates: list[str]) -> set[str] | None:
+        """Extract the set of found package names from repoquery output.
+
+        Returns a set of found names (possibly empty) on success.
+        Returns None if stdout is non-blank but unparseable (neither JSON nor
+        tabular) — callers should treat this as solver_error.
+        """
+        import re as _re
+
+        payload = self._try_extract_json(stdout)
+        if isinstance(payload, dict):
+            result_obj = payload.get("result")
+            if isinstance(result_obj, dict):
+                pkgs_list = result_obj.get("pkgs")
+                if isinstance(pkgs_list, list):
+                    return {p.get("name") for p in pkgs_list if isinstance(p, dict) and p.get("name")}
+
+        # Try tabular regex fallback
+        found: set[str] = set()
+        for c in candidates:
+            pattern = _re.compile(rf"(?m)^\s*{_re.escape(c)}(?:\s|$)")
+            if pattern.search(stdout):
+                found.add(c)
+        if found:
+            return found
+
+        # Non-blank stdout that couldn't be parsed either way
+        if stdout.strip():
+            return None
+        return set()
+
+    def _cache_for_all_packages(
+        self,
+        packages: list[str],
+        ecosystem: str,
+        channel_signature: str,
+        probe_result: ProbeResult,
+    ) -> None:
+        """Write the same ProbeResult into cache for all uncached packages."""
+        for pkg in packages:
+            if _looks_like_source_spec(pkg) or not _is_valid_grammar(pkg, ecosystem.lower()):
+                continue
+            candidates = _conda_candidates_for(pkg, ecosystem)
+            cache_key = (channel_signature, candidates[0] if candidates else pkg.strip().lower())
+            if self._cache.get(cache_key) is _MISS:
+                self._cache.set(cache_key, probe_result)
+
     def _resolve_package(
         self,
         pkg: str,
@@ -583,25 +770,40 @@ class RuntimeDependencyResolverService:
         cache_key = (channel_signature, candidates[0] if candidates else normalized)
         cached = self._cache.get(cache_key)
         if cached is _MISS:
-            match = self._probe_conda(conda_bin, candidates, ecosystem=ecosystem)
-            self._cache.set(cache_key, match)
+            probe_result = self._probe_conda(conda_bin, candidates, ecosystem=ecosystem)
+            self._cache.set(cache_key, probe_result)
         else:
-            match = cached  # type: ignore[assignment]
+            probe_result = cached  # type: ignore[assignment]
 
-        if match:
+        if probe_result.status == "found":
             return ResolverPackageEntry(
                 name=pkg,
                 normalized_name=normalized,
                 classification=classification,
                 conda_candidates=candidates,
-                conda_match=match,
+                conda_match=probe_result.match,
                 fallback_available=fallback,
                 status=PACKAGE_STATUS_CONDA_INSTALLABLE,
             ), ResolverInstallAction(
                 installer="conda",
                 name=pkg,
-                candidate=match,
+                candidate=probe_result.match,
             )
+
+        if probe_result.status == "solver_error":
+            return ResolverPackageEntry(
+                name=pkg,
+                normalized_name=normalized,
+                classification=classification,
+                conda_candidates=candidates,
+                fallback_available=fallback,
+                status=PACKAGE_STATUS_SOLVER_ERROR,
+                reason=probe_result.error_code or "conda_solver_error",
+                message=(
+                    f"Conda probe failed for {pkg!r}: "
+                    f"{probe_result.error_detail or 'unknown solver error'}."
+                ),
+            ), None
 
         return ResolverPackageEntry(
             name=pkg,
@@ -643,7 +845,7 @@ class RuntimeDependencyResolverService:
             for pkg in plan.packages
             if pkg.status == PACKAGE_STATUS_FALLBACK_REQUIRED
         ]
-        policy = getattr(self, "_active_policy", "report_only")
+        policy = getattr(self, "_active_policy", "allow_safe_registry_install")
 
         if not non_conda_packages:
             return
@@ -659,15 +861,12 @@ class RuntimeDependencyResolverService:
         if not fallback_policy_allows(policy):
             return
 
-        # Build safe fallback actions from the same family.
-        families = {
-            pkg.fallback_available[0]
-            for pkg in non_conda_packages
-            if pkg.fallback_available
-        }
-        if len(families) != 1:
+        # Build safe fallback actions only when the resolver can reduce the
+        # request to one registry family. For R dual-source hints, prefer CRAN
+        # when every package can legally install from CRAN.
+        family = _single_safe_fallback_family(non_conda_packages)
+        if family is None:
             return
-        family = next(iter(families))
         for pkg in non_conda_packages:
             action = ResolverInstallAction(installer=family, name=pkg.name)
             if is_registry_fallback_action_safe(action):
@@ -693,6 +892,18 @@ class RuntimeDependencyResolverService:
                 RESOLVER_STATUS_RUNTIME_MISSING,
                 RESOLVER_TO_P0_FIELDS[RESOLVER_STATUS_RUNTIME_MISSING]["error_code"],
                 "The selected runtime path could not be resolved.",
+            )
+
+        if any(s == PACKAGE_STATUS_SOLVER_ERROR for s in statuses):
+            error_msgs = [
+                pkg.message or pkg.reason or pkg.name
+                for pkg in plan.packages
+                if pkg.status == PACKAGE_STATUS_SOLVER_ERROR
+            ]
+            return (
+                RESOLVER_STATUS_SOLVER_ERROR,
+                RESOLVER_TO_P0_FIELDS[RESOLVER_STATUS_SOLVER_ERROR]["error_code"],
+                f"Dependency probe failed: {'; '.join(error_msgs[:3])}",
             )
 
         has_conda = any(s == PACKAGE_STATUS_CONDA_INSTALLABLE for s in statuses)
@@ -733,13 +944,22 @@ class RuntimeDependencyResolverService:
 
         # All-fallback: policy-aware.
         if has_fallback and not has_conda:
-            policy = getattr(self, "_active_policy", "report_only")
-            if fallback_policy_allows(policy) and plan.installable:
+            policy = getattr(self, "_active_policy", "allow_safe_registry_install")
+            if fallback_policy_allows(policy) and plan.installable and not plan.blocked:
                 # Single-family safe fallback already accepted.
                 return (
                     RESOLVER_STATUS_FULLY_INSTALLABLE,
                     None,
                     "All requested packages are installable via the approved fallback family.",
+                )
+            if fallback_policy_allows(policy):
+                return (
+                    RESOLVER_STATUS_FALLBACK_AVAILABLE_BUT_AMBIGUOUS,
+                    RESOLVER_TO_P0_FIELDS[RESOLVER_STATUS_FALLBACK_AVAILABLE_BUT_AMBIGUOUS]["error_code"],
+                    (
+                        "Fallback families are available, but the resolver cannot reduce "
+                        "the request to one safe registry family for every package."
+                    ),
                 )
             return (
                 RESOLVER_STATUS_FALLBACK_AVAILABLE_POLICY_DISALLOWS,
@@ -779,7 +999,11 @@ class RuntimeDependencyResolverService:
             )
         elif plan.status == RESOLVER_STATUS_FALLBACK_AVAILABLE_POLICY_DISALLOWS:
             actions.append(
-                "Fallback families are available, but the active fallback policy is report_only. Switch the policy to allow_safe_registry_install or proceed with manual preparation."
+                "Fallback families are available, but the active fallback policy is report_only. Switch the policy back to allow_safe_registry_install or proceed with manual preparation."
+            )
+        elif plan.status == RESOLVER_STATUS_FALLBACK_AVAILABLE_BUT_AMBIGUOUS:
+            actions.append(
+                "Fallback families are available, but the resolver could not choose one safe registry family for every package. Submit a narrower explicit request after manual review."
             )
         elif plan.status == RESOLVER_STATUS_MANUAL_PREPARATION_REQUIRED:
             actions.append("Ask the user to prepare the runtime manually before retrying.")
@@ -789,10 +1013,10 @@ class RuntimeDependencyResolverService:
             actions.append("Verify the selected runtime path before retrying.")
         return actions
 
-    def _probe_runtime(self, runtime: str, ecosystem: str) -> tuple[bool, str]:
-        """Return (is_present, message). Never raises."""
+    def _probe_runtime(self, runtime: str, ecosystem: str) -> RuntimeProbeResult:
+        """Return structured probe result. Never raises."""
         if not runtime:
-            return False, "Runtime path is empty."
+            return RuntimeProbeResult(present=False, error_message="Runtime path is empty.")
         settings = _resolve_settings(self)
         try:
             if ecosystem.lower() == "python":
@@ -803,58 +1027,76 @@ class RuntimeDependencyResolverService:
                     runtime, settings
                 )
                 if not env_path.exists():
-                    return False, f"Python runtime not found: {env_path}"
-                return True, str(env_path)
+                    return RuntimeProbeResult(
+                        present=False,
+                        error_message=f"Python runtime not found: {env_path}",
+                    )
+                return RuntimeProbeResult(present=True, resolved_path=env_path)
             from app.workers.command_worker import CommandTemplateWorkerAdapter
 
             rscript = CommandTemplateWorkerAdapter._resolve_rscript_runtime(
                 runtime, settings
             )
             if rscript is None or not rscript.exists():
-                return False, f"R runtime not found: {runtime}"
-            return True, str(rscript)
+                return RuntimeProbeResult(
+                    present=False,
+                    error_message=f"R runtime not found: {runtime}",
+                )
+            return RuntimeProbeResult(present=True, resolved_path=rscript)
         except Exception as exc:  # noqa: BLE001 - the resolver is best-effort.
-            return False, f"Could not resolve runtime: {exc}"
+            return RuntimeProbeResult(
+                present=False,
+                error_message=f"Could not resolve runtime: {exc}",
+            )
 
-    def _resolve_conda_solver(self, ecosystem: str | None = None) -> Path | None:
-        """Locate the conda solver from the configured conda base or $PATH."""
+    def _resolve_conda_solver(
+        self, ecosystem: str | None = None, runtime_path: Path | None = None
+    ) -> Path | None:
+        """Locate the conda solver, preferring the runtime's own conda base."""
         if self._explicit_conda_solver:
             candidate = Path(self._explicit_conda_solver)
             if candidate.exists():
                 return candidate
+
+        # 1. Derive base from the resolved runtime path.
+        if runtime_path is not None:
+            runtime_base = derive_conda_base_from_runtime_path(runtime_path)
+            if runtime_base is not None:
+                solver = find_conda_solver(runtime_base)
+                if solver is not None:
+                    return solver
+
+        # 2. Fallback to configured bases and canonical candidates.
         settings = _resolve_settings(self)
-        candidates: list[Path] = []
-        # Use the same conda base detection as the worker adapter
-        # so the resolver and installer always agree.
-        try:
-            from app.services.utils import resolve_within
-            configured_base = Path(
-                getattr(settings, "executor_conda_base", Path.home() / "miniconda3")
-            )
-            for base in [configured_base, *(
-                getattr(settings, "_extra_conda_bases", None) or []
-            )]:
-                for name in ("mamba", "conda"):
-                    for subdir in ("bin", "condabin"):
-                        candidate = base / subdir / name
-                        if candidate.exists():
-                            return candidate
-        except Exception:
-            pass
-        # Fallback: $PATH.
+        configured_base = Path(
+            getattr(settings, "executor_conda_base", default_conda_base())
+        )
+        for base in default_conda_base_candidates(configured_base):
+            solver = find_conda_solver(base)
+            if solver is not None:
+                return solver
+
+        # 3. Final fallback: $PATH.
         for name in ("mamba", "conda", "micromamba"):
             which = shutil.which(name)
             if which:
                 return Path(which)
         return None
 
-    def _channel_signature(self, conda_bin: Path | None, ecosystem: str, runtime: str) -> str:
+    def _channel_signature(
+        self,
+        conda_bin: Path | None,
+        ecosystem: str,
+        runtime: str,
+        *,
+        conda_base: Path | None = None,
+    ) -> str:
         """Stable, content-addressable signature for the probe environment.
 
         Includes:
         - the resolved conda solver's realpath (so a swap from mamba → mamba
           at a different path is treated as a new channel set);
-        - the configured conda base (from settings);
+        - the **actual** conda base used for the probe (not just settings);
         - the ecosystem casing (``python`` / ``R``);
         - the runtime name (so different runtimes that point at different
           channels get distinct entries);
@@ -870,22 +1112,28 @@ class RuntimeDependencyResolverService:
             solver_realpath = str(conda_bin.resolve())
         except OSError:
             solver_realpath = str(conda_bin)
-        conda_base = ""
         settings = _resolve_settings(self)
-        if settings is not None:
-            base = getattr(settings, "executor_conda_base", None)
-            if base:
-                try:
-                    conda_base = str(Path(base).resolve())
-                except OSError:
-                    conda_base = str(base)
+        conda_base_str = ""
+        if conda_base is not None:
+            try:
+                conda_base_str = str(conda_base.resolve())
+            except OSError:
+                conda_base_str = str(conda_base)
+        else:
+            if settings is not None:
+                base = getattr(settings, "executor_conda_base", None)
+                if base:
+                    try:
+                        conda_base_str = str(Path(base).resolve())
+                    except OSError:
+                        conda_base_str = str(base)
         runtime_str = str(runtime or "")
         policy = getattr(self, "_active_policy", "report_only")
         channels = _configured_channels(conda_bin, settings)
         return "|".join(
             [
                 solver_realpath,
-                conda_base,
+                conda_base_str,
                 ecosystem,
                 runtime_str,
                 policy,
@@ -899,78 +1147,146 @@ class RuntimeDependencyResolverService:
         candidates: list[str],
         *,
         ecosystem: str,
-    ) -> str | None:
-        """Return the first conda candidate that exists, or None."""
+    ) -> ProbeResult:
+        """Probe conda channels for the first matching candidate.
+
+        Returns a :class:`ProbeResult` so "found", "not_found", and
+        "solver_error" are never conflated.
+        """
         if not candidates:
-            return None
+            return ProbeResult(status="not_found")
         solver_name = conda_bin.name.lower()
         if solver_name in {"mamba", "micromamba"}:
-            result = self._repoquery_search(conda_bin, candidates)
-            if result is not None:
+            # Mamba-family solvers support multi-candidate repoquery search.
+            # Do not fall back to search --json to avoid divergent behavior.
+            return self._repoquery_search(conda_bin, candidates)
+        for candidate in candidates:
+            result = self._json_search_single(conda_bin, candidate)
+            if result.status in {"found", "solver_error"}:
                 return result
-        return self._json_search(conda_bin, candidates)
+        return ProbeResult(status="not_found")
 
-    def _repoquery_search(self, conda_bin: Path, candidates: list[str]) -> str | None:
+    def _repoquery_search(self, conda_bin: Path, candidates: list[str]) -> ProbeResult:
         try:
             result = subprocess.run(
-                [str(conda_bin), "repoquery", "search", *candidates],
+                [str(conda_bin), "repoquery", "search", "--json", *candidates],
                 text=True,
                 capture_output=True,
                 timeout=self._probe_timeout,
                 check=False,
             )
-        except (subprocess.TimeoutExpired, OSError):
-            return None
+        except subprocess.TimeoutExpired as exc:
+            return ProbeResult(
+                status="solver_error",
+                error_code="probe_timeout",
+                error_detail=f"repoquery timed out after {exc.timeout}s",
+            )
+        except OSError as exc:
+            return ProbeResult(
+                status="solver_error",
+                error_code="probe_os_error",
+                error_detail=str(exc),
+            )
         if result.returncode != 0:
-            return None
-        try:
-            import json as _json
-            payload = _json.loads(result.stdout or "{}")
-        except ValueError:
-            return None
-        # mamba repoquery returns a dict keyed by the searched name.
-        if not isinstance(payload, dict):
-            return None
-        # Order matters: prefer the first candidate.
+            stderr = (result.stderr or "")[:500]
+            if _is_packages_not_found(stderr):
+                return ProbeResult(status="not_found")
+            return ProbeResult(
+                status="solver_error",
+                error_code="mamba_solver_error",
+                error_detail=stderr,
+            )
+        stdout = result.stdout or ""
+        return self._parse_repoquery_output(stdout, candidates)
+
+    def _parse_repoquery_output(self, stdout: str, candidates: list[str]) -> ProbeResult:
+        """Parse repoquery search output, trying JSON first then tabular text."""
+        found_names = self._extract_found_names(stdout, candidates)
+
+        if found_names is None:
+            # Unparseable non-blank stdout
+            return ProbeResult(
+                status="solver_error",
+                error_code="unknown_probe_output",
+                error_detail=stdout[:300],
+            )
+
         for candidate in candidates:
-            entry = payload.get(candidate)
-            if not entry:
-                continue
-            if isinstance(entry, dict) and entry.get("result"):
-                return candidate
-            if isinstance(entry, list) and entry:
-                return candidate
+            if candidate in found_names:
+                return ProbeResult(status="found", match=candidate)
+        return ProbeResult(status="not_found")
+
+    @staticmethod
+    def _try_extract_json(text: str) -> dict | None:
+        """Try to parse JSON from text, including when prefixed with progress lines."""
+        import json as _json
+
+        try:
+            return _json.loads(text)
+        except ValueError:
+            pass
+        # micromamba may prepend progress text before the JSON object on stdout
+        brace = text.find("{")
+        if brace > 0:
+            try:
+                return _json.loads(text[brace:])
+            except ValueError:
+                pass
         return None
 
-    def _json_search(self, conda_bin: Path, candidates: list[str]) -> str | None:
+    def _json_search_single(self, conda_bin: Path, candidate: str) -> ProbeResult:
+        """Probe one conda candidate at a time (required for ``conda``)."""
         try:
             result = subprocess.run(
-                [str(conda_bin), "search", "--json", *candidates],
+                [str(conda_bin), "search", "--json", candidate],
                 text=True,
                 capture_output=True,
                 timeout=self._probe_timeout,
                 check=False,
             )
-        except (subprocess.TimeoutExpired, OSError):
-            return None
+        except subprocess.TimeoutExpired as exc:
+            return ProbeResult(
+                status="solver_error",
+                error_code="probe_timeout",
+                error_detail=f"conda search timed out after {exc.timeout}s",
+            )
+        except OSError as exc:
+            return ProbeResult(
+                status="solver_error",
+                error_code="probe_os_error",
+                error_detail=str(exc),
+            )
         if result.returncode != 0:
-            return None
+            stderr = (result.stderr or "")[:500]
+            if _is_packages_not_found(stderr):
+                return ProbeResult(status="not_found")
+            return ProbeResult(
+                status="solver_error",
+                error_code="conda_solver_error",
+                error_detail=stderr,
+            )
+        import json as _json
+        stdout = result.stdout or ""
         try:
-            import json as _json
-            payload = _json.loads(result.stdout or "{}")
+            payload = _json.loads(stdout)
         except ValueError:
-            return None
+            if stdout.strip():
+                return ProbeResult(
+                    status="solver_error",
+                    error_code="unknown_probe_output",
+                    error_detail=stdout[:300],
+                )
+            return ProbeResult(status="not_found")
         if not isinstance(payload, dict):
-            return None
-        for candidate in candidates:
-            entry = payload.get(candidate)
-            if not entry:
-                continue
-            if isinstance(entry, dict) and entry.get("result"):
-                return candidate
-            if isinstance(entry, list) and entry:
-                return candidate
-        return None
+            return ProbeResult(status="not_found")
+        entry = payload.get(candidate)
+        if not entry:
+            return ProbeResult(status="not_found")
+        if isinstance(entry, dict) and entry.get("result"):
+            return ProbeResult(status="found", match=candidate)
+        if isinstance(entry, list) and entry:
+            return ProbeResult(status="found", match=candidate)
+        return ProbeResult(status="not_found")
 
 
 # ---------------------------------------------------------------------------
@@ -1024,6 +1340,32 @@ def _fallback_families_for(ecosystem: str) -> list[str]:
     return list(FALLBACK_FAMILIES_PYTHON)
 
 
+def _single_safe_fallback_family(packages: Iterable[ResolverPackageEntry]) -> str | None:
+    entries = list(packages)
+    if not entries:
+        return None
+    families: set[str] = set()
+    for pkg in entries:
+        if len(pkg.fallback_available) != 1:
+            families.clear()
+            break
+        family = str(pkg.fallback_available[0] or "").strip()
+        if not family:
+            return None
+        families.add(family)
+    if len(families) == 1:
+        return next(iter(families))
+
+    # Current R fallback hints often surface both cran and bioconductor. When
+    # every blocked package includes cran, prefer cran as the default registry
+    # family rather than rejecting the whole request as ambiguous.
+    if all("cran" in pkg.fallback_available for pkg in entries):
+        allowed = {"cran", "bioconductor"}
+        if all(set(pkg.fallback_available).issubset(allowed) for pkg in entries):
+            return "cran"
+    return None
+
+
 def _conda_candidates_for(pkg: str, ecosystem: str) -> list[str]:
     """Return the conda-family candidate names to probe for ``pkg``."""
     if ecosystem.lower() == "r":
@@ -1032,6 +1374,20 @@ def _conda_candidates_for(pkg: str, ecosystem: str) -> list[str]:
     base = pkg.strip()
     lowered = base.lower()
     return [base, lowered, lowered.replace("_", "-"), lowered.replace("-", "_")]
+
+
+def _is_packages_not_found(stderr: str) -> bool:
+    """True when stderr indicates the package is absent (not a solver bug)."""
+    lowered = stderr.lower()
+    return any(
+        token in lowered
+        for token in (
+            "packagesnotfounderror",
+            "no match found",
+            "package not found",
+            "nothing provides",
+        )
+    )
 
 
 def _resolver_settings_stub() -> Any:
@@ -1062,9 +1418,14 @@ def _configured_channels(conda_bin: Path, settings: Any | None) -> list[str]:
     """
     if conda_bin is None:
         return []
+    solver_name = conda_bin.name.lower()
+    if solver_name in {"micromamba"}:
+        cmd = [str(conda_bin), "config", "list", "--json"]
+    else:
+        cmd = [str(conda_bin), "config", "--show", "channels", "--json"]
     try:
         result = subprocess.run(
-            [str(conda_bin), "config", "--show", "channels", "--json"],
+            cmd,
             text=True,
             capture_output=True,
             timeout=10,
@@ -1161,25 +1522,29 @@ def collect_fallback_actions(
 ) -> list[ResolverInstallAction]:
     """Translate resolver blocked entries into structured fallback actions.
 
-    - ``report_only`` (default) returns an empty list.
+    - ``report_only`` returns an empty list.
     - ``allow_safe_registry_install`` returns one ``ResolverInstallAction`` per
-      blocked entry, filtered by ``is_registry_fallback_action_safe``. The
-      caller is responsible for further ecosystem mapping (Python → pip, R →
-      cran/bioconductor).
+      blocked entry only when the resolver can reduce the request to one safe
+      registry family. For current R dual-source hints, the resolver prefers
+      CRAN when every blocked package includes `cran`.
     """
     if policy != "allow_safe_registry_install":
         return []
+    fallback_packages = [
+        entry for entry in plan.packages
+        if entry.status == PACKAGE_STATUS_FALLBACK_REQUIRED
+    ]
+    family = _single_safe_fallback_family(fallback_packages)
+    if family is None:
+        return []
     actions: list[ResolverInstallAction] = []
-    for entry in plan.packages:
-        if entry.status != PACKAGE_STATUS_FALLBACK_REQUIRED:
-            continue
-        for family in entry.fallback_available:
-            candidate = ResolverInstallAction(
-                installer=family,
-                name=entry.name,
-            )
-            if is_registry_fallback_action_safe(candidate):
-                actions.append(candidate)
+    for entry in fallback_packages:
+        candidate = ResolverInstallAction(
+            installer=family,
+            name=entry.name,
+        )
+        if is_registry_fallback_action_safe(candidate):
+            actions.append(candidate)
     return actions
 
 
@@ -1188,11 +1553,13 @@ def fallback_policy_allows(policy: str | None) -> bool:
 
 
 def normalize_fallback_policy(value: str | None) -> str:
-    if value in (None, "", "report_only"):
-        return "report_only"
+    if value in (None, "", "allow_safe_registry_install"):
+        return "allow_safe_registry_install"
     if value == "allow_safe_registry_install":
         return "allow_safe_registry_install"
-    return "report_only"
+    if value == "report_only":
+        return "report_only"
+    return "allow_safe_registry_install"
 
 
 def summarize_blocked(plan: RuntimeDependencyResolutionPlan) -> Iterable[dict[str, Any]]:
