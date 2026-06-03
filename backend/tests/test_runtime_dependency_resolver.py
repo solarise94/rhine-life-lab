@@ -434,6 +434,87 @@ class ResolverServiceTest(unittest.TestCase):
         self.assertEqual(per_pkg_probe_calls, [], "Per-package _probe_conda must NOT be called after batch timeout")
         self.assertEqual(len(subprocess_calls), 1, "Only one batch subprocess call should be attempted")
 
+    def test_override_channels_flag_in_probe_commands(self) -> None:
+        """All probe commands must use --override-channels when extra_channels are specified."""
+        captured_cmds: list[list[str]] = []
+
+        def _capture_subprocess(cmd, *args, **kwargs):
+            captured_cmds.append(cmd if isinstance(cmd, list) else [cmd])
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0,
+                stdout=json.dumps({"result": {"pkgs": [{"name": "r-tidyverse"}]}}),
+                stderr="",
+            )
+
+        def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None, extra_channels=None):
+            return "mock-sig"
+
+        # Test 1: mamba repoquery (batch prefetch + per-package _repoquery_search)
+        with patch.object(
+            RuntimeDependencyResolverService,
+            "_probe_runtime",
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/r_env")),
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_resolve_conda_solver",
+            return_value=Path("/usr/bin/mamba"),
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_channel_signature",
+            _mock_channel_sig,
+        ), patch(
+            "app.services.runtime_dependency_resolver_service.subprocess.run",
+            side_effect=_capture_subprocess,
+        ):
+            self.resolver.resolve(
+                "proj",
+                {
+                    "ecosystem": "R",
+                    "runtime": "r_env",
+                    "packages": ["tidyverse"],
+                    "channels": ["bioconda"],
+                },
+            )
+        for cmd in captured_cmds:
+            if "repoquery" in cmd:
+                self.assertIn("--override-channels", cmd,
+                              f"repoquery command missing --override-channels: {cmd}")
+                self.assertIn("-c", cmd)
+
+        # Test 2: plain conda search (_json_search_single)
+        captured_cmds.clear()
+        self.resolver._cache.clear()
+        with patch.object(
+            RuntimeDependencyResolverService,
+            "_probe_runtime",
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/r_env")),
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_resolve_conda_solver",
+            return_value=Path("/usr/bin/conda"),
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_channel_signature",
+            _mock_channel_sig,
+        ), patch(
+            "app.services.runtime_dependency_resolver_service.subprocess.run",
+            side_effect=_capture_subprocess,
+        ):
+            self.resolver.resolve(
+                "proj",
+                {
+                    "ecosystem": "R",
+                    "runtime": "r_env",
+                    "packages": ["tidyverse"],
+                    "channels": ["bioconda"],
+                },
+            )
+        for cmd in captured_cmds:
+            if "search" in cmd:
+                self.assertIn("--override-channels", cmd,
+                              f"conda search command missing --override-channels: {cmd}")
+                self.assertIn("-c", cmd)
+
 
 class ResolverFallbackPolicyTest(unittest.TestCase):
     def test_normalize_policy(self) -> None:
