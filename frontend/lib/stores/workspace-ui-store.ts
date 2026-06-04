@@ -26,6 +26,21 @@ export const EMPTY_ARTIFACT_PREVIEW_STATE: ArtifactPreviewStoreState = {
   loading: false,
 };
 
+export interface DependencyJobChipState {
+  jobId: string;
+  status: string;
+  phase?: string;
+  packages?: string[];
+  runtime?: string;
+  message?: string;
+  statusDetail?: string;
+  changed?: boolean | null;
+  visible: boolean;
+  terminalAt?: number;
+}
+
+export const EMPTY_DEPENDENCY_JOBS: Record<string, DependencyJobChipState> = {};
+
 interface WorkspaceUiState {
   currentChatSessionIdByProject: Record<string, string | null | undefined>;
   selectedCardByProject: Record<string, string | null | undefined>;
@@ -44,6 +59,7 @@ interface WorkspaceUiState {
   mobileTabByProject: Record<string, "chat" | "blueprint">;
   draftMessageByProject: Record<string, string>;
   artifactPreviewByProject: Record<string, ArtifactPreviewStoreState | undefined>;
+  dependencyJobsByProject: Record<string, Record<string, DependencyJobChipState>>;
   setCurrentChatSessionId: (projectId: string, sessionId?: string | null) => void;
   setSelectedCard: (projectId: string, cardId?: string | null) => void;
   setSelectedWorker: (projectId: string, cardId: string, workerType?: string) => void;
@@ -66,6 +82,10 @@ interface WorkspaceUiState {
   setArtifactPreviewLoading: (projectId: string, loading: boolean) => void;
   setArtifactPreviewError: (projectId: string, error?: string) => void;
   closeArtifactPreview: (projectId: string) => void;
+  registerDependencyJob: (projectId: string, job: DependencyJobChipState) => void;
+  updateDependencyJob: (projectId: string, jobId: string, updates: Partial<DependencyJobChipState>) => void;
+  removeDependencyJob: (projectId: string, jobId: string) => void;
+  clearTerminalDependencyJobs: (projectId: string) => void;
 }
 
 export const useWorkspaceUiStore = create<WorkspaceUiState>()(
@@ -88,6 +108,7 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
       mobileTabByProject: {},
       draftMessageByProject: {},
       artifactPreviewByProject: {},
+      dependencyJobsByProject: {},
       setCurrentChatSessionId: (projectId, sessionId) =>
         set((state) => {
           if (state.currentChatSessionIdByProject[projectId] === sessionId) return state;
@@ -326,6 +347,72 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
             },
           },
         })),
+      registerDependencyJob: (projectId, job) =>
+        set((state) => {
+          const projectJobs = state.dependencyJobsByProject[projectId] ?? {};
+          if (projectJobs[job.jobId]) return state;
+          return {
+            dependencyJobsByProject: {
+              ...state.dependencyJobsByProject,
+              [projectId]: {
+                ...projectJobs,
+                [job.jobId]: job,
+              },
+            },
+          };
+        }),
+      updateDependencyJob: (projectId, jobId, updates) =>
+        set((state) => {
+          const projectJobs = state.dependencyJobsByProject[projectId] ?? {};
+          const existing = projectJobs[jobId];
+          if (!existing) return state;
+          return {
+            dependencyJobsByProject: {
+              ...state.dependencyJobsByProject,
+              [projectId]: {
+                ...projectJobs,
+                [jobId]: { ...existing, ...updates },
+              },
+            },
+          };
+        }),
+      removeDependencyJob: (projectId, jobId) =>
+        set((state) => {
+          const projectJobs = state.dependencyJobsByProject[projectId] ?? {};
+          if (!projectJobs[jobId]) return state;
+          const next = { ...projectJobs };
+          delete next[jobId];
+          return {
+            dependencyJobsByProject: {
+              ...state.dependencyJobsByProject,
+              [projectId]: next,
+            },
+          };
+        }),
+      clearTerminalDependencyJobs: (projectId) =>
+        set((state) => {
+          const projectJobs = state.dependencyJobsByProject[projectId] ?? {};
+          const active = Object.entries(projectJobs).filter(([, j]) => {
+            const phase = j.phase || j.status;
+            return (
+              phase === "running" ||
+              phase === "queued" ||
+              phase === "launching" ||
+              phase === "waiting" ||
+              phase === "waiting_for_runtime_lock" ||
+              phase === "building_command" ||
+              phase === "launching_subprocess" ||
+              phase === "running_subprocess"
+            );
+          });
+          if (active.length === Object.keys(projectJobs).length) return state;
+          return {
+            dependencyJobsByProject: {
+              ...state.dependencyJobsByProject,
+              [projectId]: Object.fromEntries(active),
+            },
+          };
+        }),
     }),
     {
       name: "blueprint-workspace-ui-v3",

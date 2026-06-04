@@ -1075,6 +1075,14 @@ class ManagerBlueprintTools:
                     "runtime": runtime,
                 },
             )
+            phase = in_flight_dup.get("prior_phase") or in_flight_dup.get("prior_status") or "running"
+            phase_messages = {
+                "queued": "同一 runtime 的依赖任务已排队",
+                "waiting_for_runtime_lock": "同一 runtime 正在等待前序依赖任务完成",
+                "building_command": "同一 runtime 正在准备依赖安装命令",
+                "launching_subprocess": "同一 runtime 正在启动依赖安装进程",
+                "running_subprocess": "同一 runtime 正在执行依赖安装",
+            }
             return {
                 "ok": False,
                 "background": False,
@@ -1083,7 +1091,7 @@ class ManagerBlueprintTools:
                 "wait_for_wake": False,
                 "error_code": "duplicate_dependency_resolution_in_progress",
                 "prior_job_id": in_flight_dup["prior_job_id"],
-                "message": "The same dependency installation is already running for this runtime.",
+                "message": phase_messages.get(phase, "同一 runtime 的依赖安装正在进行中"),
                 "retry_hint": "wait_for_existing_dependency_job",
             }
 
@@ -1349,6 +1357,7 @@ class ManagerBlueprintTools:
             "task_id": job.task_id,
             "job_id": job.job_id,
             "status": job.status,
+            "phase": job.phase,
             "created_at": job.created_at,
             "started_at": job.started_at,
             "finished_at": job.finished_at,
@@ -1356,6 +1365,19 @@ class ManagerBlueprintTools:
             "result": result or None,
             "error": job.error,
         }
+        # P1 observability fields
+        if job.command_preview is not None:
+            payload["command_preview"] = job.command_preview
+        if job.child_pid is not None:
+            payload["child_pid"] = job.child_pid
+        if job.log_path is not None:
+            payload["log_path"] = job.log_path
+        if job.last_heartbeat_at is not None:
+            payload["last_heartbeat_at"] = job.last_heartbeat_at
+        if job.status_detail is not None:
+            payload["status_detail"] = job.status_detail
+        if job.changed is not None:
+            payload["changed"] = job.changed
         if result:
             payload.update(
                 {
@@ -1375,7 +1397,7 @@ class ManagerBlueprintTools:
             )
         return payload
 
-    def _install_runtime_dependencies_sync(self, project_id: str, payload: dict) -> dict:
+    def _install_runtime_dependencies_sync(self, project_id: str, payload: dict, phase_callback=None) -> dict:
         request = InstallRuntimeDependenciesPayload.model_validate(payload)
         ecosystem = self._normalize_dependency_ecosystem(request.ecosystem)
         packages = self._validate_dependency_packages(ecosystem, request.packages)
@@ -1403,6 +1425,7 @@ class ManagerBlueprintTools:
                 timeout=timeout,
                 started_at=started_at,
                 channels=channels,
+                phase_callback=phase_callback,
             )
 
         # Legacy path (no resolver, or resolver not available): fall through
@@ -1437,6 +1460,7 @@ class ManagerBlueprintTools:
             manager_name=manager_name or "conda",
             timeout=timeout,
             started_at=started_at,
+            phase_callback=phase_callback,
         )
 
     def _install_from_plan(
@@ -1450,6 +1474,7 @@ class ManagerBlueprintTools:
         timeout: int,
         started_at: str,
         channels: list[str] | None = None,
+        phase_callback=None,
     ) -> dict:
         """Execute a resolver-approved installer_plan.
 
@@ -1517,6 +1542,7 @@ class ManagerBlueprintTools:
                 manager_name=manager_name,
                 timeout=timeout,
                 started_at=started_at,
+                phase_callback=phase_callback,
             )
 
         if installer_type == "pip":
@@ -1527,6 +1553,7 @@ class ManagerBlueprintTools:
                 names=names,
                 timeout=timeout,
                 started_at=started_at,
+                phase_callback=phase_callback,
             )
 
         if installer_type in {"cran", "bioconductor"}:
@@ -1538,6 +1565,7 @@ class ManagerBlueprintTools:
                 installer_type=installer_type,
                 timeout=timeout,
                 started_at=started_at,
+                phase_callback=phase_callback,
             )
 
         return {
@@ -1564,9 +1592,20 @@ class ManagerBlueprintTools:
         manager_name: str,
         timeout: int,
         started_at: str,
+        phase_callback=None,
     ) -> dict:
-        """Run a single subprocess command for dependency installation."""
+        """Run a single subprocess command for dependency installation.
+
+        If ``phase_callback`` is provided, it is called with ``(phase, **kwargs)``
+        at ``launching_subprocess`` (before the call) and ``running_subprocess``
+        (immediately before the blocking ``subprocess.run()``).  No ``child_pid``
+        is provided yet because we still use ``subprocess.run()``; real child-pid
+        tracking requires switching to ``Popen`` (future P1 work).
+        """
         run_env = self._dependency_subprocess_env(ecosystem, manager_name, resolved_runtime) if ecosystem == "R" and manager_name != "conda" else None
+        if phase_callback:
+            phase_callback("launching_subprocess", command_preview=command)
+            phase_callback("running_subprocess", command_preview=command)
         try:
             result = subprocess.run(
                 command,
@@ -1611,16 +1650,30 @@ class ManagerBlueprintTools:
         error_code = None
         if not ok:
             error_code = "dependency_install_failed"
+        status_detail: str | None = None
+        changed: bool | None = None
+        message = "Dependency installation failed."
+        if ok:
+            if self._is_conda_noop(result.stdout):
+                status_detail = "already_satisfied"
+                changed = False
+                message = "Dependencies already satisfied."
+            else:
+                status_detail = "install_completed"
+                changed = True
+                message = "Dependencies installed."
         return {
             "ok": ok,
             "error_code": error_code,
+            "status_detail": status_detail,
+            "changed": changed,
             "ecosystem": ecosystem,
             "runtime": runtime,
             "resolved_runtime": resolved_runtime,
             "packages": packages,
             "manager": manager_name,
             "returncode": result.returncode,
-            "message": "Dependencies installed." if ok else "Dependency installation failed.",
+            "message": message,
             "stdout_tail": self._tail_text(result.stdout),
             "stderr_tail": self._tail_text(result.stderr),
             "started_at": started_at,
@@ -1636,6 +1689,7 @@ class ManagerBlueprintTools:
         names: list[str],
         timeout: int,
         started_at: str,
+        phase_callback=None,
     ) -> dict:
         """Structured pip install — no Manager-built text."""
         from app.workers.command_worker import CommandTemplateWorkerAdapter
@@ -1703,6 +1757,7 @@ class ManagerBlueprintTools:
             manager_name="pip",
             timeout=timeout,
             started_at=started_at,
+            phase_callback=phase_callback,
         )
 
     def _run_r_registry_install(
@@ -1715,6 +1770,7 @@ class ManagerBlueprintTools:
         installer_type: str,
         timeout: int,
         started_at: str,
+        phase_callback=None,
     ) -> dict:
         """Structured CRAN / Bioconductor install via Rscript."""
         from app.workers.command_worker import CommandTemplateWorkerAdapter
@@ -1780,6 +1836,7 @@ class ManagerBlueprintTools:
             manager_name=installer_type,
             timeout=timeout,
             started_at=started_at,
+            phase_callback=phase_callback,
         )
 
     def _validated_runtime_dependency_payload(self, project_id: str, payload: dict, *, session_id: str | None = None) -> dict[str, Any]:
@@ -2769,6 +2826,23 @@ class ManagerBlueprintTools:
             return ""
         text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
         return text[-limit:]
+
+    @staticmethod
+    def _is_conda_noop(stdout: str) -> bool:
+        """Detect conda-family no-op transaction from stdout.
+
+        Heuristic: return True when stdout contains known no-op signatures.
+        This is intentionally not tied to one exact English sentence so that
+        solver-version-equivalent text can be added when observed.
+        """
+        if not stdout:
+            return False
+        lowered = stdout.lower()
+        return any(sig in lowered for sig in (
+            "all requested packages already installed",
+            "nothing to do",
+            "no actions to perform",
+        ))
 
     def _active_run_ids_for_card(self, project_id: str, card_id: str | None) -> list[str]:
         if not card_id:

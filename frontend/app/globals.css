@@ -3908,3 +3908,58 @@ button {
     font-size: 14px;
   }
 }
+
+/* ─── Dependency Job Floating Chip ─── */
+.dependency-chip {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 60;
+
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: 999px;
+
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--line-bright);
+  box-shadow: var(--shadow-xl);
+  backdrop-filter: blur(18px);
+
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+
+  animation: fade-in-up 400ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.dependency-chip.running {
+  background: var(--blue-bg);
+  border-color: var(--blue-border);
+  color: var(--blue);
+}
+
+.dependency-chip.success {
+  background: var(--green-bg);
+  border-color: var(--green-border);
+  color: var(--green);
+}
+
+.dependency-chip.info {
+  background: var(--blue-bg);
+  border-color: var(--blue-border);
+  color: var(--blue);
+}
+
+.dependency-chip.error {
+  background: var(--red-bg);
+  border-color: var(--red-border);
+  color: var(--red);
+}
+
+.dependency-chip .spinning {
+  animation: spin 1s linear infinite;
+}

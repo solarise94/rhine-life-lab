@@ -62,7 +62,7 @@ class RuntimeDependencyIntegrationTest(unittest.TestCase):
                 "packages": ["pydeseq2"],
                 "source": {"card_id": "card_1"},
             },
-            handler=lambda _pid, _payload: {
+            handler=lambda _pid, _payload, **kwargs: {
                 "ok": False,
                 "error_code": "package_not_found_in_conda_channels",
                 "requested_package": "pydeseq2",
@@ -293,7 +293,7 @@ class RuntimeDependencyIntegrationTest(unittest.TestCase):
                 "packages": ["numpy"],
                 "source": {"card_id": "card_1"},
             },
-            handler=lambda _pid, _payload: {
+            handler=lambda _pid, _payload, **kwargs: {
                 "ok": False,
                 "error_code": "dependency_install_failed",
                 "message": "Failed",

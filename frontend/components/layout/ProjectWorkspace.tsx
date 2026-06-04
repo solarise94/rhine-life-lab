@@ -36,6 +36,7 @@ import {
 import { Card, ExecutorProfile, ReportExportResponse } from "@/lib/types";
 import { SideNav } from "./SideNav";
 import { ProjectHeader } from "./ProjectHeader";
+import { DependencyJobChip } from "@/components/dependency/DependencyJobChip";
 import { ManagerChatPanel } from "@/components/manager-chat/ManagerChatPanel";
 import { CardStream } from "@/components/cards/CardStream";
 import { CardDetailPanel } from "@/components/detail/CardDetailPanel";
@@ -138,6 +139,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const setArtifactPreviewError = useWorkspaceUiStore((s) => s.setArtifactPreviewError);
   const addAttachment = useWorkspaceUiStore((s) => s.addAttachment);
   const setDraftMessage = useWorkspaceUiStore((s) => s.setDraftMessage);
+  const dependencyJobs = useWorkspaceUiStore((s) => s.dependencyJobsByProject[projectId] ?? {});
+  const registerDependencyJob = useWorkspaceUiStore((s) => s.registerDependencyJob);
+  const updateDependencyJob = useWorkspaceUiStore((s) => s.updateDependencyJob);
+  const removeDependencyJob = useWorkspaceUiStore((s) => s.removeDependencyJob);
 
   const selectedAssetId = useResultsViewStore((s) => s.selectedAssetByProject[projectId]);
   const setSelectedAsset = useResultsViewStore((s) => s.setSelectedAsset);
@@ -257,41 +262,131 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             card_id?: string;
             resolution_status?: string;
             error_code?: string;
+            packages?: string[];
+            runtime?: string;
+            status_detail?: string;
+            changed?: boolean;
+            phase?: string;
           };
         };
         if (raw.type === "heartbeat") {
           return;
         }
-        // Surface failed dependency install events as a project-level notice.
-        // The enriched failure fields live inside the nested payload object.
-        if (
-          raw.reason === "runtime_dependency_job_changed" &&
-          raw.job_status === "failed"
-        ) {
+        // Surface dependency install events as project-level notices.
+        // The enriched fields live inside the nested payload object.
+        if (raw.reason === "runtime_dependency_job_changed") {
           const eventPayload = raw.payload || {};
-          // Ignore manually resolved jobs to avoid re-showing the failure notice.
-          if (eventPayload.resolution_status === "manually_resolved") {
-            // Clear any existing dependency failure notice so it disappears immediately.
-            // Read from noticeRef to avoid stale closure value.
-            const currentNotice = noticeRef.current;
-            if (currentNotice && currentNotice.startsWith("Dependency install failed")) {
-              setNotice(projectId, null);
-            }
-          } else {
-            const pkg = eventPayload.requested_package || "unknown package";
-            const fallback = eventPayload.fallback_available?.length
-              ? `Fallback available: ${eventPayload.fallback_available.join(", ")}.`
-              : "";
-            const msg = eventPayload.message || "";
-            const errorCode = eventPayload.error_code;
-            let noticeText: string;
-            if (errorCode === "package_not_found_in_conda_channels") {
-              noticeText = `Dependency install failed: ${pkg} was not found in configured conda channels. ${fallback} ${msg}`.trim();
+          const jobId = (raw as unknown as Record<string, unknown>).job_id as string | undefined;
+          const pkgs = eventPayload.packages as string[] | undefined;
+          const runtime = eventPayload.runtime as string | undefined;
+          if (raw.job_status === "failed") {
+            // Ignore manually resolved jobs to avoid re-showing the failure notice or chip.
+            if (eventPayload.resolution_status === "manually_resolved") {
+              const currentNotice = noticeRef.current;
+              if (currentNotice && currentNotice.startsWith("Dependency install failed")) {
+                setNotice(projectId, null);
+              }
+              if (jobId) {
+                removeDependencyJob(projectId, jobId);
+              }
             } else {
-              // Use the backend message directly for timeout, start_failed, compilation_failed, etc.
-              noticeText = `Dependency install failed: ${msg || pkg}`.trim();
+              const pkg = eventPayload.requested_package || "unknown package";
+              const fallback = eventPayload.fallback_available?.length
+                ? `Fallback available: ${eventPayload.fallback_available.join(", ")}.`
+                : "";
+              const msg = eventPayload.message || "";
+              const errorCode = eventPayload.error_code;
+              let noticeText: string;
+              if (errorCode === "package_not_found_in_conda_channels") {
+                noticeText = `Dependency install failed: ${pkg} was not found in configured conda channels. ${fallback} ${msg}`.trim();
+              } else {
+                noticeText = `Dependency install failed: ${msg || pkg}`.trim();
+              }
+              setNotice(projectId, noticeText);
+              if (jobId) {
+                const existing = dependencyJobs[jobId];
+                if (!existing) {
+                  registerDependencyJob(projectId, {
+                    jobId,
+                    status: "failed",
+                    phase: eventPayload.phase || "failed",
+                    packages: pkgs,
+                    runtime,
+                    message: eventPayload.message || "Dependency install failed.",
+                    visible: true,
+                    terminalAt: Date.now(),
+                  });
+                }
+                updateDependencyJob(projectId, jobId, {
+                  status: "failed",
+                  message: eventPayload.message || "Dependency install failed.",
+                  visible: true,
+                  terminalAt: Date.now(),
+                });
+              }
+            }
+          } else if (raw.job_status === "succeeded") {
+            const changed = eventPayload.changed as boolean | null | undefined;
+            const statusDetail = eventPayload.status_detail as string | undefined;
+            let noticeText: string;
+            if (changed === false || statusDetail === "already_satisfied") {
+              noticeText = "Dependencies already satisfied. No installation was needed.";
+            } else {
+              noticeText = "Dependency install completed.";
             }
             setNotice(projectId, noticeText);
+            if (jobId) {
+              const existing = dependencyJobs[jobId];
+              if (!existing) {
+                registerDependencyJob(projectId, {
+                  jobId,
+                  status: "succeeded",
+                  phase: eventPayload.phase || "succeeded",
+                  packages: pkgs,
+                  runtime,
+                  changed: changed ?? null,
+                  statusDetail: statusDetail || undefined,
+                  message: noticeText,
+                  visible: true,
+                  terminalAt: Date.now(),
+                });
+              }
+              updateDependencyJob(projectId, jobId, {
+                status: "succeeded",
+                changed: changed ?? null,
+                statusDetail: statusDetail || undefined,
+                message: noticeText,
+                visible: true,
+                terminalAt: Date.now(),
+              });
+            }
+          } else {
+            // Active job (running or pre-launch phases)
+            const activeStatuses = new Set([
+              "queued", "waiting", "launching", "running",
+              "waiting_for_runtime_lock", "building_command",
+              "launching_subprocess", "running_subprocess",
+            ]);
+            const phase = eventPayload.phase || raw.job_status;
+            if (jobId && phase && activeStatuses.has(phase)) {
+              const existing = dependencyJobs[jobId];
+              if (!existing) {
+                registerDependencyJob(projectId, {
+                  jobId,
+                  status: raw.job_status || phase,
+                  phase,
+                  packages: pkgs,
+                  runtime,
+                  visible: true,
+                });
+              } else {
+                updateDependencyJob(projectId, jobId, {
+                  status: raw.job_status || phase,
+                  phase,
+                  visible: true,
+                });
+              }
+            }
           }
         }
         const runId = typeof raw.run_id === "string" ? raw.run_id : null;
@@ -414,8 +509,12 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
 
   useEffect(() => {
     if (!notice) return;
-    // Keep dependency failure notices visible longer so users can read them.
-    const delay = notice.startsWith("Dependency install failed") ? 30_000 : 2_200;
+    // Keep dependency install notices visible longer so users can read them.
+    const isDepNotice =
+      notice.startsWith("Dependency install failed") ||
+      notice.startsWith("Dependency install completed") ||
+      notice.startsWith("Dependencies already satisfied");
+    const delay = isDepNotice ? 12_000 : 2_200;
     const timer = window.setTimeout(() => {
       setNotice(projectId, null);
     }, delay);
@@ -690,6 +789,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           />
         ) : null}
         {notice ? <div className="notice-panel notice-toast">{notice}</div> : null}
+        <DependencyJobChip projectId={projectId} />
         {/* Desktop */}
         {!isMobileWorkspace ? (
         <div className="desktop-content">

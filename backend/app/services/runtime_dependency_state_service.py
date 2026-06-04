@@ -344,6 +344,7 @@ def find_duplicate_in_flight(
             return {
                 "prior_job_id": str(item.get("job_id") or ""),
                 "prior_status": status,
+                "prior_phase": str(item.get("phase") or status).strip(),
                 "prior_created_at": str(item.get("created_at") or ""),
             }
     return None

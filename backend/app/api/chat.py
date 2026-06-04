@@ -135,6 +135,20 @@ def get_runtime_dependency_job(
         raise HTTPException(status_code=404, detail="Runtime dependency job not found")
     # Return normalized failure details for consistent shape with events and work orders.
     details = runtime_dependency_failure_details(job)
+    # P1 observability fields
+    details["phase"] = job.phase
+    if job.status_detail is not None:
+        details["status_detail"] = job.status_detail
+    if job.changed is not None:
+        details["changed"] = job.changed
+    if job.command_preview is not None:
+        details["command_preview"] = job.command_preview
+    if job.child_pid is not None:
+        details["child_pid"] = job.child_pid
+    if job.log_path is not None:
+        details["log_path"] = job.log_path
+    if job.last_heartbeat_at is not None:
+        details["last_heartbeat_at"] = job.last_heartbeat_at
     # Preserve raw payload/result/error for audit compatibility.
     return {
         **details,

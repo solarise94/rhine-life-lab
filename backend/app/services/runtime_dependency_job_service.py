@@ -3,7 +3,7 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 import logging
-from threading import Lock
+import threading
 import traceback
 from typing import Any, Callable
 from uuid import uuid4
@@ -28,12 +28,24 @@ class RuntimeDependencyJob:
     task_id: str
     payload: dict[str, Any]
     status: JobStatus = "queued"
+    phase: str = "queued"
     result: dict[str, Any] | None = None
     error: str | None = None
     created_at: str = field(default_factory=utc_now)
     started_at: str | None = None
     finished_at: str | None = None
     future: Future | None = field(default=None, repr=False)
+    # P1 observability fields
+    status_detail: str | None = None
+    changed: bool | None = None
+    command_preview: list[str] | None = None
+    child_pid: int | None = None
+    log_path: str | None = None
+    last_heartbeat_at: str | None = None
+    last_stdout_at: str | None = None
+    last_stderr_at: str | None = None
+    stdout_tail: str = ""
+    stderr_tail: str = ""
 
 
 class RuntimeDependencyJobService:
@@ -48,39 +60,76 @@ class RuntimeDependencyJobService:
         self.project_service = project_service
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="runtime-deps")
         self.jobs: dict[str, RuntimeDependencyJob] = {}
-        self.lock = Lock()
-        self.runtime_locks: dict[tuple[str, str], Lock] = {}
+        self.lock = threading.Lock()
+        self.runtime_locks: dict[tuple[str, str], threading.Lock] = {}
         self.project_event_service = project_event_service
         self.background_task_service = background_task_service or BackgroundTaskService(project_service)
         self.background_terminal_callback = background_terminal_callback
+        # P2 watchdog (currently scoped to future-done reconciliation only;
+        # pre-launch stale kill and child-pid checks are disabled until we
+        # switch from subprocess.run to Popen with real child pid tracking.)
+        self._watchdog_interval_seconds = 30
+        self._watchdog_stop = threading.Event()
+        self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True, name="runtime-deps-watchdog")
+        self._watchdog_thread.start()
 
     def submit(self, project_id: str, payload: dict[str, Any], handler) -> RuntimeDependencyJob:
-        task = self.background_task_service.create_task(
-            project_id,
-            task_type="runtime_dependency_install",
-            affected={"job_ids": [], "card_ids": [payload.get("source", {}).get("card_id")] if isinstance(payload.get("source"), dict) and payload.get("source", {}).get("card_id") else []},
-            adapter={"kind": "dependency_installer"},
-        )
-        job = RuntimeDependencyJob(
-            job_id=f"depjob_{uuid4().hex}",
-            project_id=project_id,
-            task_id=task.task_id,
-            payload=payload,
-        )
-        self.background_task_service.update_task(
-            project_id,
-            task.task_id,
-            affected={"job_ids": [job.job_id], "card_ids": task.affected.card_ids},
-        )
-        with self.lock:
-            self._load_project_jobs_locked(project_id)
-            self.jobs[job.job_id] = job
-            self._persist_project_jobs_locked(project_id)
-        self._emit_project_event(job)
-        future = self.executor.submit(self._run, job.job_id, handler)
-        with self.lock:
-            job.future = future
-        return job
+        # P2: atomic submission — task and job are created as one logical unit.
+        # If any step fails, roll back the partial record.
+        task = None
+        try:
+            task = self.background_task_service.create_task(
+                project_id,
+                task_type="runtime_dependency_install",
+                affected={"job_ids": [], "card_ids": [payload.get("source", {}).get("card_id")] if isinstance(payload.get("source"), dict) and payload.get("source", {}).get("card_id") else []},
+                adapter={"kind": "dependency_installer"},
+            )
+            job = RuntimeDependencyJob(
+                job_id=f"depjob_{uuid4().hex}",
+                project_id=project_id,
+                task_id=task.task_id,
+                payload=payload,
+            )
+            self.background_task_service.update_task(
+                project_id,
+                task.task_id,
+                affected={"job_ids": [job.job_id], "card_ids": task.affected.card_ids},
+            )
+            with self.lock:
+                self._load_project_jobs_locked(project_id)
+                self.jobs[job.job_id] = job
+                self._persist_project_jobs_locked(project_id)
+            self._emit_project_event(job)
+            future = self.executor.submit(self._run, job.job_id, handler)
+            with self.lock:
+                job.future = future
+            return job
+        except Exception as submit_exc:
+            logger.exception("Runtime dependency job submission failed, rolling back")
+            # If the job was already persisted, mark it terminal so duplicate
+            # suppression does not block on a dead record.
+            if "job" in locals():
+                try:
+                    with self.lock:
+                        job.status = "failed"
+                        job.phase = "failed"
+                        job.error = f"Runtime dependency job submission failed before executor scheduling: {submit_exc}"
+                        job.finished_at = utc_now()
+                        self._persist_project_jobs_locked(project_id)
+                        self._emit_project_event(job)
+                except Exception:
+                    pass
+            if task is not None:
+                try:
+                    self.background_task_service.update_task(
+                        project_id,
+                        task.task_id,
+                        status="failed",
+                        error="Submission rolled back due to creation failure.",
+                    )
+                except Exception:
+                    pass
+            raise
 
     def get(self, job_id: str) -> RuntimeDependencyJob | None:
         with self.lock:
@@ -107,20 +156,29 @@ class RuntimeDependencyJobService:
         with self.lock:
             job = self.jobs[job_id]
             job.status = "running"
+            job.phase = "waiting_for_runtime_lock"
             job.started_at = utc_now()
-            self.background_task_service.update_task(job.project_id, job.task_id, status="running", started_at=job.started_at)
+            self.background_task_service.update_task(
+                job.project_id, job.task_id, status="running", started_at=job.started_at,
+                adapter={"kind": "dependency_installer", "metadata": {"phase": job.phase, "job_id": job.job_id}},
+            )
             self._persist_project_jobs_locked(job.project_id)
             self._emit_project_event(job)
             runtime = str(job.payload.get("runtime") or "").strip()
             runtime_key = (job.project_id, runtime)
-            runtime_lock = self.runtime_locks.setdefault(runtime_key, Lock())
+            runtime_lock = self.runtime_locks.setdefault(runtime_key, threading.Lock())
         try:
             with runtime_lock:
-                result = handler(job.project_id, job.payload)
+                with self.lock:
+                    job.phase = "building_command"
+                    job.last_heartbeat_at = utc_now()
+                    self._persist_project_jobs_locked(job.project_id)
+                result = handler(job.project_id, job.payload, phase_callback=self._make_phase_callback(job_id))
         except Exception as exc:
             logger.exception("Runtime dependency job failed: %s", job_id)
             with self.lock:
                 job.status = "failed"
+                job.phase = "failed"
                 job.error = "".join(traceback.format_exception(exc))
                 job.finished_at = utc_now()
                 self.background_task_service.update_task(
@@ -129,15 +187,20 @@ class RuntimeDependencyJobService:
                     status="failed",
                     finished_at=job.finished_at,
                     error=job.error,
+                    adapter={"kind": "dependency_installer", "metadata": {"phase": "failed", "job_id": job.job_id}},
                 )
                 self._persist_project_jobs_locked(job.project_id)
                 self._emit_project_event(job)
             self._notify_background_terminal(job.project_id, job_id=job.job_id)
             return
         with self.lock:
-            job.status = "succeeded" if result.get("ok") else "failed"
+            ok = bool(result.get("ok"))
+            job.status = "succeeded" if ok else "failed"
+            job.phase = "succeeded" if ok else "failed"
             job.result = result
-            job.error = None if result.get("ok") else str(result.get("message") or "Dependency installation failed.")
+            job.status_detail = result.get("status_detail") if isinstance(result, dict) else None
+            job.changed = result.get("changed") if isinstance(result, dict) else None
+            job.error = None if ok else str(result.get("message") or "Dependency installation failed.")
             job.finished_at = utc_now()
             self.background_task_service.update_task(
                 job.project_id,
@@ -146,10 +209,30 @@ class RuntimeDependencyJobService:
                 finished_at=job.finished_at,
                 result=result,
                 error=job.error,
+                adapter={"kind": "dependency_installer", "metadata": {"phase": job.phase, "job_id": job.job_id}},
             )
             self._persist_project_jobs_locked(job.project_id)
             self._emit_project_event(job)
         self._notify_background_terminal(job.project_id, job_id=job.job_id)
+
+    def _make_phase_callback(self, job_id: str):
+        """Return a callback that updates phase and heartbeat for a running job."""
+        def callback(phase: str, **kwargs: Any) -> None:
+            with self.lock:
+                job = self.jobs.get(job_id)
+                if job is None:
+                    return
+                job.phase = phase
+                job.last_heartbeat_at = utc_now()
+                if "child_pid" in kwargs:
+                    job.child_pid = kwargs["child_pid"]
+                if "command_preview" in kwargs:
+                    job.command_preview = kwargs["command_preview"]
+                if "log_path" in kwargs:
+                    job.log_path = kwargs["log_path"]
+                self._persist_project_jobs_locked(job.project_id)
+                self._emit_project_event(job)
+        return callback
 
     def _emit_project_event(self, job: RuntimeDependencyJob) -> None:
         if self.project_event_service is None:
@@ -159,6 +242,7 @@ class RuntimeDependencyJobService:
         payload: dict[str, Any] = {
             "task_id": job.task_id,
             "job_status": job.status,
+            "phase": job.phase,
             "runtime": job.payload.get("runtime"),
             "packages": job.payload.get("packages"),
             "manager": job.payload.get("manager"),
@@ -166,6 +250,13 @@ class RuntimeDependencyJobService:
             "finished_at": job.finished_at,
             "ok": bool(job.result.get("ok")) if isinstance(job.result, dict) else None,
         }
+        # Forward success classification fields so the frontend can render
+        # the correct receipt (no-op vs real install) without an extra fetch.
+        if isinstance(job.result, dict):
+            if job.result.get("status_detail") is not None:
+                payload["status_detail"] = job.result["status_detail"]
+            if job.result.get("changed") is not None:
+                payload["changed"] = job.result["changed"]
         # Enrich terminal events with normalized failure details
         if job.status in {"failed", "succeeded"}:
             try:
@@ -242,6 +333,17 @@ class RuntimeDependencyJobService:
                     payload=payload,
                     status=str(item.get("status") or "failed"),
                     task_id=str(item.get("task_id") or f"bgtask_{job_id}"),
+                    phase=str(item.get("phase") or item.get("status") or "failed"),
+                    status_detail=item.get("status_detail") if item.get("status_detail") is not None else None,
+                    changed=item.get("changed") if item.get("changed") is not None else None,
+                    command_preview=list(item["command_preview"]) if isinstance(item.get("command_preview"), list) else None,
+                    child_pid=int(item["child_pid"]) if isinstance(item.get("child_pid"), int) else None,
+                    log_path=str(item["log_path"]) if item.get("log_path") is not None else None,
+                    last_heartbeat_at=str(item["last_heartbeat_at"]) if item.get("last_heartbeat_at") is not None else None,
+                    last_stdout_at=str(item["last_stdout_at"]) if item.get("last_stdout_at") is not None else None,
+                    last_stderr_at=str(item["last_stderr_at"]) if item.get("last_stderr_at") is not None else None,
+                    stdout_tail=str(item.get("stdout_tail") or ""),
+                    stderr_tail=str(item.get("stderr_tail") or ""),
                     result=dict(item["result"]) if isinstance(item.get("result"), dict) else None,
                     error=str(item["error"]) if item.get("error") is not None else None,
                     created_at=str(item.get("created_at") or now),
@@ -252,6 +354,7 @@ class RuntimeDependencyJobService:
                 continue
             if job.status in {"queued", "running", "waiting", "launching"}:
                 job.status = "failed"
+                job.phase = "failed"
                 job.error = "Runtime dependency job was interrupted by backend restart."
                 job.finished_at = job.finished_at or now
                 changed = True
@@ -282,11 +385,22 @@ class RuntimeDependencyJobService:
                     "task_id": job.task_id,
                     "payload": job.payload,
                     "status": job.status,
+                    "phase": job.phase,
                     "result": job.result,
                     "error": job.error,
                     "created_at": job.created_at,
                     "started_at": job.started_at,
                     "finished_at": job.finished_at,
+                    "status_detail": job.status_detail,
+                    "changed": job.changed,
+                    "command_preview": job.command_preview,
+                    "child_pid": job.child_pid,
+                    "log_path": job.log_path,
+                    "last_heartbeat_at": job.last_heartbeat_at,
+                    "last_stdout_at": job.last_stdout_at,
+                    "last_stderr_at": job.last_stderr_at,
+                    "stdout_tail": job.stdout_tail,
+                    "stderr_tail": job.stderr_tail,
                     "resolution_status": job.payload.get("resolution_status"),
                     "resolved_at": job.payload.get("resolved_at"),
                     "resolved_by_session_id": job.payload.get("resolved_by_session_id"),
@@ -320,6 +434,64 @@ class RuntimeDependencyJobService:
                 project_id,
                 job_id,
             )
+
+    def _watchdog_loop(self) -> None:
+        """Periodic reconciliation for active dependency jobs."""
+        while not self._watchdog_stop.is_set():
+            self._watchdog_stop.wait(self._watchdog_interval_seconds)
+            if self._watchdog_stop.is_set():
+                break
+            try:
+                self._reconcile_active_jobs()
+            except Exception:
+                logger.exception("Runtime dependency watchdog reconciliation failed")
+
+    def _reconcile_active_jobs(self) -> None:
+        """Check active jobs for future-done only.
+
+        Pre-launch stale kill and child-pid checks are disabled until we
+        switch from subprocess.run to Popen with real child pid tracking.
+        """
+        with self.lock:
+            active_jobs = [
+                job
+                for job in self.jobs.values()
+                if job.status in {"queued", "running"} and job.phase not in {"succeeded", "failed", "interrupted"}
+            ]
+            for job in active_jobs:
+                try:
+                    self._reconcile_single_job(job)
+                except Exception:
+                    logger.exception("Reconciliation failed for job %s", job.job_id)
+
+    def _reconcile_single_job(self, job: RuntimeDependencyJob) -> None:
+        """Reconcile one active job. Must be called with self.lock held.
+
+        Currently only finalizes jobs whose future has completed but whose
+        status was not yet updated (e.g. after a backend restart).
+        """
+        if job.future is not None and job.future.done():
+            try:
+                job.future.result(timeout=0)
+            except Exception as exc:
+                job.status = "failed"
+                job.phase = "failed"
+                job.error = "".join(traceback.format_exception(exc))
+            else:
+                job.status = "succeeded"
+                job.phase = "succeeded"
+            job.finished_at = utc_now()
+            self.background_task_service.update_task(
+                job.project_id,
+                job.task_id,
+                status=job.status,
+                finished_at=job.finished_at,
+                error=job.error,
+                adapter={"kind": "dependency_installer", "metadata": {"phase": job.phase, "job_id": job.job_id}},
+            )
+            self._persist_project_jobs_locked(job.project_id)
+            self._emit_project_event(job)
+            self._notify_background_terminal(job.project_id, job_id=job.job_id)
 
     def mark_job_resolved(
         self,
