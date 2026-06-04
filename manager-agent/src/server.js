@@ -3160,12 +3160,28 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
   const runId = createRunId();
   const runStartedAt = Date.now();
   const projectId = payload.project_id;
+  const shouldSettleAutoTurn = payload.auto_mode?.enabled && payload.session_id && !payload.auto_mode?.btw_mode;
+  async function settleAutoTurnBestEffort(asyncBoundary = false) {
+    if (!shouldSettleAutoTurn) return;
+    try {
+      await notifyAutoTurnSettled(
+        payload.backend_api_base_url,
+        payload.internal_tool_token,
+        payload.project_id,
+        payload.session_id,
+        asyncBoundary,
+        AbortSignal.timeout(10000),
+      );
+    } catch (_) { /* best effort — latch cleared on next restart regardless */ }
+  }
   const runtimeConfig = resolveManagerConfig(payload);
   if (!runtimeConfig.apiKey) {
+    await settleAutoTurnBestEffort();
     throw new Error("MANAGER_AGENT_API_KEY or BLUEPRINT_DEEPSEEK_API_KEY is not configured.");
   }
   const model = resolveModel(runtimeConfig);
   if (!model) {
+    await settleAutoTurnBestEffort();
     throw new Error(`Manager model not found: provider=${runtimeConfig.provider}, model=${runtimeConfig.model}`);
   }
   const events = [];
@@ -3196,16 +3212,21 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
   const modelContext = buildSessionContext(buildSessionEntries(payload.session_messages || [], runtimeConfig));
   let initialMessages = modelContext.messages.length ? modelContext.messages : normalizeHistory(payload.messages);
   if (payload.session_messages?.length) {
-    const compaction = await maybeCompactSessionHistory({
-      sessionMessages: payload.session_messages,
-      model,
-      thinkingEffort: payload.thinking_effort,
-      emitEvent: emit,
-      signal: externalAbortSignal,
-      auto: true,
-      runtimeConfig,
-    });
-    initialMessages = compaction.contextMessages;
+    try {
+      const compaction = await maybeCompactSessionHistory({
+        sessionMessages: payload.session_messages,
+        model,
+        thinkingEffort: payload.thinking_effort,
+        emitEvent: emit,
+        signal: externalAbortSignal,
+        auto: true,
+        runtimeConfig,
+      });
+      initialMessages = compaction.contextMessages;
+    } catch (compactionError) {
+      await settleAutoTurnBestEffort();
+      throw compactionError;
+    }
   }
   const toolControl = createTools(payload, runtimeConfig);
   const agent = new Agent({
@@ -3407,6 +3428,14 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
   abort.addEventListener("abort", () => agent.abort(), { once: true });
   try {
     await run;
+  } catch (runError) {
+    clearTimeout(timeoutId);
+    clearInterval(waitLogId);
+    if (heartbeatId) {
+      clearInterval(heartbeatId);
+    }
+    await settleAutoTurnBestEffort();
+    throw runError;
   } finally {
     clearTimeout(timeoutId);
     clearInterval(waitLogId);
@@ -3442,6 +3471,7 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
       error: finalAssistantMessage.errorMessage || `Manager agent stopped with ${stopReason}`,
       event_count: events.length,
     });
+    await settleAutoTurnBestEffort();
     throw new Error(finalAssistantMessage.errorMessage || `Manager agent stopped with ${stopReason}`);
   }
   if (!text) {
@@ -3452,18 +3482,10 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
       error: "Manager agent returned an empty response.",
       event_count: events.length,
     });
+    await settleAutoTurnBestEffort();
     throw new Error("Manager agent returned an empty response.");
   }
-  if (payload.auto_mode?.enabled && payload.session_id && !payload.auto_mode?.btw_mode) {
-    await notifyAutoTurnSettled(
-      payload.backend_api_base_url,
-      payload.internal_tool_token,
-      payload.project_id,
-      payload.session_id,
-      Boolean(turnControl.async_boundary?.active),
-      externalAbortSignal,
-    );
-  }
+  await settleAutoTurnBestEffort(Boolean(turnControl.async_boundary?.active));
   logManagerEvent("run_done", {
     run_id: runId,
     project_id: projectId,

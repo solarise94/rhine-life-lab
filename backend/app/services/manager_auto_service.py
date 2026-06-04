@@ -60,6 +60,37 @@ class ManagerAutoService:
     def set_chat_stream_relay(self, relay: ChatStreamRelay) -> None:
         self._chat_stream_relay = relay
 
+    def reconcile_stale_wake_in_flight(self) -> list[str]:
+        """Clear wake_in_flight for all projects on backend startup.
+
+        The dispatch thread is gone after a restart, so any persisted
+        wake_in_flight=True is stale.  Clearing it allows the next
+        evaluate_workboard_and_maybe_signal to re-dispatch.
+        Also rolls back last_notified_revision so the fuel_revision >
+        last_notified_revision gate passes.
+        """
+        cleared: list[str] = []
+        for project in self.project_service.list_projects():
+            project_id = project.project_id
+            lock = self.project_service.lock_for(project_id)
+            with lock:
+                store = self.project_service.graph_store(project_id)
+                try:
+                    graph = store.load_graph()
+                except Exception:
+                    continue
+                state = ManagerAutoState.model_validate(graph.metadata.get("manager_auto") or {})
+                if not state.wake_in_flight:
+                    continue
+                state.wake_in_flight = False
+                if state.last_notified_revision >= state.fuel_revision and state.fuel_revision > 0:
+                    state.last_notified_revision = state.fuel_revision - 1
+                graph.metadata["manager_auto"] = state.model_dump()
+                store.save_graph(graph)
+            cleared.append(project_id)
+            logger.info("Cleared stale wake_in_flight for project=%s", project_id)
+        return cleared
+
     # ── state access ──────────────────────────────────────────────
 
     def get_state(self, project_id: str) -> ManagerAutoState:
@@ -164,6 +195,14 @@ class ManagerAutoService:
                 next_state.finished_at = None
                 next_state.stop_reason = None
                 next_state.stop_message = None
+            else:
+                # Re-enable with same scope: clear wake_in_flight so a fresh
+                # evaluate can dispatch.  The prior dispatch thread is either
+                # done or lost (restart / agent error).
+                next_state.wake_in_flight = False
+                next_state.completion_notified = False
+                if next_state.last_notified_revision >= next_state.fuel_revision and next_state.fuel_revision > 0:
+                    next_state.last_notified_revision = next_state.fuel_revision - 1
             next_state.started_at = next_state.started_at or now
             next_state.stopped_at = None
             next_state.active_run_id = None

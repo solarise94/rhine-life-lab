@@ -18,7 +18,9 @@ def initialize_runtime_services() -> None:
     # to avoid circular dependency through ChatSessionService.
     get_manager_auto_service()
     inject_wake_dispatch()
+    get_manager_auto_service().reconcile_stale_wake_in_flight()
     get_runtime_dependency_job_service().reconcile_orphaned_active_jobs()
+    get_worker_service().flush_reconciled_run_notifications()
 
 
 @asynccontextmanager

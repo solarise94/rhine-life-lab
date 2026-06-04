@@ -167,6 +167,7 @@ class WorkerService:
         self._event_buffers: dict[tuple[str, str], list[RunEvent]] = {}
         self._event_sequences: dict[tuple[str, str], int] = {}
         self._execution_locks_guard = Lock()
+        self._reconciled_run_ids: list[tuple[str, str]] = []
         self._reconcile_active_runs()
 
     def _terminate_process_group(self, run_id: str, process: subprocess.Popen[str]) -> None:
@@ -3016,6 +3017,7 @@ class WorkerService:
                     continue
                 card_map = {card.card_id: card for card in cards}
                 changed = False
+                reconciled_run_ids: list[str] = []
                 for run in graph.runs:
                     if run.status not in {"queued", "running", "reviewing"}:
                         continue
@@ -3048,11 +3050,27 @@ class WorkerService:
                         )
                     )
                     store.save_run_events(run.run_id, events)
+                    self._update_background_task_for_run(project_id, run.run_id, run.task_id, "failed", run.summary)
+                    reconciled_run_ids.append(run.run_id)
                     changed = True
                 if changed:
                     ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
                     store.save_graph(graph)
                     store.save_cards(cards)
+            for run_id in reconciled_run_ids:
+                self._reconciled_run_ids.append((project_id, run_id))
+
+    def flush_reconciled_run_notifications(self) -> list[tuple[str, str]]:
+        """Send terminal notifications for runs reconciled during startup.
+
+        Must be called AFTER inject_wake_dispatch() so that the wake
+        dispatch pathway is fully wired.
+        """
+        pending = self._reconciled_run_ids[:]
+        self._reconciled_run_ids.clear()
+        for project_id, run_id in pending:
+            self._notify_background_terminal(project_id, run_id=run_id)
+        return pending
 
     @staticmethod
     def _default_output_path_hint(
