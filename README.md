@@ -66,7 +66,7 @@ npm -v
 
 直接把下面这段 prompt 发给你已经安装好的cli：
 ```text
-请登录 GitHub 并拉取私有仓库 https://github.com/solarise94/rhine-life-lab ，然后阅读 docs/for_agent_install.md，严格按安装指南完成环境探查、依赖解决、项目部署、配置、烟雾测试和安装总结。
+请拉取仓库 https://github.com/solarise94/rhine-life-lab ，然后阅读 docs/for_agent_install.md，严格按安装指南完成环境探查、依赖解决、项目部署、配置、烟雾测试和安装总结。
 ```
 
 ##  落后的本地安装方式
