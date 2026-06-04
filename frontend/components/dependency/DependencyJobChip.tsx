@@ -8,9 +8,10 @@ const DISMISS_AFTER_MS = 2400;
 
 interface DependencyJobChipProps {
   projectId: string;
+  className?: string;
 }
 
-export function DependencyJobChip({ projectId }: DependencyJobChipProps) {
+export function DependencyJobChip({ projectId, className }: DependencyJobChipProps) {
   const jobs = useWorkspaceUiStore(
     (s) => s.dependencyJobsByProject[projectId] ?? EMPTY_DEPENDENCY_JOBS
   );
@@ -122,7 +123,7 @@ export function DependencyJobChip({ projectId }: DependencyJobChipProps) {
   if (!chip) return null;
 
   return (
-    <div className={`dependency-chip ${chip.variant}`}>
+    <div className={`dependency-chip ${chip.variant}${className ? ` ${className}` : ""}`}>
       {chip.icon}
       <span>{chip.text}</span>
     </div>

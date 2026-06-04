@@ -790,7 +790,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           />
         ) : null}
         {notice ? <div className="notice-panel notice-toast">{notice}</div> : null}
-        <DependencyJobChip projectId={projectId} />
+        {isMobileWorkspace ? <DependencyJobChip projectId={projectId} className="floating" /> : null}
         {/* Desktop */}
         {!isMobileWorkspace ? (
         <div className="desktop-content">

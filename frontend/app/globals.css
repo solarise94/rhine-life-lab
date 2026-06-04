@@ -3963,3 +3963,20 @@ button {
 .dependency-chip .spinning {
   animation: spin 1s linear infinite;
 }
+
+/* SideNav anchored variant — sits above the Manager AI online indicator */
+.dependency-chip.in-sidenav {
+  position: relative;
+  left: auto;
+  bottom: auto;
+  transform: none;
+  width: 100%;
+  margin-bottom: 12px;
+  justify-content: center;
+  font-size: 12px;
+  padding: 8px 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+

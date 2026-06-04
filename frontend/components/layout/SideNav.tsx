@@ -22,6 +22,22 @@ import { useChatSessions, useProjects } from "@/lib/hooks";
 import { queryKeys } from "@/lib/query-keys";
 import { ScriptPreference, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 import { ChatSessionSummary, ManagerAutoState, PythonRuntime, RRuntime } from "@/lib/types";
+import { DependencyJobChip } from "@/components/dependency/DependencyJobChip";
+
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(() =>
+    typeof window === "undefined" ? false : window.matchMedia(query).matches,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const media = window.matchMedia(query);
+    const handleChange = () => setMatches(media.matches);
+    handleChange();
+    media.addEventListener("change", handleChange);
+    return () => media.removeEventListener("change", handleChange);
+  }, [query]);
+  return matches;
+}
 
 const primary = [
   { href: "results", label: "结果库", icon: BarChart3 },
@@ -79,6 +95,7 @@ export function SideNav({
   onSelectGlobalRRuntime?: (runtime: string) => void;
   onSelectScriptPreference?: (preference: ScriptPreference) => void;
 }) {
+  const isMobile = useMediaQuery("(max-width: 1100px)");
   const router = useRouter();
   const queryClient = useQueryClient();
   const sessionsQuery = useChatSessions(projectId, {
@@ -344,6 +361,7 @@ export function SideNav({
       </div>
 
       <div style={{ marginTop: "auto", paddingTop: 20 }}>
+        {!isMobile ? <DependencyJobChip projectId={projectId} className="in-sidenav" /> : null}
         <div
           style={{
             padding: "10px 12px",
