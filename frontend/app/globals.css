@@ -1987,14 +1987,14 @@ button {
 }
 
 .manager-composer-shell {
-  position: sticky;
-  bottom: 0;
+  position: relative;
   z-index: 3;
-  margin-top: -72px;
-  padding: 56px 20px 18px;
+  margin-top: 0;
+  padding: 12px 20px 18px;
   display: grid;
   gap: 0;
-  background: transparent;
+  border-top: 1px solid rgba(226, 232, 240, 0.72);
+  background: linear-gradient(180deg, rgba(249, 250, 251, 0.72), rgba(249, 250, 251, 0.96));
 }
 
 .manager-slash-hint {
@@ -3733,8 +3733,7 @@ button {
   }
 
   .manager-composer-shell {
-    margin-top: -60px;
-    padding: 46px 14px 14px;
+    padding: 12px 14px 14px;
   }
 
   .mention-menu {
@@ -3979,4 +3978,3 @@ button {
   overflow-wrap: anywhere;
   text-align: center;
 }
-
