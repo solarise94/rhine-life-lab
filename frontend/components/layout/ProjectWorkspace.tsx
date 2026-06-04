@@ -28,6 +28,7 @@ import { useReportViewStore } from "@/lib/stores/report-view-store";
 import { useResultsViewStore } from "@/lib/stores/results-view-store";
 import {
   EMPTY_ARTIFACT_PREVIEW_STATE,
+  EMPTY_DEPENDENCY_JOBS,
   EMPTY_SELECTED_RUNTIME_BY_CARD,
   EMPTY_SELECTED_WORKER_BY_CARD,
   EMPTY_SELECTED_PROFILE_BY_CARD,
@@ -139,7 +140,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const setArtifactPreviewError = useWorkspaceUiStore((s) => s.setArtifactPreviewError);
   const addAttachment = useWorkspaceUiStore((s) => s.addAttachment);
   const setDraftMessage = useWorkspaceUiStore((s) => s.setDraftMessage);
-  const dependencyJobs = useWorkspaceUiStore((s) => s.dependencyJobsByProject[projectId] ?? {});
+  const dependencyJobs = useWorkspaceUiStore((s) => s.dependencyJobsByProject[projectId] ?? EMPTY_DEPENDENCY_JOBS);
   const registerDependencyJob = useWorkspaceUiStore((s) => s.registerDependencyJob);
   const updateDependencyJob = useWorkspaceUiStore((s) => s.updateDependencyJob);
   const removeDependencyJob = useWorkspaceUiStore((s) => s.removeDependencyJob);

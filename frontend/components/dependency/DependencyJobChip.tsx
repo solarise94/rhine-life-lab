@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import { Loader2, CheckCircle2, AlertCircle } from "lucide-react";
-import { useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
+import { EMPTY_DEPENDENCY_JOBS, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 
 const DISMISS_AFTER_MS = 2400;
 
@@ -12,7 +12,7 @@ interface DependencyJobChipProps {
 
 export function DependencyJobChip({ projectId }: DependencyJobChipProps) {
   const jobs = useWorkspaceUiStore(
-    (s) => s.dependencyJobsByProject[projectId] ?? {}
+    (s) => s.dependencyJobsByProject[projectId] ?? EMPTY_DEPENDENCY_JOBS
   );
   const updateDependencyJob = useWorkspaceUiStore((s) => s.updateDependencyJob);
   const removeDependencyJob = useWorkspaceUiStore((s) => s.removeDependencyJob);
