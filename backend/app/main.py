@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import advanced, app_settings, chat, chat_sessions, diagnostics, executor_profiles, files, library, manager_auto, manager_tools, project_events, projects, report, results, runs
-from app.api.deps import get_app_config_service, get_manager_auto_service, get_worker_service, inject_wake_dispatch
+from app.api.deps import get_app_config_service, get_manager_auto_service, get_runtime_dependency_job_service, get_worker_service, inject_wake_dispatch
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -18,6 +18,7 @@ def initialize_runtime_services() -> None:
     # to avoid circular dependency through ChatSessionService.
     get_manager_auto_service()
     inject_wake_dispatch()
+    get_runtime_dependency_job_service().reconcile_orphaned_active_jobs()
 
 
 @asynccontextmanager

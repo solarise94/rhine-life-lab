@@ -258,6 +258,8 @@ class AutoEpisodeFlowTest(unittest.TestCase):
         self.assertEqual(state.state, "complete")
         self.assertIsNotNone(payload)
         self.assertEqual(payload["kind"], "complete_evaluate")
+        self.assertIn("上传数据探索目标", payload["prompt"])
+        self.assertIn("不要因为没有 ready_to_start 就直接结束", payload["prompt"])
         self.assertTrue(state.completion_notified)
 
         # 5. Finish episode

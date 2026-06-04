@@ -24,6 +24,18 @@ from app.services.utils import utc_now
 logger = logging.getLogger(__name__)
 
 
+COMPLETE_EVALUATE_PROMPT = (
+    "Auto 收口检查：当前 workboard 没有可直接启动的 wake fuel，这只表示后台队列暂时清空，"
+    "不等于用户目标已经完成。先调用 get_background_workboard，再用 inspect_project_summary / find_assets "
+    "核对目标、上传数据、已有 cards、completed 产物和 ready_to_start 状态。"
+    "如果这是新项目或上传数据探索目标，且没有合适的探索 card，请创建一个小的探索 card 并启动它；"
+    "如果最近完成的探索产物没有下游 card，但目标仍需要继续，请基于新产物创建后续 planned card，"
+    "必要时再通过 workboard promote/claim/submit 启动。"
+    "只有确认目标已满足、没有需要创建或启动的后续 card 时，才调用 finish_auto_episode，并在 complete_message "
+    "里总结完成内容、主要输出和剩余 caveat。不要因为没有 ready_to_start 就直接结束。"
+)
+
+
 @dataclass
 class ManagerAutoView:
     state: ManagerAutoState
@@ -504,7 +516,7 @@ class ManagerAutoService:
 
                 wake_payload = {
                     "kind": "complete_evaluate",
-                    "prompt": "当前任务似乎已完成，请回顾任务总结情况。如果确认完成，请调用 finish_auto_episode；如果仍需继续，请调整 card 或加入新的 todo。",
+                    "prompt": COMPLETE_EVALUATE_PROMPT,
                     "fuel_revision": state.fuel_revision,
                 }
                 state.completion_notified = True

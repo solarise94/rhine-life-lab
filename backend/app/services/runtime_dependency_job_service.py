@@ -230,6 +230,11 @@ class RuntimeDependencyJobService:
                     job.command_preview = kwargs["command_preview"]
                 if "log_path" in kwargs:
                     job.log_path = kwargs["log_path"]
+                self.background_task_service.update_task(
+                    job.project_id,
+                    job.task_id,
+                    adapter={"kind": "dependency_installer", "metadata": {"phase": job.phase, "job_id": job.job_id}},
+                )
                 self._persist_project_jobs_locked(job.project_id)
                 self._emit_project_event(job)
         return callback
@@ -308,12 +313,13 @@ class RuntimeDependencyJobService:
     def _jobs_path(self, project_id: str):
         return self.project_service.project_path(project_id) / "chat" / "runtime_dependency_jobs.json"
 
-    def _load_project_jobs_locked(self, project_id: str) -> None:
+    def _load_project_jobs_locked(self, project_id: str) -> list[RuntimeDependencyJob]:
         now = utc_now()
         items = read_json(self._jobs_path(project_id), [])
         if not isinstance(items, list):
-            return
+            return []
         changed = False
+        terminalized: list[RuntimeDependencyJob] = []
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -358,6 +364,7 @@ class RuntimeDependencyJobService:
                 job.error = "Runtime dependency job was interrupted by backend restart."
                 job.finished_at = job.finished_at or now
                 changed = True
+                terminalized.append(job)
                 self.background_task_service.update_task(
                     job.project_id,
                     job.task_id,
@@ -368,6 +375,49 @@ class RuntimeDependencyJobService:
             self.jobs[job.job_id] = job
         if changed:
             self._persist_project_jobs_locked(project_id)
+        return terminalized
+
+    def reconcile_orphaned_active_jobs(self) -> list[str]:
+        """Mark persisted active dependency jobs without a live Future as interrupted."""
+        terminalized: list[RuntimeDependencyJob] = []
+        now = utc_now()
+        with self.lock:
+            for project in self.project_service.list_projects():
+                project_id = project.project_id
+                before = len(terminalized)
+                terminalized.extend(self._load_project_jobs_locked(project_id))
+                for job in list(self.jobs.values()):
+                    if job.project_id != project_id:
+                        continue
+                    if job.status not in {"queued", "running", "waiting", "launching"}:
+                        continue
+                    if job.future is not None:
+                        continue
+                    job.status = "failed"
+                    job.phase = "failed"
+                    job.error = "Runtime dependency job was interrupted by backend restart."
+                    job.finished_at = job.finished_at or now
+                    terminalized.append(job)
+                    self.background_task_service.update_task(
+                        job.project_id,
+                        job.task_id,
+                        status="interrupted",
+                        finished_at=job.finished_at,
+                        error=job.error,
+                        adapter={"kind": "dependency_installer", "metadata": {"phase": job.phase, "job_id": job.job_id}},
+                    )
+                if len(terminalized) > before:
+                    self._persist_project_jobs_locked(project_id)
+        seen: set[str] = set()
+        terminalized_ids: list[str] = []
+        for job in terminalized:
+            if job.job_id in seen:
+                continue
+            seen.add(job.job_id)
+            terminalized_ids.append(job.job_id)
+            self._emit_project_event(job)
+            self._notify_background_terminal(job.project_id, job_id=job.job_id)
+        return terminalized_ids
 
     def _persist_project_jobs_locked(self, project_id: str) -> None:
         project_jobs = [

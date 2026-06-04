@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from app.services.background_task_service import BackgroundTaskService
@@ -22,6 +23,7 @@ class RuntimeDependencyIntegrationTest(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="blueprint-re-dep-test-")
         self.project_service = MagicMock(spec=ProjectService)
         self.project_service.project_path.return_value = Path(self.tmpdir)
+        self.project_service.list_projects.return_value = [SimpleNamespace(project_id="test-project")]
         self.background_task_service = MagicMock(spec=BackgroundTaskService)
         self.background_task_service.create_task.return_value = MagicMock(
             task_id="bgtask_test", affected=MagicMock(card_ids=[], job_ids=[])
@@ -84,6 +86,64 @@ class RuntimeDependencyIntegrationTest(unittest.TestCase):
         self.assertEqual(payload["fallback_available"], ["pip"])
         self.assertEqual(payload["retry_hint"], "do_not_retry_same_conda_request")
         self.assertIn("dedupe_key", payload)
+
+    def test_startup_reconcile_marks_orphaned_active_job_interrupted(self):
+        """Persisted active dependency jobs from a previous process must not block forever."""
+        self._write_jobs([
+            {
+                "job_id": "depjob_orphan",
+                "project_id": "test-project",
+                "task_id": "bgtask_orphan",
+                "status": "running",
+                "phase": "running_subprocess",
+                "created_at": "2026-06-01T00:00:00Z",
+                "started_at": "2026-06-01T00:00:01Z",
+                "payload": {
+                    "ecosystem": "R",
+                    "runtime": "R_env",
+                    "packages": ["edgeR"],
+                    "source": {"card_id": "card_a"},
+                },
+            }
+        ])
+
+        terminalized = self.job_service.reconcile_orphaned_active_jobs()
+
+        self.assertEqual(terminalized, ["depjob_orphan"])
+        reloaded = json.loads(self.jobs_path.read_text(encoding="utf-8"))
+        self.assertEqual(reloaded[0]["status"], "failed")
+        self.assertEqual(reloaded[0]["phase"], "failed")
+        self.assertIn("interrupted by backend restart", reloaded[0]["error"])
+        self.background_task_service.update_task.assert_any_call(
+            "test-project",
+            "bgtask_orphan",
+            status="interrupted",
+            finished_at=reloaded[0]["finished_at"],
+            error=reloaded[0]["error"],
+        )
+
+    def test_phase_callback_updates_background_task_metadata(self):
+        """Job phase updates must be visible through background_tasks.json consumers."""
+        job = self.job_service.submit(
+            "test-project",
+            {
+                "ecosystem": "R",
+                "runtime": "R_env",
+                "packages": ["edgeR"],
+            },
+            handler=lambda _pid, _payload, phase_callback=None: (
+                phase_callback("running_subprocess", command_preview=["mamba", "install", "bioconductor-edger"])
+                or {"ok": True}
+            ),
+        )
+        if job.future:
+            job.future.result(timeout=5)
+
+        self.background_task_service.update_task.assert_any_call(
+            "test-project",
+            "bgtask_test",
+            adapter={"kind": "dependency_installer", "metadata": {"phase": "running_subprocess", "job_id": job.job_id}},
+        )
 
     def test_flow_service_includes_full_runtime_dependency_blocker(self):
         """FlowService work order item includes enriched blocker fields.
