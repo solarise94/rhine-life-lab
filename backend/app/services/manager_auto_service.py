@@ -83,6 +83,7 @@ class ManagerAutoService:
                 if not state.wake_in_flight:
                     continue
                 state.wake_in_flight = False
+                state.last_frontier_fingerprint = ""
                 if state.last_notified_revision >= state.fuel_revision and state.fuel_revision > 0:
                     state.last_notified_revision = state.fuel_revision - 1
                 graph.metadata["manager_auto"] = state.model_dump()
@@ -191,6 +192,7 @@ class ManagerAutoService:
                 next_state.last_notified_revision = 0
                 next_state.wake_in_flight = False
                 next_state.completion_notified = False
+                next_state.last_frontier_fingerprint = ""
                 next_state.wake_window = []
                 next_state.finished_at = None
                 next_state.stop_reason = None
@@ -201,6 +203,7 @@ class ManagerAutoService:
                 # done or lost (restart / agent error).
                 next_state.wake_in_flight = False
                 next_state.completion_notified = False
+                next_state.last_frontier_fingerprint = ""
                 if next_state.last_notified_revision >= next_state.fuel_revision and next_state.fuel_revision > 0:
                     next_state.last_notified_revision = next_state.fuel_revision - 1
             next_state.started_at = next_state.started_at or now
@@ -396,7 +399,12 @@ class ManagerAutoService:
         view = self.get_view(project_id, session_id)
         if not view.is_owner:
             raise HTTPException(status_code=409, detail="Only the auto owner session may settle an auto turn.")
-        # Doc 42: Clear wake_in_flight on turn settlement
+        # Doc 42: Clear wake_in_flight on turn settlement.
+        # Do NOT clear last_frontier_fingerprint here — if the frontier was
+        # consumed, its fingerprint will naturally change on next evaluation.
+        # If the Manager intentionally didn't start ready cards, we respect that.
+        # Fingerprint is only cleared on failure recovery paths (startup reconcile,
+        # re-enable) where the prior wake was lost.
         self.set_runtime_state(project_id, wake_in_flight=False, increment_chain=True)
         state, wake_payload = self.evaluate_workboard_and_maybe_signal(project_id, session_id, from_turn_settlement=async_boundary)
         if wake_payload is not None:
@@ -429,13 +437,13 @@ class ManagerAutoService:
 
     # ── state derivation (Doc 42 Section 4) ───────────────────────
 
-    def _derive_state(self, state: ManagerAutoState, fuel: WorkboardFuelSnapshot) -> str:
+    def _derive_state(self, state: ManagerAutoState, fuel: WorkboardFuelSnapshot, *, has_actionable_frontier: bool = False) -> str:
         """Derive episode state from has_running + has_wake_fuel."""
         if state.state == "finished":
             return "finished"
 
         has_running = fuel.active_run_count > 0 or bool(state.active_job_id)
-        has_wake_fuel = (fuel.todo_count + fuel.complete_signal_count + fuel.block_signal_count) > 0
+        has_wake_fuel = (fuel.todo_count + fuel.complete_signal_count + fuel.block_signal_count) > 0 or has_actionable_frontier
 
         # If we were in complete and fuel appeared, exit complete back to pending_wake
         if state.state == "complete" and has_wake_fuel:
@@ -465,8 +473,10 @@ class ManagerAutoService:
         the wake payload via _dispatch_wake.
         """
         fuel = WorkboardFuelSnapshot()
+        signal_snap: dict | None = None
         if self.background_workboard_service is not None:
             fuel = self.background_workboard_service.get_wake_fuel(project_id)
+            signal_snap = self.background_workboard_service.signal_snapshot(project_id)
 
         lock = self.project_service.lock_for(project_id)
         with lock:
@@ -493,11 +503,27 @@ class ManagerAutoService:
 
             # ── derive new state ──
             old_state = state.state
-            new_state_value = self._derive_state(state, fuel)
+            actionability = (signal_snap or {}).get("actionability") or {}
+            has_actionable_frontier = bool(actionability.get("has_startable_frontier"))
+            new_state_value = self._derive_state(state, fuel, has_actionable_frontier=has_actionable_frontier)
             state.state = new_state_value  # type: ignore[assignment]
 
             # ── emit wake events based on state transitions ──
             wake_payload = None
+
+            # If frontier-driven pending_wake but fuel_revision hasn't advanced,
+            # bump it so the revision gate passes — but only if the frontier
+            # fingerprint actually changed (prevents duplicate wakes for same frontier).
+            current_fingerprint = (signal_snap or {}).get("fingerprint") or ""
+            if (
+                state.state == "pending_wake"
+                and has_actionable_frontier
+                and state.fuel_revision <= state.last_notified_revision
+                and current_fingerprint
+                and current_fingerprint != state.last_frontier_fingerprint
+            ):
+                state.fuel_revision += 1
+                state.last_frontier_fingerprint = current_fingerprint
 
             # workboard_evaluate: entering pending_wake
             if (

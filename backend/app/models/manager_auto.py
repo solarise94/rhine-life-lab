@@ -41,6 +41,7 @@ class ManagerAutoState(BaseModel):
     last_notified_revision: int = 0
     wake_in_flight: bool = False
     completion_notified: bool = False
+    last_frontier_fingerprint: str = ""
     # Doc 42 risk-control fields (Section 7)
     wake_window: list[str] = Field(default_factory=list)
     finished_at: str | None = None
