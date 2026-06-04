@@ -2,7 +2,7 @@
 
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from app.models.background import BackgroundWorkboardState, WorkboardItemRecord
 from app.models.cards import Card
@@ -378,6 +378,106 @@ class AutoEpisodeFlowTest(unittest.TestCase):
         self.assertEqual(len(state.items), 2)
         self.assertIn("fuel_signal:c-cycle:accepted", state.items)
         self.assertIn("fuel_signal:c-cycle:rejected", state.items)
+
+    def _make_auto_svc_with_ready_frontier(self):
+        """Helper: auto service with a ready_to_start card and no signal fuel."""
+        from app.services.manager_auto_service import ManagerAutoService
+        from app.services.project_event_service import ProjectEventService
+
+        wb = self._make_wb()
+        ps = wb.project_service
+        pes = MagicMock(spec=ProjectEventService)
+        relay = MagicMock()
+
+        auto_svc = ManagerAutoService(ps, pes, wb)
+        auto_svc.set_chat_stream_relay(relay)
+        wb.set_fuel_change_callback(lambda pid: auto_svc.increment_fuel_revision(pid))
+
+        session_id = "sess-frontier"
+        auto_svc.enable("test-episode", session_id, scope_objective="frontier test")
+
+        # Set up a ready_to_start card (planned card with can_start=True via FlowService mock)
+        card = Card(
+            card_id="c-ready", title="Ready Card", status="planned",
+            card_type="module", summary="ready summary", step=1,
+        )
+        self._set_cards(wb, [card])
+
+        # Patch _derived_items to return a ready frontier item
+        ready_item = WorkboardItemRecord(
+            item_id="ready_card:c-ready",
+            lane="ready_to_start",
+            kind="ready_card",
+            title="Ready Card",
+            card_id="c-ready",
+            status="pending",
+            payload={"safe_to_batch_start": True},
+            updated_at=utc_now(),
+        )
+        original_derived = wb._derived_items
+
+        def patched_derived(project_id, state=None):
+            result = original_derived(project_id, state=state)
+            result["ready_card:c-ready"] = ready_item
+            return result
+
+        wb._derived_items = patched_derived
+
+        return auto_svc, wb, session_id
+
+    def test_ready_to_start_frontier_triggers_wake_without_signal_fuel(self):
+        """ready_to_start frontier with no signal fuel still triggers a workboard_evaluate wake."""
+        auto_svc, wb, session_id = self._make_auto_svc_with_ready_frontier()
+
+        state, payload = auto_svc.evaluate_workboard_and_maybe_signal(
+            "test-episode", session_id
+        )
+        self.assertEqual(state.state, "pending_wake")
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["kind"], "workboard_evaluate")
+        self.assertTrue(state.wake_in_flight)
+
+    def test_same_frontier_does_not_duplicate_wake_after_settle(self):
+        """Same ready_to_start frontier does not re-wake after normal turn settlement."""
+        auto_svc, wb, session_id = self._make_auto_svc_with_ready_frontier()
+
+        # First wake
+        state, payload = auto_svc.evaluate_workboard_and_maybe_signal(
+            "test-episode", session_id
+        )
+        self.assertIsNotNone(payload)
+
+        # Settle turn normally
+        auto_svc.notify_turn_settled("test-episode", session_id, async_boundary=False)
+
+        # Evaluate again with same frontier — should NOT produce a new wake
+        state2, payload2 = auto_svc.evaluate_workboard_and_maybe_signal(
+            "test-episode", session_id
+        )
+        self.assertIsNone(payload2, "Same frontier should not produce duplicate wake after normal settle")
+
+    def test_re_enable_clears_fingerprint_allowing_same_frontier_to_rewake(self):
+        """Re-enable (same scope) clears fingerprint so same frontier can retry."""
+        auto_svc, wb, session_id = self._make_auto_svc_with_ready_frontier()
+
+        # First wake
+        state, payload = auto_svc.evaluate_workboard_and_maybe_signal(
+            "test-episode", session_id
+        )
+        self.assertIsNotNone(payload)
+
+        # Settle turn
+        auto_svc.notify_turn_settled("test-episode", session_id, async_boundary=False)
+
+        # Re-enable same scope (simulates user "继续推进")
+        auto_svc.enable("test-episode", session_id, scope_objective="frontier test")
+
+        # Evaluate again — should produce wake because fingerprint was cleared
+        state2, payload2 = auto_svc.evaluate_workboard_and_maybe_signal(
+            "test-episode", session_id
+        )
+        self.assertIsNotNone(payload2, "Same frontier should re-wake after re-enable clears fingerprint")
+        self.assertEqual(payload2["kind"], "workboard_evaluate")
 
 
 if __name__ == "__main__":
