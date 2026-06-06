@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import mimetypes
+import time
 from pathlib import Path
 
 from fastapi.responses import FileResponse
@@ -8,6 +10,12 @@ from fastapi.responses import FileResponse
 from app.models.graph import Asset
 from app.services.project_service import ProjectService
 from app.services.utils import resolve_within
+
+
+ORPHAN_PART_GRACE_SECONDS = 60
+ORPHAN_FINAL_GRACE_SECONDS = 600
+
+logger = logging.getLogger(__name__)
 
 
 MAX_EXECUTION_FILE_ENTRIES = 200
@@ -100,6 +108,81 @@ class ProjectFileService:
             if path.is_file() and not same_path_asset_exists:
                 path.unlink()
             return asset
+
+    def reconcile_project_uploads(self, project_id: str) -> dict:
+        """Remove orphan upload files from disk that are not registered in the graph.
+
+        This method is intended for backend startup only. If repurposed for online
+        cleanup, grace semantics must be revisited.
+
+        If graph loading fails, this method may still remove stale ``.part`` files,
+        but will not remove final upload files based on an empty registration set.
+        """
+        removed: list[str] = []
+        errors = 0
+        with self.project_service.lock_for(project_id):
+            project_root = self.project_service.project_path(project_id)
+            uploads_dir = project_root / "data" / "uploads"
+            if not uploads_dir.exists():
+                return {"removed": removed, "errors": errors}
+
+            # Compare via project-relative strings (the same form stored in
+            # asset.path). Resolved absolute paths would be sensitive to
+            # symlinks / bind mounts / root renames and could cause reconcile
+            # to delete legitimately registered uploads.
+            registered_paths: set[str] = set()
+            graph_load_ok = False
+            try:
+                store = self.project_service.graph_store(project_id)
+                graph = store.load_graph()
+                for asset in graph.assets:
+                    if self._is_session_upload(asset):
+                        registered_paths.add(asset.path)
+                graph_load_ok = True
+            except Exception:
+                logger.exception("reconcile_project_uploads: graph load failed for project=%s", project_id)
+                errors += 1
+
+            now = time.time()
+            for path in uploads_dir.iterdir():
+                if not path.is_file():
+                    continue
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+
+                if path.suffix == ".part":
+                    if now - mtime > ORPHAN_PART_GRACE_SECONDS:
+                        try:
+                            path.unlink()
+                            removed.append(path.name)
+                            logger.info("reconcile removed stale part: project=%s file=%s", project_id, path.name)
+                        except OSError:
+                            errors += 1
+                            logger.warning("reconcile failed to remove part: project=%s file=%s", project_id, path.name)
+                    continue
+
+                if not graph_load_ok:
+                    continue
+
+                try:
+                    relative = path.relative_to(project_root).as_posix()
+                except ValueError:
+                    continue
+                if relative in registered_paths:
+                    continue
+
+                if now - mtime > ORPHAN_FINAL_GRACE_SECONDS:
+                    try:
+                        path.unlink()
+                        removed.append(path.name)
+                        logger.info("reconcile removed orphan upload: project=%s file=%s", project_id, path.name)
+                    except OSError:
+                        errors += 1
+                        logger.warning("reconcile failed to remove upload: project=%s file=%s", project_id, path.name)
+
+        return {"removed": removed, "errors": errors}
 
     def get_execution_file_response(self, project_id: str, relative_path: str) -> FileResponse:
         project_root = self.project_service.project_path(project_id)

@@ -1,13 +1,15 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import advanced, app_settings, chat, chat_sessions, diagnostics, executor_profiles, files, library, manager_auto, manager_tools, project_events, projects, report, results, runs
-from app.api.deps import get_app_config_service, get_manager_auto_service, get_runtime_dependency_job_service, get_worker_service, inject_wake_dispatch
+from app.api.deps import get_app_config_service, get_manager_auto_service, get_project_file_service, get_project_service, get_runtime_dependency_job_service, get_worker_service, inject_wake_dispatch
 from app.core.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 def initialize_runtime_services() -> None:
@@ -21,6 +23,21 @@ def initialize_runtime_services() -> None:
     get_manager_auto_service().reconcile_stale_wake_in_flight()
     get_runtime_dependency_job_service().reconcile_orphaned_active_jobs()
     get_worker_service().flush_reconciled_run_notifications()
+
+    project_service = get_project_service()
+    project_file_service = get_project_file_service()
+    for summary in project_service.list_projects():
+        try:
+            result = project_file_service.reconcile_project_uploads(summary.project_id)
+            if result["removed"]:
+                logger.info(
+                    "reconcile_project_uploads: project=%s removed=%d errors=%d",
+                    summary.project_id,
+                    len(result["removed"]),
+                    result["errors"],
+                )
+        except Exception:
+            logger.exception("reconcile_project_uploads failed: project=%s", summary.project_id)
 
 
 @asynccontextmanager

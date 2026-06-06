@@ -2374,12 +2374,24 @@ export function ManagerChatPanel({
             <div className="manager-upload-progress" role="status" aria-live="polite">
               <div className="manager-upload-progress-header">
                 <span className="manager-upload-progress-name">{uploadProgress.fileName}</span>
-                <span className="manager-upload-progress-meta">
-                  {uploadProgress.status === "processing"
-                    ? "处理中"
-                    : uploadProgress.percent == null
-                      ? `上传中 · ${formatUploadSpeed(uploadProgress.speedBytesPerSecond)}`
-                      : `${uploadProgress.percent}% · ${formatUploadSpeed(uploadProgress.speedBytesPerSecond)}`}
+                <span className="manager-upload-progress-controls">
+                  <span className="manager-upload-progress-meta">
+                    {uploadProgress.status === "processing"
+                      ? "处理中"
+                      : uploadProgress.percent == null
+                        ? `上传中 · ${formatUploadSpeed(uploadProgress.speedBytesPerSecond)}`
+                        : `${uploadProgress.percent}% · ${formatUploadSpeed(uploadProgress.speedBytesPerSecond)}`}
+                  </span>
+                  {uploadProgress.status === "uploading" ? (
+                    <button
+                      type="button"
+                      className="manager-upload-progress-cancel"
+                      onClick={() => uploadAbortControllerRef.current?.abort()}
+                      aria-label="取消上传"
+                    >
+                      ✕
+                    </button>
+                  ) : null}
                 </span>
               </div>
               <div className="manager-upload-progress-track" aria-hidden="true">
