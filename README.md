@@ -1,20 +1,8 @@
 # 莱茵生命实验室
 
-`莱茵生命实验室` 是一个面向科研分析项目的本地工作台，把项目、AI Manager、任务卡片、执行器、结果预览和报告整理放到同一套界面里。
+`莱茵生命实验室` 是一个面向科研分析项目的本地工作台，以流程蓝图的方式管理生物信息分析流程，方便对每个步骤进行微调得出准确无误的科学结果。
+相比于线性分析的生物信息分析agent，本项目支持用户在分析的过程中：新开分支、修改图片排版、重复单步计算等等微调工作。
 
-默认执行器是 `pi`。`opencode`、`claude_code`、`codex` 可以接入，但都属于可选兼容路径，不是安装前置条件。
-
-![项目入口界面](docs/images/readme-projects-hero-final.png)
-
-_真实界面截图：本地项目列表页。进入项目后可继续查看会话、卡片、文件和结果。_
-
-![测试项目任务卡片视图](docs/images/readme-demo-tasks.png)
-
-_测试项目内容页：左侧是会话与导航，中间是 Manager 对话区，右侧是卡片与结果摘要。_
-
-![测试项目文件视图](docs/images/readme-demo-files.png)
-
-_测试项目内容页：文件区可以查看数据资产、执行产物，并直接加入聊天上下文。_
 
 ## 核心能力
 
@@ -79,14 +67,19 @@ bash scripts/deploy_user_systemd.sh
 ### 1. 新建项目
 
 打开前端后创建项目，或者直接进入已有项目。
+![项目入口界面](docs/images/readme-projects-hero-final.png)
 
 ### 2. 上传资料
 
 把原始数据、说明文档和参考文件上传到项目里，作为分析输入。
+![测试项目文件视图](docs/images/readme-demo-files.png)
+
 
 ### 3. 告诉 Manager 目标
 
+
 直接在对话框里描述目标，例如：
+![测试项目任务卡片视图](docs/images/readme-demo-tasks.png)
 
 - “帮我做这批样本的差异分析”
 - “先看看这个 count matrix 的结构，再拆成几个分析卡片”
