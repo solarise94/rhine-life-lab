@@ -23,6 +23,9 @@
   --muted: #6e6e73;
   --muted-light: #86868b;
 
+  /* ─── Layout offsets (tune per-device; values are intentional placeholders) ─── */
+  --mobile-workspace-offset: 200px;
+
   /* ─── Semantic colors (vibrant for light bg) ─── */
   --green: #22c55e;
   --green-dark: #16a34a;
@@ -1353,11 +1356,68 @@ button {
   padding: 16px 18px;
   flex: 1;
   overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .stack {
   display: grid;
   gap: 12px;
+}
+
+/* ─── Advanced view: two-stage flex height chain so CardDetailPanel can scroll internally ─── */
+.advanced-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: calc(100vh - 120px);
+  overflow: hidden;
+}
+
+.advanced-content .desktop-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.advanced-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  gap: 12px;
+}
+
+.advanced-view > .panel:first-child {
+  flex: 0 0 auto;
+}
+
+.card-detail-panel-shell {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.card-detail-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.card-detail-panel-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+
+.card-detail-panel-shell > .card-detail-panel {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .muted {
@@ -2448,7 +2508,7 @@ button {
   min-height: 100%;
   height: 100vh;
   overflow: auto;
-  overscroll-behavior-x: contain;
+  overscroll-behavior: contain;
   background-color: #fbfcfd;
 }
 
@@ -2736,6 +2796,7 @@ button {
 .task-specialist-card.active {
   width: 368px;
   min-height: 470px;
+  max-height: min(82vh, 720px);
   transform: translateY(-4px) scale(1.04);
   border-color: var(--blue);
   box-shadow: 0 0 0 1px var(--blue-border), 0 32px 68px rgba(59, 130, 246, 0.22), 0 12px 24px rgba(15, 23, 42, 0.08);
@@ -2996,6 +3057,7 @@ button {
 .task-specialist-card.active .file-bag-container {
   flex: 1;
   max-height: 999px;
+  min-height: 0;
   opacity: 1;
   transform: translateY(0);
   padding-top: 4px;
@@ -3045,6 +3107,7 @@ button {
   flex: 1;
   position: relative;
   overflow: hidden;
+  min-height: 0;
   border-bottom-left-radius: 16px;
   border-bottom-right-radius: 16px;
   background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
@@ -3066,12 +3129,16 @@ button {
   display: flex;
   flex-direction: column;
   background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  overflow: hidden;
+  min-height: 0;
 }
 
 .page-content-scroll {
   flex: 1;
   overflow: auto;
   scrollbar-width: thin;
+  min-height: 0;
+  overscroll-behavior: contain;
 }
 .page-content-scroll::-webkit-scrollbar {
   width: 4px;
@@ -3709,6 +3776,15 @@ button {
 
 .mobile-content {
   display: none;
+}
+
+/* Mobile card detail scroll containment: the card-detail-panel inside
+   mobile-content must have a bounded height so its internal scroll
+   container can actually scroll. The offset accounts for the project
+   header, mobile tab bar, and card stream. Tune --mobile-workspace-offset
+   in :root per device / safe-area. */
+.mobile-content .card-detail-panel {
+  max-height: calc(100vh - var(--mobile-workspace-offset));
 }
 
 @media (max-width: 1100px) {

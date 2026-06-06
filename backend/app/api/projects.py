@@ -57,9 +57,17 @@ def get_project(
     project_service: ProjectService = Depends(get_project_service),
     manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
 ) -> dict:
-    snapshot = project_service.get_project_snapshot(project_id)
+    snapshot = project_service.get_project_snapshot_core(project_id)
     snapshot["manager_auto"] = manager_auto_service.get_state(project_id).model_dump()
     return snapshot
+
+
+@router.get("/{project_id}/environment")
+def get_project_environment(
+    project_id: str,
+    project_service: ProjectService = Depends(get_project_service),
+) -> dict:
+    return project_service.get_project_environment(project_id)
 
 
 @router.get("/{project_id}/runtime-preferences")

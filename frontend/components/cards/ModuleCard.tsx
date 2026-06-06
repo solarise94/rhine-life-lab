@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useRef, useEffect } from "react";
 import {
   CheckCircle2,
   Files,
@@ -112,6 +112,45 @@ export function ModuleCard({
   const collapsedSummary = card.progress_note || card.summary || card.why || "等待执行";
   const attentionCount = workItem?.dependency_attention_count ?? 0;
   const attentionSeverity = workItem?.attention_severity ?? "warning";
+  const paperSlotRef = useRef<HTMLDivElement>(null);
+  const lastWheelSwitchRef = useRef<number>(0);
+  const currentPageRef = useRef(currentPage);
+  const pagesRef = useRef(pages);
+  useEffect(() => { currentPageRef.current = currentPage; }, [currentPage]);
+  useEffect(() => { pagesRef.current = pages; }, [pages]);
+
+  useEffect(() => {
+    const el = paperSlotRef.current;
+    if (!el || !active) return;
+    const handler = (e: WheelEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+
+      const scroller = target.closest(".page-content-scroll") as HTMLElement | null;
+      if (!scroller) return;
+
+      const atTop = scroller.scrollTop <= 0;
+      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
+      const wantDown = e.deltaY > 0;
+      const canScrollInside = (wantDown && !atBottom) || (!wantDown && !atTop);
+      if (canScrollInside) return;
+
+      const pagesArr = pagesRef.current;
+      const idx = pagesArr.indexOf(currentPageRef.current);
+      const nextIdx = wantDown ? idx + 1 : idx - 1;
+      if (nextIdx < 0 || nextIdx >= pagesArr.length) return;
+      if (performance.now() - lastWheelSwitchRef.current < 350) {
+        e.preventDefault();
+        return;
+      }
+
+      e.preventDefault();
+      lastWheelSwitchRef.current = performance.now();
+      setCardPage(projectId, card.card_id, pagesArr[nextIdx]);
+    };
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, [active, projectId, card.card_id, setCardPage]);
 
   function handleDot(page: CardPage, e: React.MouseEvent) {
     e.stopPropagation();
@@ -172,7 +211,7 @@ export function ModuleCard({
           </button>
         </div>
 
-        <div className="file-bag-paper-slot">
+        <div className="file-bag-paper-slot" ref={paperSlotRef}>
           <div className="file-bag-paper-slider file-bag-paper-slider-4" style={{ transform: `translateY(${slideOffset}%)` }}>
             
             {/* ─── Page 1: Specialist (Cover) ─── */}

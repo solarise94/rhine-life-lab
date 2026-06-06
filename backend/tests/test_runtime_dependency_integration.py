@@ -374,5 +374,499 @@ class RuntimeDependencyIntegrationTest(unittest.TestCase):
         self.assertLessEqual(len(payload.get("stderr_tail", "")), 2100)
 
 
+    def test_normal_terminal_chat_receipt_success(self):
+        """Doc 46: terminal job publishes a stable-id chat receipt via upsert_message."""
+        from app.services.project_event_service import ProjectEventService
+
+        chat_svc = MagicMock()
+        events = []
+        event_service = ProjectEventService(self.project_service)
+        event_service._publish = lambda pid, ev: events.append(ev)
+
+        job_service = RuntimeDependencyJobService(
+            self.project_service,
+            project_event_service=event_service,
+            background_task_service=self.background_task_service,
+            chat_session_service=chat_svc,
+        )
+        job = job_service.submit(
+            "test-project",
+            {
+                "ecosystem": "python",
+                "runtime": "python_env",
+                "packages": ["numpy"],
+                "source": {"card_id": "card_1", "session_id": "sess_1"},
+            },
+            handler=lambda _pid, _payload, **kwargs: {"ok": True, "changed": True},
+        )
+        if job.future:
+            job.future.result(timeout=5)
+
+        chat_svc.upsert_message.assert_called_once()
+        call_args = chat_svc.upsert_message.call_args
+        self.assertEqual(call_args[0][0], "test-project")
+        self.assertEqual(call_args[0][1], "sess_1")
+        msg = call_args[0][2]
+        self.assertEqual(msg.id, f"depjob_terminal_{job.job_id}")
+        self.assertEqual(msg.timeline[0].id, f"depjob_terminal_timeline_{job.job_id}")
+        self.assertEqual(msg.content, "依赖安装完成。")
+
+        terminal_events = [e for e in events if e.get("payload", {}).get("job_status") == "succeeded"]
+        self.assertTrue(terminal_events, "Project event should still be emitted")
+
+    def test_normal_terminal_chat_receipt_already_satisfied(self):
+        """Doc 46: no-op install renders the already-satisfied receipt."""
+        chat_svc = MagicMock()
+        job_service = RuntimeDependencyJobService(
+            self.project_service,
+            background_task_service=self.background_task_service,
+            chat_session_service=chat_svc,
+        )
+        job = job_service.submit(
+            "test-project",
+            {
+                "ecosystem": "python",
+                "runtime": "python_env",
+                "packages": ["numpy"],
+                "source": {"card_id": "card_1", "session_id": "sess_1"},
+            },
+            handler=lambda _pid, _payload, **kwargs: {"ok": True, "changed": False},
+        )
+        if job.future:
+            job.future.result(timeout=5)
+
+        msg = chat_svc.upsert_message.call_args[0][2]
+        self.assertEqual(msg.content, "依赖已满足，无需安装。")
+
+    def test_normal_terminal_chat_receipt_failure(self):
+        """Doc 46: failed install renders the failure receipt with error tail."""
+        chat_svc = MagicMock()
+        job_service = RuntimeDependencyJobService(
+            self.project_service,
+            background_task_service=self.background_task_service,
+            chat_session_service=chat_svc,
+        )
+        job = job_service.submit(
+            "test-project",
+            {
+                "ecosystem": "python",
+                "runtime": "python_env",
+                "packages": ["missing_pkg"],
+                "source": {"card_id": "card_1", "session_id": "sess_1"},
+            },
+            handler=lambda _pid, _payload, **kwargs: {
+                "ok": False,
+                "message": "Package not found in channels.",
+            },
+        )
+        if job.future:
+            job.future.result(timeout=5)
+
+        msg = chat_svc.upsert_message.call_args[0][2]
+        self.assertEqual(msg.content, "依赖安装失败：Package not found in channels.")
+
+    def test_reconcile_terminal_chat_receipt_includes_chinese_interrupt(self):
+        """Doc 46: reconcile orphaned job emits Chinese interruption receipt."""
+        from app.services.project_event_service import ProjectEventService
+
+        self._write_jobs([
+            {
+                "job_id": "depjob_orphan",
+                "project_id": "test-project",
+                "task_id": "bgtask_orphan",
+                "status": "running",
+                "phase": "running_subprocess",
+                "created_at": "2026-06-01T00:00:00Z",
+                "started_at": "2026-06-01T00:00:01Z",
+                "payload": {
+                    "ecosystem": "R",
+                    "runtime": "R_env",
+                    "packages": ["edgeR"],
+                    "source": {"card_id": "card_a", "session_id": "sess_reconcile"},
+                },
+            }
+        ])
+
+        chat_svc = MagicMock()
+        events = []
+        event_service = ProjectEventService(self.project_service)
+        event_service._publish = lambda pid, ev: events.append(ev)
+
+        job_service = RuntimeDependencyJobService(
+            self.project_service,
+            project_event_service=event_service,
+            background_task_service=self.background_task_service,
+            chat_session_service=chat_svc,
+        )
+        terminalized = job_service.reconcile_orphaned_active_jobs()
+
+        self.assertEqual(terminalized, ["depjob_orphan"])
+        chat_svc.upsert_message.assert_called_once()
+        msg = chat_svc.upsert_message.call_args[0][2]
+        self.assertEqual(msg.id, "depjob_terminal_depjob_orphan")
+        self.assertEqual(msg.content, "依赖安装被后端重启中断。")
+
+        failed_events = [e for e in events if e.get("payload", {}).get("job_status") == "failed"]
+        self.assertTrue(failed_events, "Project event should still be emitted after reconcile")
+
+    def test_duplicate_terminal_publish_is_idempotent(self):
+        """Doc 46: repeated publish for the same job replaces the same message."""
+        chat_svc = MagicMock()
+        job_service = RuntimeDependencyJobService(
+            self.project_service,
+            background_task_service=self.background_task_service,
+            chat_session_service=chat_svc,
+        )
+        job = job_service.submit(
+            "test-project",
+            {
+                "ecosystem": "python",
+                "runtime": "python_env",
+                "packages": ["numpy"],
+                "source": {"card_id": "card_1", "session_id": "sess_1"},
+            },
+            handler=lambda _pid, _payload, **kwargs: {"ok": True, "changed": False},
+        )
+        if job.future:
+            job.future.result(timeout=5)
+
+        # First publish happened automatically after handler completion
+        self.assertEqual(chat_svc.upsert_message.call_count, 1)
+
+        # Manually publish again — must call upsert_message a second time with the same ID
+        job_service._publish_terminal_chat_receipt(job)
+        self.assertEqual(chat_svc.upsert_message.call_count, 2)
+        ids = [call[0][2].id for call in chat_svc.upsert_message.call_args_list]
+        self.assertEqual(ids[0], ids[1])
+        self.assertTrue(ids[0].startswith("depjob_terminal_"))
+
+    def test_auto_owner_session_skips_chat_receipt(self):
+        """Doc 46: auto owner session does not receive dependency receipt bubbles."""
+        from unittest.mock import patch
+
+        chat_svc = MagicMock()
+        auto_svc = MagicMock()
+        auto_svc.get_state.return_value = MagicMock(enabled=True, owner_session_id="sess_auto")
+
+        job_service = RuntimeDependencyJobService(
+            self.project_service,
+            background_task_service=self.background_task_service,
+            chat_session_service=chat_svc,
+        )
+        with patch("app.api.deps.get_manager_auto_service", return_value=auto_svc):
+            job = job_service.submit(
+                "test-project",
+                {
+                    "ecosystem": "python",
+                    "runtime": "python_env",
+                    "packages": ["numpy"],
+                    "source": {"card_id": "card_1", "session_id": "sess_auto"},
+                },
+                handler=lambda _pid, _payload, **kwargs: {"ok": True, "changed": False},
+            )
+            if job.future:
+                job.future.result(timeout=5)
+
+        chat_svc.upsert_message.assert_not_called()
+
+    def test_exception_in_background_task_update_does_not_leave_persisted_job_running(self):
+        """Exception in background task update after terminal mutation must not skip persistence."""
+        from app.services.project_event_service import ProjectEventService
+
+        chat_svc = MagicMock()
+        events = []
+        event_service = ProjectEventService(self.project_service)
+        event_service._publish = lambda pid, ev: events.append(ev)
+
+        job_service = RuntimeDependencyJobService(
+            self.project_service,
+            project_event_service=event_service,
+            background_task_service=self.background_task_service,
+            chat_session_service=chat_svc,
+        )
+        # Make background_task_service.update_task raise for the terminal-finalization
+        # call only (not the submit/persist calls). The submit path calls update_task
+        # twice: once for creation and once for affected-job-ids. We use a counter to
+        # only raise on the terminal-finalization call inside _run's success path.
+        call_count = [0]
+
+        def update_task_side_effect(*args, **kwargs):
+            call_count[0] += 1
+            # Raise only on the 4th call — the terminal-finalization call in _run success path
+            # (calls: 1=create_task, 2=update_task during submit, 3=update_task during _run start, 4=terminal finalization)
+            if call_count[0] >= 4:
+                raise RuntimeError("simulated bg task failure")
+            return MagicMock()
+
+        self.background_task_service.update_task.side_effect = update_task_side_effect
+
+        job = job_service.submit(
+            "test-project",
+            {
+                "ecosystem": "python",
+                "runtime": "python_env",
+                "packages": ["numpy"],
+                "source": {"card_id": "card_1", "session_id": "sess_1"},
+            },
+            handler=lambda _pid, _payload, **kwargs: {"ok": True, "changed": True},
+        )
+        if job.future:
+            job.future.result(timeout=5)
+
+        # Job must be terminal in memory
+        self.assertEqual(job.status, "succeeded")
+        self.assertEqual(job.phase, "succeeded")
+
+        # Persisted JSON must be terminal (not running)
+        disk_jobs = json.loads(self.jobs_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(disk_jobs), 1)
+        self.assertEqual(disk_jobs[0]["status"], "succeeded")
+        self.assertEqual(disk_jobs[0]["phase"], "succeeded")
+
+        # Chat receipt must still be published (best-effort after persistence)
+        self.assertGreaterEqual(chat_svc.upsert_message.call_count, 1)
+        msg = chat_svc.upsert_message.call_args[0][2]
+        self.assertTrue(msg.id.startswith("depjob_terminal_"))
+
+        # Project event must still be emitted
+        succeeded_events = [e for e in events if e.get("payload", {}).get("job_status") == "succeeded"]
+        self.assertTrue(succeeded_events, "Project event should be emitted even with bg task failure")
+
+    def test_exception_in_persist_after_terminal_mutation_logs_and_continues(self):
+        """Exception in persist path after job terminal mutation is logged, not swallowed silently."""
+        import logging
+        from io import StringIO
+
+        chat_svc = MagicMock()
+        log_stream = StringIO()
+        handler = logging.StreamHandler(log_stream)
+        handler.setLevel(logging.WARNING)
+        logger = logging.getLogger("app.services.runtime_dependency_job_service")
+        logger.addHandler(handler)
+
+        job_service = RuntimeDependencyJobService(
+            self.project_service,
+            background_task_service=self.background_task_service,
+            chat_session_service=chat_svc,
+        )
+
+        # Count _persist_project_jobs_locked calls — make the terminal-finalization
+        # persist call raise (the call in the success path, which is the 3rd persist).
+        # submit: initial persist; _run start: persist running state;
+        # success terminal finalization: the call we want to fail.
+        persist_count = [0]
+        original_persist = job_service._persist_project_jobs_locked
+
+        def failing_persist(pid):
+            persist_count[0] += 1
+            # Persist calls: 1=submit initial, 2=_run start (waiting_for_runtime_lock),
+            # 3=_run building_command phase, 4=terminal finalization
+            if persist_count[0] == 4:
+                raise OSError("simulated persist failure at terminal finalization")
+            return original_persist(pid)
+
+        try:
+            job_service._persist_project_jobs_locked = failing_persist
+
+            job = job_service.submit(
+                "test-project",
+                {
+                    "ecosystem": "python",
+                    "runtime": "python_env",
+                    "packages": ["numpy"],
+                    "source": {"card_id": "card_1", "session_id": "sess_1"},
+                },
+                handler=lambda _pid, _payload, **kwargs: {"ok": True, "changed": True},
+            )
+            if job.future:
+                job.future.result(timeout=5)
+
+            # Job must still be terminal in memory despite persist failure
+            self.assertEqual(job.status, "succeeded")
+            self.assertIn("Failed to persist terminal dependency job state", log_stream.getvalue())
+        finally:
+            logger.removeHandler(handler)
+            job_service._persist_project_jobs_locked = original_persist
+
+    def test_self_heal_converts_memory_terminal_disk_running_to_disk_terminal(self):
+        """Self-heal detects memory=terminal + disk=running and overwrites persisted record."""
+        from app.services.project_event_service import ProjectEventService
+
+        chat_svc = MagicMock()
+        events = []
+        event_service = ProjectEventService(self.project_service)
+        event_service._publish = lambda pid, ev: events.append(ev)
+
+        job_service = RuntimeDependencyJobService(
+            self.project_service,
+            project_event_service=event_service,
+            background_task_service=self.background_task_service,
+            chat_session_service=chat_svc,
+        )
+
+        # Create a terminal job in memory first
+        job = job_service.submit(
+            "test-project",
+            {
+                "ecosystem": "R",
+                "runtime": "R_env",
+                "packages": ["tmap"],
+                "source": {"card_id": "card_1", "session_id": "sess_1"},
+            },
+            handler=lambda _pid, _payload, **kwargs: {"ok": True, "changed": True},
+        )
+        if job.future:
+            job.future.result(timeout=5)
+
+        # Reset call counts after normal submit/run cycle
+        chat_svc.reset_mock()
+
+        # Now simulate drift: overwrite persisted JSON with "running" status
+        self._write_jobs([
+            {
+                "job_id": job.job_id,
+                "project_id": "test-project",
+                "task_id": job.task_id,
+                "status": "running",
+                "phase": "running_subprocess",
+                "created_at": job.created_at,
+                "started_at": job.started_at,
+                "payload": {
+                    "ecosystem": "R",
+                    "runtime": "R_env",
+                    "packages": ["tmap"],
+                    "source": {"card_id": "card_1", "session_id": "sess_1"},
+                },
+            }
+        ])
+
+        # Trigger self-heal via get_for_project (which calls _self_heal_terminal_drift_locked)
+        healed_job = job_service.get_for_project("test-project", job.job_id)
+        self.assertIsNotNone(healed_job)
+        self.assertEqual(healed_job.status, "succeeded")
+
+        # Persisted JSON must now be terminal
+        disk_jobs = json.loads(self.jobs_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(disk_jobs), 1)
+        self.assertEqual(disk_jobs[0]["job_id"], job.job_id)
+        self.assertEqual(disk_jobs[0]["status"], "succeeded")
+        self.assertEqual(disk_jobs[0]["phase"], "succeeded")
+
+        # Receipt must be published
+        self.assertGreaterEqual(chat_svc.upsert_message.call_count, 1)
+        msg = chat_svc.upsert_message.call_args[0][2]
+        self.assertEqual(msg.id, f"depjob_terminal_{job.job_id}")
+
+    def test_self_heal_disk_already_terminal_is_noop(self):
+        """Self-heal is a no-op when both memory and disk agree on terminal status."""
+        job_service = RuntimeDependencyJobService(
+            self.project_service,
+            background_task_service=self.background_task_service,
+        )
+
+        job = job_service.submit(
+            "test-project",
+            {
+                "ecosystem": "python",
+                "runtime": "python_env",
+                "packages": ["numpy"],
+                "source": {"card_id": "card_1", "session_id": "sess_1"},
+            },
+            handler=lambda _pid, _payload, **kwargs: {"ok": True, "changed": True},
+        )
+        if job.future:
+            job.future.result(timeout=5)
+
+        # Both memory and disk are terminal — self-heal should not change anything
+        disk_before = json.loads(self.jobs_path.read_text(encoding="utf-8"))
+        disk_status_before = disk_before[0]["status"]
+
+        # get_for_project triggers self-heal check but should be a no-op
+        result = job_service.get_for_project("test-project", job.job_id)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+
+        disk_after = json.loads(self.jobs_path.read_text(encoding="utf-8"))
+        self.assertEqual(disk_after[0]["status"], disk_status_before)
+
+    def test_self_heal_persist_failure_skips_receipt_publish(self):
+        """Self-heal persist failure must NOT publish a terminal receipt.
+
+        When _self_heal_terminal_drift_locked detects drift but the persist
+        call itself fails, it must return False so callers do not proceed to
+        _publish_terminal_chat_receipt. Otherwise chat gets a receipt message
+        while disk stays stale, recreating the exact split this fix targets.
+        """
+        chat_svc = MagicMock()
+        job_service = RuntimeDependencyJobService(
+            self.project_service,
+            background_task_service=self.background_task_service,
+            chat_session_service=chat_svc,
+        )
+
+        # Create a terminal job first (normal cycle)
+        job = job_service.submit(
+            "test-project",
+            {
+                "ecosystem": "python",
+                "runtime": "python_env",
+                "packages": ["numpy"],
+                "source": {"card_id": "card_1", "session_id": "sess_1"},
+            },
+            handler=lambda _pid, _payload, **kwargs: {"ok": True, "changed": True},
+        )
+        if job.future:
+            job.future.result(timeout=5)
+
+        chat_svc.reset_mock()
+
+        # Simulate drift: overwrite persisted JSON with "running"
+        self._write_jobs([
+            {
+                "job_id": job.job_id,
+                "project_id": "test-project",
+                "task_id": job.task_id,
+                "status": "running",
+                "phase": "running_subprocess",
+                "created_at": job.created_at,
+                "started_at": job.started_at,
+                "payload": {
+                    "ecosystem": "python",
+                    "runtime": "python_env",
+                    "packages": ["numpy"],
+                    "source": {"card_id": "card_1", "session_id": "sess_1"},
+                },
+            }
+        ])
+
+        # Now make persist fail so self-heal cannot write the terminal record
+        original_persist = job_service._persist_project_jobs_locked
+
+        def always_failing_persist(pid):
+            raise OSError("simulated persist failure in self-heal path")
+
+        job_service._persist_project_jobs_locked = always_failing_persist
+        try:
+            # get_for_project triggers self-heal; persist fails → must return False,
+            # and the caller must NOT call _publish_terminal_chat_receipt
+            healed_job = job_service.get_for_project("test-project", job.job_id)
+            self.assertIsNotNone(healed_job)
+            self.assertEqual(healed_job.status, "succeeded")
+
+            # Receipt must NOT be published — persist failed, so we must not
+            # tell the chat session that the job is terminal while disk is still
+            # showing running.
+            chat_svc.upsert_message.assert_not_called()
+
+            # Disk must still show "running" — the failed persist couldn't
+            # overwrite it, and that's the correct (conservative) behaviour:
+            # keep the problem visible rather than papering over it.
+            disk_jobs = json.loads(self.jobs_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(disk_jobs), 1)
+            self.assertEqual(disk_jobs[0]["status"], "running")
+        finally:
+            job_service._persist_project_jobs_locked = original_persist
+
+
 if __name__ == "__main__":
     unittest.main()

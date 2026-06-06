@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from app.models.chat import ChatSessionMessage, ChatSessionMessageTimelineItem
 from app.services.background_task_service import BackgroundTaskService
 from app.services.project_event_service import ProjectEventService
 from app.services.project_service import ProjectService
@@ -56,6 +57,7 @@ class RuntimeDependencyJobService:
         project_event_service: ProjectEventService | None = None,
         background_task_service: BackgroundTaskService | None = None,
         background_terminal_callback: Callable[[str, str | None, str | None], None] | None = None,
+        chat_session_service: Any | None = None,
     ) -> None:
         self.project_service = project_service
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="runtime-deps")
@@ -65,6 +67,7 @@ class RuntimeDependencyJobService:
         self.project_event_service = project_event_service
         self.background_task_service = background_task_service or BackgroundTaskService(project_service)
         self.background_terminal_callback = background_terminal_callback
+        self.chat_session_service = chat_session_service
         # P2 watchdog (currently scoped to future-done reconciliation only;
         # pre-launch stale kill and child-pid checks are disabled until we
         # switch from subprocess.run to Popen with real child pid tracking.)
@@ -145,12 +148,20 @@ class RuntimeDependencyJobService:
         return None
 
     def get_for_project(self, project_id: str, job_id: str) -> RuntimeDependencyJob | None:
+        needs_publish = False
         with self.lock:
             self._load_project_jobs_locked(project_id)
             job = self.jobs.get(job_id)
             if job is None or job.project_id != project_id:
                 return None
-            return job
+            # Self-heal: if in-memory is terminal but disk may be stale, repair now.
+            # This ensures REST consumers always see consistent state and workboard
+            # derivation reads durable truth.
+            if job.status in {"succeeded", "failed"} and job.phase in {"succeeded", "failed"}:
+                needs_publish = self._self_heal_terminal_drift_locked(job)
+        if needs_publish:
+            self._publish_terminal_chat_receipt(job)
+        return job
 
     def _run(self, job_id: str, handler) -> None:
         with self.lock:
@@ -181,17 +192,33 @@ class RuntimeDependencyJobService:
                 job.phase = "failed"
                 job.error = "".join(traceback.format_exception(exc))
                 job.finished_at = utc_now()
-                self.background_task_service.update_task(
-                    job.project_id,
-                    job.task_id,
-                    status="failed",
-                    finished_at=job.finished_at,
-                    error=job.error,
-                    adapter={"kind": "dependency_installer", "metadata": {"phase": "failed", "job_id": job.job_id}},
-                )
-                self._persist_project_jobs_locked(job.project_id)
-                self._emit_project_event(job)
-            self._notify_background_terminal(job.project_id, job_id=job.job_id)
+                persisted = False
+                try:
+                    self._persist_project_jobs_locked(job.project_id)
+                    persisted = True
+                except Exception:
+                    logger.exception(
+                        "Failed to persist failed dependency job state: project=%s job=%s",
+                        job.project_id,
+                        job.job_id,
+                    )
+                try:
+                    self.background_task_service.update_task(
+                        job.project_id,
+                        job.task_id,
+                        status="failed",
+                        finished_at=job.finished_at,
+                        error=job.error,
+                        adapter={"kind": "dependency_installer", "metadata": {"phase": "failed", "job_id": job.job_id}},
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to update background task for failed dependency job: project=%s job=%s",
+                        job.project_id,
+                        job.job_id,
+                    )
+            if persisted:
+                self._publish_terminal_chat_receipt(job)
             return
         with self.lock:
             ok = bool(result.get("ok"))
@@ -202,17 +229,119 @@ class RuntimeDependencyJobService:
             job.changed = result.get("changed") if isinstance(result, dict) else None
             job.error = None if ok else str(result.get("message") or "Dependency installation failed.")
             job.finished_at = utc_now()
-            self.background_task_service.update_task(
+            # Persist dependency job state first — this is the source of truth for
+            # workboard derivation. Must not be silently skipped by an exception in
+            # background task update.
+            persisted = False
+            try:
+                self._persist_project_jobs_locked(job.project_id)
+                persisted = True
+            except Exception:
+                logger.exception(
+                    "Failed to persist terminal dependency job state: project=%s job=%s",
+                    job.project_id,
+                    job.job_id,
+                )
+            # Background task update is best-effort; must not prevent terminal publish.
+            try:
+                self.background_task_service.update_task(
+                    job.project_id,
+                    job.task_id,
+                    status=job.status,
+                    finished_at=job.finished_at,
+                    result=result,
+                    error=job.error,
+                    adapter={"kind": "dependency_installer", "metadata": {"phase": job.phase, "job_id": job.job_id}},
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to update background task for terminal dependency job: project=%s job=%s",
+                    job.project_id,
+                    job.job_id,
+                )
+        if persisted:
+            self._publish_terminal_chat_receipt(job)
+
+    def _format_terminal_content(self, job: RuntimeDependencyJob) -> str:
+        """Build the user-visible terminal receipt content from job state."""
+        status = job.status
+        result = job.result if isinstance(job.result, dict) else {}
+        changed = result.get("changed")
+        status_detail = result.get("status_detail")
+        if status == "succeeded":
+            if changed is False or status_detail == "already_satisfied":
+                return "依赖已满足，无需安装。"
+            return "依赖安装完成。"
+        # Recognize the English backend-restart interruption text and
+        # render a dedicated Chinese receipt instead.
+        error = (job.error or "").strip()
+        if "interrupted by backend restart" in error:
+            return "依赖安装被后端重启中断。"
+        error_lines = error.splitlines()
+        raw_message = error_lines[-1].strip() if error_lines else ""
+        if raw_message:
+            return f"依赖安装失败：{raw_message}"
+        return "依赖安装失败。"
+
+    def _publish_terminal_chat_receipt(self, job: RuntimeDependencyJob) -> None:
+        """Idempotent terminal receipt publisher.
+
+        Must be called only after job state and background task state have
+        been persisted, and only outside ``self.lock``.
+        """
+        self._emit_project_event(job)
+
+        # Manual-session chat receipt branch
+        if self.chat_session_service is None:
+            self._notify_background_terminal(job.project_id, job_id=job.job_id)
+            return
+        source = job.payload.get("source") if isinstance(job.payload, dict) else {}
+        source_dict = source if isinstance(source, dict) else {}
+        session_id = str(source_dict.get("session_id") or "").strip()
+        if not session_id:
+            self._notify_background_terminal(job.project_id, job_id=job.job_id)
+            return
+        # Skip chat upsert when the session is the active auto owner.
+        # Auto wake will produce its own summary; appending here would duplicate.
+        try:
+            from app.services.manager_auto_service import ManagerAutoService
+            from app.api.deps import get_manager_auto_service
+            auto_svc: ManagerAutoService = get_manager_auto_service()
+            auto_state = auto_svc.get_state(job.project_id)
+            if auto_state.enabled and auto_state.owner_session_id == session_id:
+                self._notify_background_terminal(job.project_id, job_id=job.job_id)
+                return
+        except Exception:
+            pass
+        content = self._format_terminal_content(job)
+        message_id = f"depjob_terminal_{job.job_id}"
+        timeline_id = f"depjob_terminal_timeline_{job.job_id}"
+        try:
+            self.chat_session_service.upsert_message(
                 job.project_id,
-                job.task_id,
-                status=job.status,
-                finished_at=job.finished_at,
-                result=result,
-                error=job.error,
-                adapter={"kind": "dependency_installer", "metadata": {"phase": job.phase, "job_id": job.job_id}},
+                session_id,
+                ChatSessionMessage(
+                    id=message_id,
+                    role="manager",
+                    content=content,
+                    state="done",
+                    timeline=[
+                        ChatSessionMessageTimelineItem(
+                            id=timeline_id,
+                            kind="text",
+                            content=content,
+                            status="done",
+                        ),
+                    ],
+                ),
             )
-            self._persist_project_jobs_locked(job.project_id)
-            self._emit_project_event(job)
+        except Exception:
+            logger.exception(
+                "Failed to upsert terminal dependency chat message: project=%s job=%s session=%s",
+                job.project_id,
+                job.job_id,
+                session_id,
+            )
         self._notify_background_terminal(job.project_id, job_id=job.job_id)
 
     def _make_phase_callback(self, job_id: str):
@@ -415,8 +544,7 @@ class RuntimeDependencyJobService:
                 continue
             seen.add(job.job_id)
             terminalized_ids.append(job.job_id)
-            self._emit_project_event(job)
-            self._notify_background_terminal(job.project_id, job_id=job.job_id)
+            self._publish_terminal_chat_receipt(job)
         return terminalized_ids
 
     def _persist_project_jobs_locked(self, project_id: str) -> None:
@@ -497,12 +625,14 @@ class RuntimeDependencyJobService:
                 logger.exception("Runtime dependency watchdog reconciliation failed")
 
     def _reconcile_active_jobs(self) -> None:
-        """Check active jobs for future-done only.
+        """Check active jobs for future-done and terminal drift.
 
         Pre-launch stale kill and child-pid checks are disabled until we
         switch from subprocess.run to Popen with real child pid tracking.
         """
+        terminalized: list[RuntimeDependencyJob] = []
         with self.lock:
+            # Pass 1: future-done reconciliation for active jobs
             active_jobs = [
                 job
                 for job in self.jobs.values()
@@ -510,15 +640,35 @@ class RuntimeDependencyJobService:
             ]
             for job in active_jobs:
                 try:
-                    self._reconcile_single_job(job)
+                    terminal_job = self._reconcile_single_job(job)
+                    if terminal_job is not None:
+                        terminalized.append(terminal_job)
                 except Exception:
                     logger.exception("Reconciliation failed for job %s", job.job_id)
+            # Pass 2: terminal drift self-heal — jobs whose in-memory state is
+            # terminal but persisted JSON may still show non-terminal (e.g. after
+            # a persist exception in _run).
+            for job in list(self.jobs.values()):
+                if job.status in {"succeeded", "failed"} and job.phase in {"succeeded", "failed"}:
+                    # Already in terminalized from pass 1? Skip.
+                    if any(t.job_id == job.job_id for t in terminalized):
+                        continue
+                    try:
+                        if self._self_heal_terminal_drift_locked(job):
+                            terminalized.append(job)
+                    except Exception:
+                        logger.exception("Terminal drift self-heal failed for job %s", job.job_id)
+        for job in terminalized:
+            self._publish_terminal_chat_receipt(job)
 
-    def _reconcile_single_job(self, job: RuntimeDependencyJob) -> None:
+    def _reconcile_single_job(self, job: RuntimeDependencyJob) -> RuntimeDependencyJob | None:
         """Reconcile one active job. Must be called with self.lock held.
 
         Currently only finalizes jobs whose future has completed but whose
         status was not yet updated (e.g. after a backend restart).
+
+        Returns the job if it was terminalized, otherwise None.
+        Publishing must happen outside the lock by the caller.
         """
         if job.future is not None and job.future.done():
             try:
@@ -540,8 +690,66 @@ class RuntimeDependencyJobService:
                 adapter={"kind": "dependency_installer", "metadata": {"phase": job.phase, "job_id": job.job_id}},
             )
             self._persist_project_jobs_locked(job.project_id)
-            self._emit_project_event(job)
-            self._notify_background_terminal(job.project_id, job_id=job.job_id)
+            return job
+        # Terminal drift self-heal: memory is terminal but persisted JSON may still
+        # show queued/running/waiting/launching because a previous persist failed.
+        if job.status in {"succeeded", "failed"} and job.phase in {"succeeded", "failed"}:
+            healed = self._self_heal_terminal_drift_locked(job)
+            if healed:
+                return job
+        return None
+
+    def _self_heal_terminal_drift_locked(self, job: RuntimeDependencyJob) -> bool:
+        """Detect and repair terminal drift for a single job.
+
+        Must be called with self.lock held.
+
+        When the in-memory job is terminal (succeeded/failed) but the persisted
+        JSON still shows a non-terminal status, overwrite the persisted record
+        and signal that publish is needed.
+
+        Returns True if drift was detected and healed (publish should follow).
+        """
+        # Only relevant for terminal jobs
+        if job.status not in {"succeeded", "failed"}:
+            return False
+        if job.phase not in {"succeeded", "failed"}:
+            return False
+
+        # Check persisted state
+        items = read_json(self._jobs_path(job.project_id), [])
+        if not isinstance(items, list):
+            return False
+        disk_stale = False
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("job_id")) != job.job_id:
+                continue
+            disk_status = str(item.get("status") or "")
+            if disk_status in {"queued", "running", "waiting", "launching"}:
+                disk_stale = True
+            break
+
+        if not disk_stale:
+            return False
+
+        logger.warning(
+            "Terminal drift detected: project=%s job=%s memory_status=%s disk_status=stale — overwriting persisted record",
+            job.project_id,
+            job.job_id,
+            job.status,
+        )
+        try:
+            self._persist_project_jobs_locked(job.project_id)
+        except Exception:
+            logger.exception(
+                "Failed to self-heal persisted dependency job: project=%s job=%s — terminal receipt skipped to avoid chat/disk split",
+                job.project_id,
+                job.job_id,
+            )
+            return False
+        return True
 
     def mark_job_resolved(
         self,

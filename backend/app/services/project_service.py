@@ -486,6 +486,42 @@ class ProjectService:
             "r_runtimes": self._r_runtimes(),
         }
 
+    def get_project_snapshot_core(self, project_id: str) -> dict:
+        """Lightweight snapshot without expensive runtime/worker enumeration."""
+        if not (self.project_path(project_id) / "project.json").exists():
+            raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+        store = self.graph_store(project_id)
+        project = self._project_state_with_runtime_preferences(store)
+        cards = store.load_cards()
+        graph = store.load_graph()
+        metadata = graph.metadata if isinstance(graph.metadata, dict) else {}
+        needs_bootstrap = not metadata.get("asset_materializations") and not metadata.get("asset_materializations_bootstrapped_at")
+        if needs_bootstrap:
+            AssetMaterializationService.bootstrap_from_aliases(graph, cards)
+            store.save_graph(graph)
+        summary = ProjectSummary(
+            **project.model_dump(),
+            card_counts=self._count_by(cards, "status"),
+            result_counts=self._count_by(graph.assets, "status"),
+        )
+        return {
+            "summary": summary,
+            "project": project,
+            "cards": cards,
+            "graph": graph,
+            "proposals": store.load_proposals(),
+        }
+
+    def get_project_environment(self, project_id: str) -> dict:
+        """Runtime/worker environment data — expensive fs enumeration, fetched lazily."""
+        if not (self.project_path(project_id) / "project.json").exists():
+            raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+        return {
+            "worker_capabilities": self._worker_capabilities(),
+            "python_runtimes": self._python_runtimes(),
+            "r_runtimes": self._r_runtimes(),
+        }
+
     def get_project_runtime_preferences(self, project_id: str) -> ProjectRuntimePreferences:
         if not (self.project_path(project_id) / "project.json").exists():
             raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")

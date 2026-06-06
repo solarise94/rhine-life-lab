@@ -71,6 +71,7 @@ def get_runtime_dependency_job_service() -> RuntimeDependencyJobService:
             run_id=run_id,
             job_id=job_id,
         ),
+        chat_session_service=get_chat_session_service(),
     )
 
 

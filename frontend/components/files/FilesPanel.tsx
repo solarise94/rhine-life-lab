@@ -7,8 +7,6 @@ import { Download, FileCog, FileText, FolderUp, Link2, Loader2, Trash2 } from "l
 import { api } from "@/lib/api";
 import { Asset, ExecutionFileEntry, ProjectFiles } from "@/lib/types";
 
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
-
 const EXECUTION_CATEGORY_LABELS: Record<string, string> = {
   task_packet: "Task Packet",
   manifest: "Manifest",
@@ -92,10 +90,6 @@ export function FilesPanel({
     event.target.value = "";
     if (!file) return;
     setClientError(null);
-    if (file.size > MAX_UPLOAD_BYTES) {
-      setClientError("文件超过 50MB，当前上传入口不支持。");
-      return;
-    }
     if (readOnly) {
       setClientError("Auto mode 运行中，文件工作台处于只读状态。");
       return;

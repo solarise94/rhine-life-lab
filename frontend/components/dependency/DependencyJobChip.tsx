@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import { Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { api } from "@/lib/api";
 import { EMPTY_DEPENDENCY_JOBS, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 
 const DISMISS_AFTER_MS = 2400;
@@ -103,6 +104,44 @@ export function DependencyJobChip({ projectId, className }: DependencyJobChipPro
     }, 30_000);
     return () => window.clearInterval(interval);
   }, [projectId, clearTerminalDependencyJobs]);
+
+  // Compensating sync: poll backend for active jobs in case SSE terminal event was lost.
+  useEffect(() => {
+    if (!activeEntries.length) return;
+
+    const poll = async () => {
+      for (const entry of activeEntries) {
+        try {
+          const job = await api.getRuntimeDependencyJob(projectId, entry.jobId);
+          if (job.status === "succeeded" || job.status === "failed") {
+            const changed = job.changed ?? null;
+            const statusDetail = job.status_detail || undefined;
+            const message =
+              job.message ||
+              (job.status === "succeeded"
+                ? changed === false || statusDetail === "already_satisfied"
+                  ? "依赖已满足，无需安装"
+                  : "依赖安装完成"
+                : "依赖安装失败");
+            updateDependencyJob(projectId, entry.jobId, {
+              status: job.status,
+              phase: job.status,
+              changed,
+              statusDetail,
+              message,
+              terminalAt: Date.now(),
+            });
+          }
+        } catch {
+          // Non-blocking: polling failure should not break the UI.
+        }
+      }
+    };
+
+    poll();
+    const interval = window.setInterval(poll, 5_000);
+    return () => window.clearInterval(interval);
+  }, [activeEntries, projectId, updateDependencyJob]);
 
   // Pick the single chip to render
   const chip = useMemo(() => {

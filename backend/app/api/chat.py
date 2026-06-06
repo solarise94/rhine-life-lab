@@ -35,9 +35,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["chat"])
 
-MAX_CHAT_UPLOAD_BYTES = 50 * 1024 * 1024
-
-
 class AcceptProposalRequest(BaseModel):
     session_id: str | None = None
 
@@ -253,9 +250,6 @@ async def upload_chat_file(
         with target.open("wb") as handle:
             while chunk := await file.read(1024 * 1024):
                 size += len(chunk)
-                if size > MAX_CHAT_UPLOAD_BYTES:
-                    target.unlink(missing_ok=True)
-                    raise HTTPException(status_code=413, detail="File is larger than 50MB")
                 handle.write(chunk)
     finally:
         await file.close()

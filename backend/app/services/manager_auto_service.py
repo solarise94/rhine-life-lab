@@ -56,6 +56,8 @@ class ManagerAutoService:
         # Doc 42: Wake dispatch is done inline (no persistent wake queue).
         # The chat_stream_relay is injected lazily to avoid circular deps.
         self._chat_stream_relay: ChatStreamRelay | None = None
+        # Doc 46: in-memory idempotency guard for repeated terminal notifications.
+        self._terminal_notified_job_ids: set[str] = set()
 
     def set_chat_stream_relay(self, relay: ChatStreamRelay) -> None:
         self._chat_stream_relay = relay
@@ -422,6 +424,9 @@ class ManagerAutoService:
         owner_session_id = state.owner_session_id
         if not state.enabled or not owner_session_id:
             return state
+        # Doc 46: guard against duplicate auto-wake follow-ups for the same terminal job.
+        if job_id is not None and job_id in self._terminal_notified_job_ids:
+            return state
         clear_active_run = run_id is not None and state.active_run_id == run_id
         clear_active_job = job_id is not None and state.active_job_id == job_id
         if clear_active_run or clear_active_job:
@@ -433,6 +438,9 @@ class ManagerAutoService:
         state, wake_payload = self.evaluate_workboard_and_maybe_signal(project_id, owner_session_id, from_turn_settlement=True)
         if wake_payload is not None:
             self._dispatch_wake(project_id, owner_session_id, wake_payload)
+        # Register dedup only after successful dispatch (or no-op) so failures allow retry.
+        if job_id is not None:
+            self._terminal_notified_job_ids.add(job_id)
         return state
 
     # ── state derivation (Doc 42 Section 4) ───────────────────────

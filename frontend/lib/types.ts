@@ -688,10 +688,16 @@ export interface ProjectSnapshot {
     metadata: Record<string, unknown>;
   };
   proposals: Proposal[];
-  git_log: Array<{ hash: string; date: string; subject: string }>;
+  git_log?: Array<{ hash: string; date: string; subject: string }>;
   worker_capabilities?: WorkerCapability[];
   python_runtimes?: PythonRuntime[];
   r_runtimes?: RRuntime[];
+}
+
+export interface ProjectEnvironment {
+  worker_capabilities: WorkerCapability[];
+  python_runtimes: PythonRuntime[];
+  r_runtimes: RRuntime[];
 }
 
 export interface RunRecord {

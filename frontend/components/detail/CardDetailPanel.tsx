@@ -20,8 +20,8 @@ export function CardDetailPanel({
 }) {
   if (!card) {
     return (
-      <section className="panel">
-        <div className="panel-body empty-state">
+      <section className="panel card-detail-panel">
+        <div className="panel-body card-detail-panel-body empty-state">
           <div style={{ textAlign: "center", padding: "40px 20px", color: "var(--muted)" }}>
             <div style={{ fontSize: 13, fontWeight: 500 }}>选择一张卡片查看详情</div>
           </div>
@@ -32,7 +32,7 @@ export function CardDetailPanel({
   const visibleManagerReview = latestManagerReview(card.manager_review);
 
   return (
-    <section className="panel">
+    <section className="panel card-detail-panel">
       <div className="panel-header">
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <SpecialistAvatar name={card.title} status={card.status} size={32} />
@@ -43,7 +43,7 @@ export function CardDetailPanel({
         </div>
         <CardStatusBadge status={card.status} />
       </div>
-      <div className="panel-body meta-grid">
+      <div className="panel-body card-detail-panel-body meta-grid">
         <div className="meta-block">
           <h4>Summary</h4>
           <div className="meta-text">{card.summary}</div>

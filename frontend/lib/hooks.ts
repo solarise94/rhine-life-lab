@@ -118,11 +118,22 @@ export function useProjectSnapshot(projectId: string) {
   });
 }
 
+export function useProjectEnvironment(projectId: string) {
+  return useQuery({
+    queryKey: queryKeys.projectEnvironment(projectId),
+    queryFn: () => api.getProjectEnvironment(projectId),
+    staleTime: 30_000,
+  });
+}
+
 export function useManagerAuto(projectId: string, sessionId?: string | null) {
   return useQuery({
     queryKey: queryKeys.managerAuto(projectId, sessionId),
     queryFn: () => api.getManagerAuto(projectId, sessionId),
-    refetchInterval: 4_000,
+    refetchInterval: (query) => {
+      const state = query.state.data?.state;
+      return state?.enabled || state?.wake_in_flight ? 4_000 : false;
+    },
   });
 }
 
@@ -133,6 +144,7 @@ export function useUpdateProjectRuntimePreferencesMutation(projectId: string) {
       api.updateProjectRuntimePreferences(projectId, payload),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.project(projectId) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectEnvironment(projectId) });
     },
   });
 }
@@ -258,6 +270,7 @@ export function useWorkspaceRefresh(projectId: string) {
   return async function refreshWorkspace() {
     await Promise.all([
       queryClient.refetchQueries({ queryKey: queryKeys.project(projectId), type: "active" }),
+      queryClient.refetchQueries({ queryKey: queryKeys.projectEnvironment(projectId), type: "active" }),
       queryClient.refetchQueries({ queryKey: queryKeys.chatSessions(projectId), type: "active" }),
       queryClient.refetchQueries({ queryKey: queryKeys.workOrder(projectId), type: "active" }),
       queryClient.refetchQueries({ queryKey: queryKeys.assetFlow(projectId), type: "active" }),

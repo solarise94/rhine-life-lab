@@ -11,6 +11,7 @@ import {
   CreateProjectPayload,
   Proposal,
   ProjectFiles,
+  ProjectEnvironment,
   ProjectSnapshot,
   ProjectState,
   ProjectSummary,
@@ -215,6 +216,9 @@ export const api = {
   },
   getProject(projectId: string) {
     return request<ProjectSnapshot>(`/projects/${projectId}`);
+  },
+  getProjectEnvironment(projectId: string) {
+    return request<ProjectEnvironment>(`/projects/${projectId}/environment`);
   },
   getProjectRuntimePreferences(projectId: string) {
     return request<{ runtime_preferences: ProjectRuntimePreferences }>(`/projects/${projectId}/runtime-preferences`);
@@ -472,6 +476,9 @@ export const api = {
       manager?: string | null;
       stdout_tail?: string | null;
       stderr_tail?: string | null;
+      status_detail?: string | null;
+      changed?: boolean | null;
+      phase?: string | null;
     }>(`/projects/${projectId}/runtime-dependency-jobs/${jobId}`);
   },
   resolveRuntimeDependencies(

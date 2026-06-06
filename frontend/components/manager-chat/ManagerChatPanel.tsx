@@ -88,7 +88,6 @@ interface SlashCommandOption {
   label: string;
 }
 
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const MANAGER_CONTEXT_WINDOW_TOKENS = 1_000_000;
 const CHARS_PER_TOKEN_ESTIMATE = 3.6;
 const PROJECT_MUTATION_TOOLS = /^(create_card|update_card|delete_card|configure_card_execution|start_card_run|rerun_card|review_card_run|stop_card_run|cleanup_run_history)$/;
@@ -548,6 +547,7 @@ export function ManagerChatPanel({
   const thinkingRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const refreshTimerRef = useRef<number | null>(null);
   const delayedRefreshTimerRef = useRef<number | null>(null);
+  const asyncBoundaryPollRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const autoSessionReconnectTimerRef = useRef<number | null>(null);
   const activeStreamControllerRef = useRef<AbortController | null>(null);
@@ -724,6 +724,10 @@ export function ManagerChatPanel({
       window.clearTimeout(delayedRefreshTimerRef.current);
       delayedRefreshTimerRef.current = null;
     }
+    if (asyncBoundaryPollRef.current !== null && typeof window !== "undefined") {
+      window.clearTimeout(asyncBoundaryPollRef.current);
+      asyncBoundaryPollRef.current = null;
+    }
     if (sessionChanged) {
       activeAutoStreamMessagesRef.current.clear();
       autoStreamSeqRef.current.clear();
@@ -759,6 +763,10 @@ export function ManagerChatPanel({
     }
     hydratedSessionIdRef.current = sessionId;
     lastSavedSignatureRef.current = nextSignature;
+    // Set remote-hydration guard so the save effect does not immediately
+    // PUT server-normalized messages back — this prevents the hydrate/save
+    // loop when the only change is server-side normalization.
+    remoteHydratingRef.current = true;
     setMessages(mergedMessages);
     setError(null);
   }, [chatSessionQuery.data, messages, sessionId]);
@@ -908,6 +916,9 @@ export function ManagerChatPanel({
     }
     if (delayedRefreshTimerRef.current !== null && typeof window !== "undefined") {
       window.clearTimeout(delayedRefreshTimerRef.current);
+    }
+    if (asyncBoundaryPollRef.current !== null && typeof window !== "undefined") {
+      window.clearTimeout(asyncBoundaryPollRef.current);
     }
     if (autoSessionReconnectTimerRef.current !== null && typeof window !== "undefined") {
       window.clearTimeout(autoSessionReconnectTimerRef.current);
@@ -1152,6 +1163,41 @@ export function ManagerChatPanel({
     }, 1_000);
   }
 
+  function scheduleAsyncBoundaryPoll(jobId: string | null) {
+    if (isAutoOwnerSession) return;
+    if (typeof window === "undefined") return;
+    if (asyncBoundaryPollRef.current !== null) {
+      window.clearTimeout(asyncBoundaryPollRef.current);
+      asyncBoundaryPollRef.current = null;
+    }
+    if (!jobId) return;
+    const targetId = `depjob_terminal_${jobId}`;
+    let attempts = 0;
+    const poll = () => {
+      attempts += 1;
+      refetchChatSession().then((result) => {
+        const msgs = result.data?.session?.messages ?? [];
+        const hasTerminal = msgs.some((m: { id: string }) => m.id === targetId);
+        if (hasTerminal) {
+          asyncBoundaryPollRef.current = null;
+          return;
+        }
+        if (attempts >= 30) {
+          asyncBoundaryPollRef.current = null;
+          return;
+        }
+        asyncBoundaryPollRef.current = window.setTimeout(poll, 15_000);
+      }).catch(() => {
+        if (attempts >= 30) {
+          asyncBoundaryPollRef.current = null;
+          return;
+        }
+        asyncBoundaryPollRef.current = window.setTimeout(poll, 15_000);
+      });
+    };
+    asyncBoundaryPollRef.current = window.setTimeout(poll, 3_000);
+  }
+
   function syncProposal(proposal: Proposal) {
     if (!proposal.proposal_id || !proposal.status) {
       return;
@@ -1386,7 +1432,7 @@ export function ManagerChatPanel({
             return {
               ...current,
               tools: upsertTool(current.tools || [], event),
-              state: current.content ? "streaming" : "thinking",
+              state: "streaming",
               timeline: upsertTimelineItem(
                 nextTimeline,
                 {
@@ -1494,6 +1540,9 @@ export function ManagerChatPanel({
             const proposal = parseProposal(event.response?.proposal);
             if (proposal) {
               syncProposal(proposal);
+            }
+            if (event.response?.metadata?.async_boundary_tool === "install_runtime_dependencies") {
+              scheduleAsyncBoundaryPoll((event.response.metadata.async_boundary_job_id as string) || null);
             }
             return {
               ...current,
@@ -1889,10 +1938,6 @@ export function ManagerChatPanel({
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
-    if (file.size > MAX_UPLOAD_BYTES) {
-      setError("文件超过 50MB，当前上传入口不支持。");
-      return;
-    }
     uploadMutation.mutate(file);
   }
 

@@ -1373,6 +1373,30 @@ function buildToolReport(toolName, details) {
   return null;
 }
 
+function buildAsyncBoundaryTurnMessage(turnControl) {
+  const boundary = turnControl?.async_boundary;
+  if (!boundary?.active) {
+    return "";
+  }
+  if (boundary.toolName === "install_runtime_dependencies") {
+    return boundary.jobId
+      ? `已提交环境依赖任务（${boundary.jobId}），等待后台完成后继续。`
+      : "已提交环境依赖任务，等待后台完成后继续。";
+  }
+  if (boundary.batch) {
+    return boundary.runId
+      ? `已提交后台运行批次（首个 run_id: ${boundary.runId}），等待事件后继续。`
+      : "已提交后台运行批次，等待事件后继续。";
+  }
+  if (boundary.runId) {
+    return `已启动后台运行（${boundary.runId}），等待事件后继续。`;
+  }
+  if (boundary.jobId) {
+    return `已启动后台任务（${boundary.jobId}），等待事件后继续。`;
+  }
+  return "已启动后台任务，等待事件后继续。";
+}
+
 function isRunAsyncBoundaryPayload(toolName, payload) {
   if (toolName !== "start_card_run" && toolName !== "rerun_card" && toolName !== "submit_claimed_workboard_items") {
     return false;
@@ -3459,8 +3483,10 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     completedThinkingBlocks.add(blockKey);
   }
   const thinking = collectThinking(thinkingBlocks) || undefined;
-  const text = streamedText.trim() || extractText(finalAssistantMessage).trim();
   const turnControl = toolControl.getTurnControl();
+  const streamedOrFinalText = streamedText.trim() || extractText(finalAssistantMessage).trim();
+  const syntheticAsyncBoundaryText = streamedOrFinalText ? "" : buildAsyncBoundaryTurnMessage(turnControl);
+  const text = streamedOrFinalText || syntheticAsyncBoundaryText;
   const stopReason = finalAssistantMessage?.stopReason;
   if (stopReason === "error" || stopReason === "aborted") {
     logManagerEvent("run_error", {
@@ -3490,7 +3516,7 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     run_id: runId,
     project_id: projectId,
     elapsed_ms: Date.now() - runStartedAt,
-    outcome: "text",
+    outcome: syntheticAsyncBoundaryText ? "async_boundary" : "text",
     event_count: events.length,
     streamed_chars: streamedText.length,
     total_tokens: finalTokenUsage?.total_tokens,
@@ -3501,7 +3527,10 @@ async function runManagerChat(payload, emitEvent = null, externalAbortSignal = n
     proposal: null,
     actions: [],
     warnings: [],
-    metadata: finalTokenUsage ? { token_usage: finalTokenUsage } : {},
+    metadata: {
+      ...(finalTokenUsage ? { token_usage: finalTokenUsage } : {}),
+      ...(turnControl?.async_boundary?.active ? { async_boundary: true, async_boundary_tool: turnControl.async_boundary.toolName || null, async_boundary_job_id: turnControl.async_boundary.jobId || null } : {}),
+    },
   };
 }
 

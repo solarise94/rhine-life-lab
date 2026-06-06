@@ -10,6 +10,7 @@ import {
   useAdvancedGraph,
   useExecutorProfiles,
   useManagerAuto,
+  useProjectEnvironment,
   useProjectFiles,
   useProjectReport,
   useProjectResults,
@@ -152,6 +153,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const refreshWorkspace = useWorkspaceRefresh(projectId);
 
   const projectQuery = useProjectSnapshot(projectId);
+  const environmentQuery = useProjectEnvironment(projectId);
   const managerAutoQuery = useManagerAuto(projectId, currentChatSessionId);
   const workOrderQuery = useWorkOrder(projectId, view === "tasks");
   const resultsQuery = useProjectResults(projectId, view === "results");
@@ -188,8 +190,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const selectedRun = snapshot?.graph.runs.find((item) => item.run_id === selectedRunId);
   const selectedWorkItem = workOrderQuery.data?.work_items.find((item) => item.card_id === selectedCard?.card_id);
   const configuredWorkers = useMemo(
-    () => (snapshot?.worker_capabilities ?? []).filter((item) => item.configured),
-    [snapshot?.worker_capabilities],
+    () => (environmentQuery.data?.worker_capabilities ?? []).filter((item) => item.configured),
+    [environmentQuery.data?.worker_capabilities],
   );
   const activeRunCount = useMemo(
     () => snapshot?.graph.runs.filter((item) => ["queued", "needs_approval", "running", "reviewing"].includes(item.status)).length ?? 0,
@@ -389,6 +391,14 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               }
             }
           }
+          // Dependency job events: active phases only need chip/store update (done above).
+          // Terminal phases get a targeted refetch of workboard + auto state + environment.
+          if (raw.job_status === "succeeded" || raw.job_status === "failed") {
+            queryClient.refetchQueries({ queryKey: queryKeys.workOrder(projectId), type: "active" });
+            queryClient.refetchQueries({ queryKey: queryKeys.managerAuto(projectId, currentChatSessionIdRef.current), type: "active" });
+            queryClient.refetchQueries({ queryKey: queryKeys.projectEnvironment(projectId), type: "active" });
+          }
+          return;
         }
         const runId = typeof raw.run_id === "string" ? raw.run_id : null;
         scheduleProjectEventRefresh(runId);
@@ -696,7 +706,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             setMobileTab(projectId, "chat");
           }}
           onPreviewAsset={(assetId, cardId) => handleOpenAssetPreview(assetId, "card", cardId)}
-          workerCapabilities={snapshot.worker_capabilities}
+          workerCapabilities={environmentQuery.data?.worker_capabilities}
           executorProfiles={executorProfiles}
           selectedWorkerByCard={selectedWorkerByProject}
           selectedProfileByCard={selectedProfileByProject}
@@ -710,8 +720,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             setSelectedProfile(projectId, card.card_id, profileId);
             setNotice(projectId, `Card ${card.card_id} 将使用 profile ${profileId} 执行。`);
           }}
-          pythonRuntimes={snapshot.python_runtimes ?? []}
-          rRuntimes={snapshot.r_runtimes ?? []}
+          pythonRuntimes={environmentQuery.data?.python_runtimes ?? []}
+          rRuntimes={environmentQuery.data?.r_runtimes ?? []}
           globalPythonRuntime={effectiveGlobalPythonRuntime}
           globalRRuntime={effectiveGlobalRRuntime}
           selectedPythonRuntimeByCard={selectedPythonRuntimeByProject}
@@ -736,8 +746,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
       <SideNav
         projectId={projectId}
         current={view}
-        pythonRuntimes={snapshot.python_runtimes ?? []}
-        rRuntimes={snapshot.r_runtimes ?? []}
+        pythonRuntimes={environmentQuery.data?.python_runtimes ?? []}
+        rRuntimes={environmentQuery.data?.r_runtimes ?? []}
         globalPythonRuntime={effectiveGlobalPythonRuntime}
         globalRRuntime={effectiveGlobalRRuntime}
         scriptPreference={effectiveScriptPreference}
@@ -772,7 +782,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           setNotice(projectId, `脚本偏好: ${label}。`);
         }}
       />
-      <main className={`content ${view === "tasks" ? "task-content" : ""}`}>
+      <main className={`content ${view === "tasks" ? "task-content" : ""} ${view === "advanced" ? "advanced-content" : ""}`}>
         {view !== "tasks" ? (
           <ProjectHeader
             summary={snapshot.summary}
@@ -853,13 +863,13 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             </div>
           ) : null}
           {view === "advanced" ? (
-            <div className="stack">
+            <div className="advanced-view">
               <AdvancedPanels
                 graph={advancedGraphQuery.data?.graph ?? null}
                 gitItems={advancedGitQuery.data?.items ?? []}
                 readOnly={autoLocked}
-                pythonRuntimes={snapshot.python_runtimes ?? []}
-                rRuntimes={snapshot.r_runtimes ?? []}
+                pythonRuntimes={environmentQuery.data?.python_runtimes ?? []}
+                rRuntimes={environmentQuery.data?.r_runtimes ?? []}
                 globalPythonRuntime={effectiveGlobalPythonRuntime}
                 globalRRuntime={effectiveGlobalRRuntime}
                 onSelectGlobalPythonRuntime={(runtime) => {
@@ -874,11 +884,13 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 }}
               />
               {selectedCard ? (
-                <CardDetailPanel
-                  card={selectedCard}
-                  summary={snapshot.summary}
-                  workItem={selectedWorkItem}
-                />
+                <div className="card-detail-panel-shell">
+                  <CardDetailPanel
+                    card={selectedCard}
+                    summary={snapshot.summary}
+                    workItem={selectedWorkItem}
+                  />
+                </div>
               ) : null}
             </div>
           ) : null}
@@ -886,8 +898,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             <SettingsPanels
               projectId={projectId}
               project={snapshot.project}
-              pythonRuntimes={snapshot.python_runtimes ?? []}
-              rRuntimes={snapshot.r_runtimes ?? []}
+              pythonRuntimes={environmentQuery.data?.python_runtimes ?? []}
+              rRuntimes={environmentQuery.data?.r_runtimes ?? []}
               readOnly={autoLocked}
             />
           ) : null}
@@ -923,7 +935,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   setMobileTab(projectId, "chat");
                 }}
                 onPreviewAsset={(assetId, cardId) => handleOpenAssetPreview(assetId, "card", cardId)}
-                workerCapabilities={snapshot.worker_capabilities}
+                workerCapabilities={environmentQuery.data?.worker_capabilities}
                 executorProfiles={executorProfiles}
                 selectedWorkerByCard={selectedWorkerByProject}
                 selectedProfileByCard={selectedProfileByProject}
@@ -937,8 +949,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   setSelectedProfile(projectId, card.card_id, profileId);
                   setNotice(projectId, `Card ${card.card_id} 将使用 profile ${profileId} 执行。`);
                 }}
-                pythonRuntimes={snapshot.python_runtimes ?? []}
-                rRuntimes={snapshot.r_runtimes ?? []}
+                pythonRuntimes={environmentQuery.data?.python_runtimes ?? []}
+                rRuntimes={environmentQuery.data?.r_runtimes ?? []}
                 globalPythonRuntime={effectiveGlobalPythonRuntime}
                 globalRRuntime={effectiveGlobalRRuntime}
                 selectedPythonRuntimeByCard={selectedPythonRuntimeByProject}
@@ -1007,8 +1019,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     graph={advancedGraphQuery.data?.graph ?? null}
                     gitItems={advancedGitQuery.data?.items ?? []}
                     readOnly={autoLocked}
-                    pythonRuntimes={snapshot.python_runtimes ?? []}
-                    rRuntimes={snapshot.r_runtimes ?? []}
+                    pythonRuntimes={environmentQuery.data?.python_runtimes ?? []}
+                    rRuntimes={environmentQuery.data?.r_runtimes ?? []}
                     globalPythonRuntime={effectiveGlobalPythonRuntime}
                     globalRRuntime={effectiveGlobalRRuntime}
                     onSelectGlobalPythonRuntime={(runtime) => {
@@ -1021,11 +1033,13 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     }}
                   />
                   {selectedCard ? (
-                    <CardDetailPanel
-                      card={selectedCard}
-                      summary={snapshot.summary}
-                      workItem={selectedWorkItem}
-                    />
+                    <div className="card-detail-panel-shell">
+                      <CardDetailPanel
+                        card={selectedCard}
+                        summary={snapshot.summary}
+                        workItem={selectedWorkItem}
+                      />
+                    </div>
                   ) : null}
                 </>
               ) : null}
@@ -1033,8 +1047,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 <SettingsPanels
                   projectId={projectId}
                   project={snapshot.project}
-                  pythonRuntimes={snapshot.python_runtimes ?? []}
-                  rRuntimes={snapshot.r_runtimes ?? []}
+                  pythonRuntimes={environmentQuery.data?.python_runtimes ?? []}
+                  rRuntimes={environmentQuery.data?.r_runtimes ?? []}
                   readOnly={autoLocked}
                 />
               ) : null}
