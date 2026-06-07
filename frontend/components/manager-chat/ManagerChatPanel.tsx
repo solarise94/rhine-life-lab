@@ -714,6 +714,7 @@ export function ManagerChatPanel({
             }
           : current,
       );
+      queryClient.invalidateQueries({ queryKey: queryKeys.files(projectId) });
       await onRefresh();
       setUploadProgress(null);
     },
@@ -2336,7 +2337,7 @@ export function ManagerChatPanel({
           <div className="attachment-bar">
             {attachments.map((a) => (
               <span key={a.id} className="attachment-pill" onClick={() => removeAttachment(projectId, a.id)}>
-                {a.type === "card" ? "📋" : "📎"} {a.label}
+                {a.type === "card" ? "📋" : "📎"} <span className="label">{a.label}</span>
                 <X size={12} />
               </span>
             ))}

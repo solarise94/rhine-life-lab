@@ -1,0 +1,16 @@
+[Unit]
+Description=Blueprint RE nginx Gateway
+After=network.target blueprint-re-frontend.service
+
+[Service]
+Type=simple
+ExecStartPre=__NGINX_BIN__ -t -c __APP_ENV_DIR__/nginx.conf
+ExecStart=__NGINX_BIN__ -c __APP_ENV_DIR__/nginx.conf
+ExecReload=__NGINX_BIN__ -c __APP_ENV_DIR__/nginx.conf -s reload
+PIDFile=__APP_ENV_DIR__/nginx.pid
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

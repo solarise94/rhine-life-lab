@@ -40,9 +40,14 @@ import type { ChatTokenUsage } from "./types";
 export type { ChatTokenUsage } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api";
+const UPLOAD_API_BASE = process.env.NEXT_PUBLIC_UPLOAD_API_BASE_URL ?? API_BASE;
 
 export function apiUrl(path: string) {
   return `${API_BASE}${path}`;
+}
+
+function uploadUrl(path: string) {
+  return `${UPLOAD_API_BASE}${path}`;
 }
 
 export interface ChatHistoryMessage {
@@ -284,7 +289,7 @@ export const api = {
   async uploadChatFile(projectId: string, file: File) {
     const formData = new FormData();
     formData.append("file", file);
-    const response = await fetch(`${API_BASE}/projects/${projectId}/chat-uploads`, {
+    const response = await fetch(uploadUrl(`/projects/${projectId}/chat-uploads`), {
       method: "POST",
       body: formData,
       cache: "no-store",
@@ -324,7 +329,7 @@ export const api = {
         return;
       }
       signal?.addEventListener("abort", abortUpload, { once: true });
-      xhr.open("POST", `${API_BASE}/projects/${projectId}/chat-uploads`);
+      xhr.open("POST", uploadUrl(`/projects/${projectId}/chat-uploads`));
       xhr.upload.onprogress = (event) => {
         onProgress?.({
           loaded: event.loaded,

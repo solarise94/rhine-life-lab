@@ -307,8 +307,9 @@ bash "${ROOT_DIR}/scripts/deploy_user_systemd.sh"
 
 echo
 echo "Install complete."
-echo "Frontend: http://127.0.0.1:13001"
+echo "Frontend: http://127.0.0.1:13001  (nginx gateway)"
 echo "Backend:  http://127.0.0.1:18001"
+echo "Next.js:  http://127.0.0.1:13002  (internal)"
 echo "Runtime config files:"
 echo "  backend.env      -> ~/.config/blueprint-re/backend.env"
 echo "  manager-agent.env -> ~/.config/blueprint-re/manager-agent.env"
