@@ -12,6 +12,7 @@ class ProjectRuntimePreferences(BaseModel):
     script_preference: Literal["auto", "prefer_python", "prefer_r", "prefer_mixed"] = "auto"
     python_runtime: str | None = None
     r_runtime: str | None = None
+    execution_mode: Literal["guarded", "workspace_write"] = "guarded"
 
 
 class ProjectRegistryEntry(BaseModel):

@@ -283,6 +283,7 @@ export function SettingsPanels({
   const [scriptPreference, setScriptPreference] = useState<ScriptPreference>(project.runtime_preferences.script_preference);
   const [pythonRuntime, setPythonRuntime] = useState(formatRuntimeLabel(project.runtime_preferences.python_runtime));
   const [rRuntime, setRRuntime] = useState(formatRuntimeLabel(project.runtime_preferences.r_runtime));
+  const [executionMode, setExecutionMode] = useState<"guarded" | "workspace_write">(project.runtime_preferences.execution_mode ?? "guarded");
   const [diagnosticInfo, setDiagnosticInfo] = useState<DiagnosticExportResponse | null>(null);
 
   const runtimeSummary = useMemo(() => {
@@ -294,8 +295,9 @@ export function SettingsPanels({
           : scriptPreference === "prefer_mixed"
             ? "按任务选择"
             : "让 Manager 询问";
-    return `${script} · Python ${pythonRuntime} · R ${rRuntime}`;
-  }, [pythonRuntime, rRuntime, scriptPreference]);
+    const mode = executionMode === "workspace_write" ? "Workspace Write" : "Guarded";
+    return `${script} · Python ${pythonRuntime} · R ${rRuntime} · ${mode}`;
+  }, [pythonRuntime, rRuntime, scriptPreference, executionMode]);
 
   useEffect(() => {
     if (!appSettingsQuery.data) return;
@@ -380,6 +382,7 @@ export function SettingsPanels({
         script_preference: scriptPreference,
         python_runtime: pythonRuntime === "__system__" ? null : pythonRuntime,
         r_runtime: rRuntime === "__system__" ? null : rRuntime,
+        execution_mode: executionMode,
       });
       setStatus("项目运行时偏好已保存。");
     } catch (error) {
@@ -607,6 +610,13 @@ export function SettingsPanels({
                   {item.label}
                 </option>
               ))}
+            </select>
+          </label>
+          <label className="settings-field">
+            <span>执行模式</span>
+            <select value={executionMode} onChange={(event) => setExecutionMode(event.target.value as "guarded" | "workspace_write")} disabled={readOnly}>
+              <option value="guarded">Guarded（每 run 独立目录）</option>
+              <option value="workspace_write">Workspace Write（cwd 在 work/）</option>
             </select>
           </label>
         </div>

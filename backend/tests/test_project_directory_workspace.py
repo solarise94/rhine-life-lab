@@ -355,3 +355,485 @@ class TestWorkEntriesEndpoint(TestCase):
         with self.assertRaises(HTTPException) as ctx:
             list_project_work_entries("no-such-proj", "", "all", None, False, svc)
         self.assertEqual(ctx.exception.status_code, 404)
+
+
+class TestWorkspaceWriteMode(TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.data_root = Path(self.tmpdir.name) / "workspace"
+        self.data_root.mkdir(parents=True)
+        self.settings = Settings(data_root=self.data_root)
+        get_settings.cache_clear()
+
+    def tearDown(self) -> None:
+        get_settings.cache_clear()
+        self.tmpdir.cleanup()
+
+    def _svc(self) -> ProjectService:
+        with patch("app.services.project_service.get_settings", return_value=self.settings):
+            return ProjectService()
+
+    def test_execution_guard_serializes_workspace_write(self) -> None:
+        """workspace_write runs use per-project lock regardless of sandbox."""
+        from app.services.worker_service import WorkerService
+        from app.services.manifest_service import ManifestService
+        from app.services.runtime_approval_service import RuntimeApprovalService
+
+        svc = self._svc()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+
+        worker_service = WorkerService(
+            project_service=svc,
+            manifest_service=ManifestService(svc),
+            runtime_approval_service=RuntimeApprovalService(svc),
+        )
+
+        # workspace_write should acquire a lock (not None)
+        guard, kind = worker_service._acquire_execution_guard("test-proj", "card-1", sandboxed=True, execution_mode="workspace_write")
+        self.assertIsNotNone(guard)
+        self.assertEqual(kind, "composite")
+        guard.release()
+
+    def test_update_runtime_preferences_persists_execution_mode(self) -> None:
+        """PUT runtime-preferences with execution_mode persists and affects task packet."""
+        svc = self._svc()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+        updated = svc.update_project_runtime_preferences("test-proj", {"execution_mode": "workspace_write"})
+        self.assertEqual(updated.execution_mode, "workspace_write")
+        prefs = svc.get_project_runtime_preferences("test-proj")
+        self.assertEqual(prefs.execution_mode, "workspace_write")
+
+    def test_task_packet_workspace_write_allows_work_path(self) -> None:
+        """workspace_write task packet includes work/ in allowed_paths."""
+        from app.models.cards import Card
+        from app.models.output_contracts import CardOutputSpec
+        from app.services.worker_service import WorkerService
+        from app.services.manifest_service import ManifestService
+        from app.services.runtime_approval_service import RuntimeApprovalService
+
+        svc = self._svc()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+        svc.update_project_runtime_preferences("test-proj", {"execution_mode": "workspace_write"})
+
+        # Seed a minimal graph with one card so _task_packet can resolve inputs.
+        store = svc.graph_store("test-proj")
+        card = Card(
+            card_id="card-1",
+            card_type="run",
+            title="Test Card",
+            status="planned",
+            summary="Test",
+            inputs=[],
+            outputs=[
+                CardOutputSpec(
+                    role="output",
+                    label="Output",
+                    artifact_class="document",
+                    accepted_formats=["csv"],
+                    path_hint="results/card-1/run-1/output.csv",
+                ),
+            ],
+        )
+        store.save_cards([card])
+
+        ws = WorkerService(
+            project_service=svc,
+            manifest_service=ManifestService(svc),
+            runtime_approval_service=RuntimeApprovalService(svc),
+        )
+        packet = ws._task_packet(
+            project_id="test-proj",
+            run_id="run-1",
+            card=card,
+            assets=[],
+            worker_type="test",
+        )
+        self.assertEqual(packet.execution_policy.mode, "workspace_write")
+        self.assertIn("work/", packet.allowed_paths)
+        self.assertIn("runs/run-1/", packet.allowed_paths)
+        self.assertIn("scripts/generated/run-1/", packet.allowed_paths)
+
+    def test_workspace_write_launch_uses_absolute_env_paths_with_relative_run_context(self) -> None:
+        """workspace_write uses absolute paths in env even when run_context has relative run_dir."""
+        from app.workers.command_worker import CommandTemplateWorkerAdapter
+        from app.models.runs import TaskPacket, RunContext, ExecutionPolicy
+        from app.models.executor import ExecutorContext, ExecutorToolPolicy, RuntimeBindings
+
+        adapter = CommandTemplateWorkerAdapter()
+        adapter.command_template = "echo hello"
+        project_root = self.data_root / "test-proj"
+        project_root.mkdir()
+        run_dir = project_root / "runs" / "run-1"
+        run_dir.mkdir(parents=True)
+
+        packet = TaskPacket(
+            task_id="run-1",
+            project_id="test-proj",
+            card_id="card-1",
+            goal="test",
+            worker_instructions="test",
+            run_context=RunContext(
+                run_id="run-1",
+                worker_type="test",
+                project_root=str(project_root),
+                run_dir="runs/run-1",
+                result_dir="results/card-1/run-1",
+            ),
+            execution_policy=ExecutionPolicy(mode="workspace_write"),
+            executor_context=ExecutorContext(
+                tool_policy=ExecutorToolPolicy(),
+                runtime_bindings=RuntimeBindings(),
+            ),
+        )
+        packet_path = run_dir / "task_packet.json"
+        packet_path.write_text(packet.model_dump_json())
+
+        spec = adapter.build_launch_spec(
+            packet=packet,
+            packet_path=packet_path,
+            run_dir=run_dir,
+            project_root=project_root,
+            settings=self.settings,
+        )
+        work_dir = project_root / "work"
+        self.assertEqual(str(spec.cwd), str(work_dir))
+        self.assertTrue(work_dir.exists())
+        self.assertEqual(spec.environment["BLUEPRINT_RESULT_DIR"], str(project_root / "results/card-1/run-1"))
+        self.assertEqual(spec.environment["BLUEPRINT_USER_WORKSPACE"], str(work_dir))
+        self.assertEqual(spec.environment["BLUEPRINT_RUNTIME_WORKING_DIR"], str(work_dir))
+        # Prompt should use env var references, not relative paths
+        prompt_text = Path(spec.environment["BLUEPRINT_EXECUTOR_PROMPT"]).read_text()
+        self.assertIn("$BLUEPRINT_TASK_PACKET", prompt_text)
+        self.assertIn("$BLUEPRINT_MANIFEST_CANDIDATE_PATH", prompt_text)
+
+    def test_workspace_write_creates_missing_work_dir_for_legacy_project(self) -> None:
+        """workspace_write launch auto-creates work/ if missing."""
+        from app.workers.command_worker import CommandTemplateWorkerAdapter
+        from app.models.runs import TaskPacket, RunContext, ExecutionPolicy
+        from app.models.executor import ExecutorContext, ExecutorToolPolicy, RuntimeBindings
+
+        adapter = CommandTemplateWorkerAdapter()
+        adapter.command_template = "echo hello"
+        project_root = self.data_root / "test-proj"
+        project_root.mkdir()
+        run_dir = project_root / "runs" / "run-1"
+        run_dir.mkdir(parents=True)
+        # work/ does NOT exist yet
+        self.assertFalse((project_root / "work").exists())
+
+        packet = TaskPacket(
+            task_id="run-1",
+            project_id="test-proj",
+            card_id="card-1",
+            goal="test",
+            worker_instructions="test",
+            run_context=RunContext(
+                run_id="run-1",
+                worker_type="test",
+                project_root=str(project_root),
+                run_dir="runs/run-1",
+                result_dir="results/card-1/run-1",
+            ),
+            execution_policy=ExecutionPolicy(mode="workspace_write"),
+            executor_context=ExecutorContext(
+                tool_policy=ExecutorToolPolicy(),
+                runtime_bindings=RuntimeBindings(),
+            ),
+        )
+        packet_path = run_dir / "task_packet.json"
+        packet_path.write_text(packet.model_dump_json())
+
+        spec = adapter.build_launch_spec(
+            packet=packet,
+            packet_path=packet_path,
+            run_dir=run_dir,
+            project_root=project_root,
+            settings=self.settings,
+        )
+        self.assertTrue((project_root / "work").exists())
+        self.assertEqual(str(spec.cwd), str(project_root / "work"))
+
+    def test_workspace_write_bwrap_includes_work_bind(self) -> None:
+        """workspace_write bwrap args include --bind for work/."""
+        from app.workers.command_worker import CommandTemplateWorkerAdapter
+        from app.models.runs import TaskPacket, RunContext, ExecutionPolicy
+        from app.models.executor import ExecutorContext, ExecutorToolPolicy, RuntimeBindings
+
+        # Skip if bwrap is not available
+        import shutil
+        if not shutil.which("bwrap"):
+            self.skipTest("bwrap not available")
+
+        adapter = CommandTemplateWorkerAdapter()
+        adapter.command_template = "echo hello"
+        project_root = self.data_root / "test-proj"
+        project_root.mkdir()
+        run_dir = project_root / "runs" / "run-1"
+        run_dir.mkdir(parents=True)
+        work_dir = project_root / "work"
+        work_dir.mkdir()
+
+        # Mock sandbox mode to bwrap
+        class FakeSettings:
+            executor_sandbox_mode = "bwrap"
+            executor_host_root_readonly = True
+            executor_conda_base = ""
+            executor_extra_ro_binds = ""
+            executor_max_concurrent_runs = 1
+
+        packet = TaskPacket(
+            task_id="run-1",
+            project_id="test-proj",
+            card_id="card-1",
+            goal="test",
+            worker_instructions="test",
+            run_context=RunContext(
+                run_id="run-1",
+                worker_type="test",
+                project_root=str(project_root),
+                run_dir=str(run_dir),
+                result_dir="results/card-1/run-1",
+            ),
+            execution_policy=ExecutionPolicy(mode="workspace_write"),
+            executor_context=ExecutorContext(
+                tool_policy=ExecutorToolPolicy(),
+                runtime_bindings=RuntimeBindings(),
+            ),
+        )
+        packet_path = run_dir / "task_packet.json"
+        packet_path.write_text(packet.model_dump_json())
+
+        spec = adapter.build_launch_spec(
+            packet=packet,
+            packet_path=packet_path,
+            run_dir=run_dir,
+            project_root=project_root,
+            settings=FakeSettings(),
+        )
+        self.assertTrue(spec.sandboxed)
+        cmd_str = " ".join(spec.command)
+        self.assertIn(f"--bind {work_dir} {work_dir}", cmd_str)
+        self.assertIn(f"--chdir {work_dir}", cmd_str)
+
+    def _exec_report_executor_result_script(self, run_dir: Path, project_root: Path, run_id: str) -> dict:
+        """Generate and exec the report_executor_result.py script, returning its namespace."""
+        from app.workers.command_worker import CommandTemplateWorkerAdapter
+        script_path = run_dir / "report_executor_result.py"
+        CommandTemplateWorkerAdapter._write_executor_result_tool(script_path)
+        script = script_path.read_text()
+        namespace: dict = {"__name__": "not_main"}
+        # The script imports from app.*; ensure backend is on path
+        import sys
+        if str(Path(__file__).parent.parent) not in sys.path:
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+        exec(compile(script, str(script_path), "exec"), namespace)
+        return namespace
+
+    def test_workspace_write_manifest_rejects_work_dir_output(self) -> None:
+        """Generated executor script rejects manifest created_assets placed in work/."""
+        import os
+        from app.models.runs import TaskPacket, ExecutionPolicy, TaskOutputSpec
+
+        project_root = self.data_root / "test-proj"
+        project_root.mkdir()
+        run_dir = project_root / "runs" / "run-1"
+        run_dir.mkdir(parents=True)
+        work_dir = project_root / "work"
+        work_dir.mkdir()
+        results_dir = project_root / "results" / "card-1" / "run-1"
+        results_dir.mkdir(parents=True)
+
+        # Create manifest with output in work/
+        manifest_path = run_dir / "manifest.candidate.json"
+        manifest_path.write_text(json.dumps({
+            "run_id": "run-1",
+            "status": "success",
+            "summary": "test",
+            "created_assets": [
+                {
+                    "role": "output",
+                    "path": "work/output.csv",
+                    "label": "Output",
+                    "artifact_class": "document",
+                    "format": "csv",
+                }
+            ],
+        }))
+        (work_dir / "output.csv").write_text("a,b\n1,2")
+
+        packet = TaskPacket(
+            task_id="run-1",
+            project_id="test-proj",
+            card_id="card-1",
+            goal="test",
+            worker_instructions="test",
+            allowed_paths=["work/", "runs/run-1/", "results/card-1/run-1/", "scripts/generated/run-1/"],
+            expected_outputs=[
+                TaskOutputSpec(
+                    role="output",
+                    label="Output",
+                    artifact_class="document",
+                    accepted_formats=["csv"],
+                    path_hint="results/card-1/run-1/output.csv",
+                ),
+            ],
+            execution_policy=ExecutionPolicy(mode="workspace_write"),
+        )
+
+        env = os.environ.copy()
+        env["BLUEPRINT_RUN_DIR"] = str(run_dir)
+        env["BLUEPRINT_PROJECT_ROOT"] = str(project_root)
+        env["BLUEPRINT_RUN_ID"] = "run-1"
+        old_environ = dict(os.environ)
+        try:
+            os.environ.update(env)
+            ns = self._exec_report_executor_result_script(run_dir, project_root, "run-1")
+            manifest, errors = ns["_validate_candidate_manifest"](manifest_path, packet)
+        finally:
+            os.environ.clear()
+            os.environ.update(old_environ)
+
+        self.assertIsNotNone(manifest)
+        self.assertTrue(
+            any("must not be placed in work/" in e for e in errors),
+            f"Expected work/ rejection, got: {errors}"
+        )
+
+    def test_guarded_manifest_work_dir_rejected_by_allowed_paths(self) -> None:
+        """guarded mode: manifest with created_assets in work/ rejected by allowed_paths."""
+        import os
+        from app.models.runs import TaskPacket, ExecutionPolicy, TaskOutputSpec
+
+        project_root = self.data_root / "test-proj"
+        project_root.mkdir()
+        run_dir = project_root / "runs" / "run-1"
+        run_dir.mkdir(parents=True)
+        work_dir = project_root / "work"
+        work_dir.mkdir()
+
+        manifest_path = run_dir / "manifest.candidate.json"
+        manifest_path.write_text(json.dumps({
+            "run_id": "run-1",
+            "status": "success",
+            "summary": "test",
+            "created_assets": [
+                {
+                    "role": "output",
+                    "path": "work/output.csv",
+                    "label": "Output",
+                    "artifact_class": "document",
+                    "format": "csv",
+                }
+            ],
+        }))
+        (work_dir / "output.csv").write_text("a,b\n1,2")
+
+        packet = TaskPacket(
+            task_id="run-1",
+            project_id="test-proj",
+            card_id="card-1",
+            goal="test",
+            worker_instructions="test",
+            allowed_paths=["runs/run-1/", "results/card-1/run-1/", "scripts/generated/run-1/"],
+            expected_outputs=[
+                TaskOutputSpec(
+                    role="output",
+                    label="Output",
+                    artifact_class="document",
+                    accepted_formats=["csv"],
+                    path_hint="results/card-1/run-1/output.csv",
+                ),
+            ],
+            execution_policy=ExecutionPolicy(mode="guarded"),
+        )
+
+        env = os.environ.copy()
+        env["BLUEPRINT_RUN_DIR"] = str(run_dir)
+        env["BLUEPRINT_PROJECT_ROOT"] = str(project_root)
+        env["BLUEPRINT_RUN_ID"] = "run-1"
+        old_environ = dict(os.environ)
+        try:
+            os.environ.update(env)
+            ns = self._exec_report_executor_result_script(run_dir, project_root, "run-1")
+            manifest, errors = ns["_validate_candidate_manifest"](manifest_path, packet)
+        finally:
+            os.environ.clear()
+            os.environ.update(old_environ)
+
+        self.assertIsNotNone(manifest)
+        self.assertTrue(
+            any("outside allowed_paths" in e for e in errors),
+            f"Expected allowed_paths rejection, got: {errors}"
+        )
+
+
+class TestRegisterWorkAsset(TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.data_root = Path(self.tmpdir.name) / "workspace"
+        self.data_root.mkdir(parents=True)
+        self.settings = Settings(data_root=self.data_root)
+        get_settings.cache_clear()
+
+    def tearDown(self) -> None:
+        get_settings.cache_clear()
+        self.tmpdir.cleanup()
+
+    def _svc(self) -> ProjectService:
+        with patch("app.services.project_service.get_settings", return_value=self.settings):
+            return ProjectService()
+
+    def test_register_work_asset_creates_asset(self) -> None:
+        """Registering a work/ file creates an asset with correct metadata."""
+        from app.api.files import register_work_asset
+        from fastapi import HTTPException
+
+        svc = self._svc()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+        work = self.data_root / "test-proj" / "work"
+        (work / "data.csv").write_text("a,b\n1,2")
+
+        resp = register_work_asset("test-proj", type("Req", (), {"path": "data.csv"})(), svc)
+        asset = resp["asset"]
+        self.assertEqual(asset["path"], "work/data.csv")
+        self.assertEqual(asset["asset_type"], "document")
+        self.assertEqual(asset["metadata"]["source"], "work_directory")
+
+    def test_register_work_asset_rejects_directory(self) -> None:
+        """Registering a directory is rejected."""
+        from app.api.files import register_work_asset
+        from fastapi import HTTPException
+
+        svc = self._svc()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+        work = self.data_root / "test-proj" / "work"
+        (work / "subdir").mkdir()
+
+        with self.assertRaises(HTTPException) as ctx:
+            register_work_asset("test-proj", type("Req", (), {"path": "subdir"})(), svc)
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_register_work_asset_rejects_traversal(self) -> None:
+        """Path traversal in register is rejected."""
+        from app.api.files import register_work_asset
+        from fastapi import HTTPException
+
+        svc = self._svc()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+
+        with self.assertRaises(HTTPException) as ctx:
+            register_work_asset("test-proj", type("Req", (), {"path": "../secret"})(), svc)
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_register_work_asset_is_idempotent_by_path(self) -> None:
+        """Registering the same work file twice returns the existing asset."""
+        from app.api.files import register_work_asset
+
+        svc = self._svc()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+        work = self.data_root / "test-proj" / "work"
+        (work / "data.csv").write_text("a,b\n1,2")
+
+        resp1 = register_work_asset("test-proj", type("Req", (), {"path": "data.csv"})(), svc)
+        resp2 = register_work_asset("test-proj", type("Req", (), {"path": "data.csv"})(), svc)
+        self.assertEqual(resp1["asset"]["asset_id"], resp2["asset"]["asset_id"])

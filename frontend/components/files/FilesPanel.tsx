@@ -149,7 +149,7 @@ export function FilesPanel({
         </div>
       </section>
 
-      <WorkDirectorySection projectId={projectId} />
+      <WorkDirectorySection projectId={projectId} onRefresh={onRefresh} />
 
       <AssetSection
         title="正在使用的数据资产"
@@ -192,11 +192,27 @@ export function FilesPanel({
   );
 }
 
-function WorkDirectorySection({ projectId }: { projectId: string }) {
+function WorkDirectorySection({ projectId, onRefresh }: { projectId: string; onRefresh: () => Promise<void> }) {
   const [entries, setEntries] = useState<WorkspaceEntry[]>([]);
   const [currentPath, setCurrentPath] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [registerError, setRegisterError] = useState<string | null>(null);
+  const [registerSuccess, setRegisterSuccess] = useState<string | null>(null);
+
+  const registerMutation = useMutation({
+    mutationFn: (path: string) => api.registerWorkAsset(projectId, { path }),
+    onSuccess: async () => {
+      setRegisterError(null);
+      setRegisterSuccess("已注册为项目资产。");
+      await onRefresh();
+      setTimeout(() => setRegisterSuccess(null), 3000);
+    },
+    onError: (err: Error) => {
+      setRegisterSuccess(null);
+      setRegisterError(err.message);
+    },
+  });
 
   useEffect(() => {
     setLoading(true);
@@ -228,6 +244,8 @@ function WorkDirectorySection({ projectId }: { projectId: string }) {
       </div>
       <div className="panel-body stack">
         {error ? <div className="notice-panel error">{error}</div> : null}
+        {registerError ? <div className="notice-panel error">{registerError}</div> : null}
+        {registerSuccess ? <div className="notice-panel success">{registerSuccess}</div> : null}
         <div className="directory-browser-breadcrumb" style={{ padding: 0, border: 0 }}>
           <button
             type="button"
@@ -258,20 +276,42 @@ function WorkDirectorySection({ projectId }: { projectId: string }) {
             <div className="browser-empty">work/ 目录为空</div>
           ) : null}
           {entries.map((entry) => (
-            <button
-              key={entry.name}
-              type="button"
-              className="browser-entry"
-              onClick={() => {
-                if (entry.kind === "directory") {
-                  setCurrentPath(currentPath ? `${currentPath}/${entry.name}` : entry.name);
-                }
-              }}
-            >
-              {entry.kind === "directory" ? <Folder size={16} /> : <FileText size={16} />}
-              <span className="entry-name">{entry.name}</span>
-              {entry.size_bytes != null ? <span className="entry-badge">{formatBytes(entry.size_bytes)}</span> : null}
-            </button>
+            <div key={entry.name} className="browser-entry" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button
+                type="button"
+                className="browser-entry"
+                style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, padding: 0, border: 0, background: "transparent" }}
+                onClick={() => {
+                  if (entry.kind === "directory") {
+                    setCurrentPath(currentPath ? `${currentPath}/${entry.name}` : entry.name);
+                  }
+                }}
+              >
+                {entry.kind === "directory" ? <Folder size={16} /> : <FileText size={16} />}
+                <span className="entry-name">{entry.name}</span>
+                {entry.size_bytes != null ? <span className="entry-badge">{formatBytes(entry.size_bytes)}</span> : null}
+              </button>
+              {entry.kind === "file" ? (
+                <button
+                  type="button"
+                  className="btn secondary"
+                  style={{ padding: "2px 8px", fontSize: 12 }}
+                  onClick={() => {
+                    const fullPath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
+                    registerMutation.mutate(fullPath);
+                  }}
+                  disabled={registerMutation.isPending}
+                  title="注册为项目资产，可作为 card 输入"
+                >
+                  {registerMutation.isPending && registerMutation.variables === (currentPath ? `${currentPath}/${entry.name}` : entry.name) ? (
+                    <Loader2 size={12} className="spinning" />
+                  ) : (
+                    <Link2 size={12} />
+                  )}
+                  用作输入
+                </button>
+              ) : null}
+            </div>
           ))}
         </div>
       </div>

@@ -5,12 +5,16 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from fastapi.responses import FileResponse
 
+from uuid import uuid4
+
 from app.api.deps import get_project_file_service, get_project_service
+from app.models.graph import Asset
 from app.services.project_file_service import ProjectFileService
 from app.services.project_service import ProjectService
-from app.services.utils import resolve_within
+from app.services.utils import resolve_within, sha256_file, utc_now
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["files"])
 
@@ -190,3 +194,88 @@ def list_project_work_entries(
             })
 
     return {"project_id": project_id, "path": relative, "items": items, "next_cursor": next_cursor}
+
+
+class RegisterWorkAssetRequest(BaseModel):
+    path: str
+
+
+def _asset_type_for_path(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".csv", ".tsv", ".txt", ".md", ".json", ".yaml", ".yml", ".xml", ".html"}:
+        return "document"
+    if suffix in {".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".webp", ".tiff"}:
+        return "image"
+    if suffix in {".py", ".r", ".rs", ".js", ".ts", ".c", ".cpp", ".go", ".java", ".sh"}:
+        return "script"
+    return "data"
+
+
+@router.post("/work-assets/register")
+def register_work_asset(
+    project_id: str,
+    request: RegisterWorkAssetRequest,
+    project_service: ProjectService = Depends(get_project_service),
+) -> dict:
+    """Register a file under the project's work/ directory as a project asset."""
+    project_root = project_service.project_path(project_id)
+    if not (project_root / "project.json").exists():
+        raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+
+    work_root = project_root / "work"
+    if not work_root.exists():
+        raise HTTPException(status_code=404, detail="Work directory does not exist for this project.")
+
+    relative = request.path.strip("/")
+    if ".." in relative.split("/"):
+        raise HTTPException(status_code=403, detail="Path traversal is not allowed.")
+
+    try:
+        target = resolve_within(work_root, relative) if relative else work_root
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {relative}")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail=f"Path is not a file: {relative}")
+
+    size = target.stat().st_size
+    digest = sha256_file(target)
+    asset_id = f"work_{utc_now().replace(':', '').replace('-', '').replace('Z', '')}_{uuid4().hex[:8]}_{target.stem[:32].lower()}"
+    asset_path = f"work/{relative}"
+
+    with project_service.lock_for(project_id):
+        store = project_service.graph_store(project_id)
+        graph = store.load_graph()
+        if any(existing.asset_id == asset_id for existing in graph.assets):
+            raise HTTPException(status_code=409, detail="Asset id collision")
+
+        existing = next(
+            (
+                item for item in graph.assets
+                if item.path == asset_path and item.metadata.get("source") == "work_directory"
+            ),
+            None,
+        )
+        if existing:
+            return {"asset": existing.model_dump()}
+
+        asset = Asset(
+            asset_id=asset_id,
+            asset_type=_asset_type_for_path(target),
+            title=target.name,
+            status="candidate",
+            path=asset_path,
+            summary=f"Registered from work directory. Size: {size} bytes.",
+            metadata={
+                "source": "work_directory",
+                "size_bytes": size,
+                "sha256": digest,
+                "registered_at": utc_now(),
+            },
+        )
+        graph.assets.append(asset)
+        store.save_assets(graph.assets)
+
+    return {"asset": asset.model_dump()}

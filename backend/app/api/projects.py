@@ -31,6 +31,7 @@ class UpdateProjectRuntimePreferencesRequest(BaseModel):
     script_preference: Literal["auto", "prefer_python", "prefer_r", "prefer_mixed"] | None = None
     python_runtime: str | None = None
     r_runtime: str | None = None
+    execution_mode: Literal["guarded", "workspace_write"] | None = None
 
 
 @router.get("")

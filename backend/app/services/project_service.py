@@ -903,6 +903,10 @@ class ProjectService:
             if "r_runtime" in payload:
                 value = str(payload["r_runtime"]).strip() if payload["r_runtime"] is not None else ""
                 runtime_preferences.r_runtime = value or None
+            if "execution_mode" in payload and payload["execution_mode"] is not None:
+                mode = str(payload["execution_mode"]).strip()
+                if mode in {"guarded", "workspace_write"}:
+                    runtime_preferences.execution_mode = mode
             project = project.model_copy(update={"runtime_preferences": runtime_preferences, "updated_at": utc_now()})
             graph.metadata["runtime_preferences"] = runtime_preferences.model_dump()
             graph.metadata["default_conda_env"] = runtime_preferences.python_runtime

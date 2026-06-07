@@ -251,6 +251,12 @@ export const api = {
     params.set("kind", kind);
     return request<ProjectWorkEntriesResponse>(`/projects/${encodeURIComponent(projectId)}/work-entries?${params.toString()}`);
   },
+  registerWorkAsset(projectId: string, payload: { path: string }) {
+    return request<{ asset: Asset }>(`/projects/${encodeURIComponent(projectId)}/work-assets/register`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
   getProject(projectId: string) {
     return request<ProjectSnapshot>(`/projects/${projectId}`);
   },

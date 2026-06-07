@@ -7,7 +7,8 @@
           "enum": [
             "audit",
             "guarded",
-            "strict"
+            "strict",
+            "workspace_write"
           ],
           "title": "Mode",
           "type": "string"

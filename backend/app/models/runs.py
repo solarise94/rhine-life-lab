@@ -55,7 +55,7 @@ class RunContext(BaseModel):
 
 
 class ExecutionPolicy(BaseModel):
-    mode: Literal["audit", "guarded", "strict"] = "audit"
+    mode: Literal["audit", "guarded", "strict", "workspace_write"] = "audit"
     network: str = "prompt"
     write_policy: str = "allowed_paths_with_post_run_audit"
     on_policy_violation: str = "fail_or_quarantine"

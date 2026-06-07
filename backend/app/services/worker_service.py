@@ -232,7 +232,10 @@ class WorkerService:
         if adapter is None:
             raise HTTPException(status_code=400, detail=f"Unknown worker_type: {resolved_worker_type}")
 
-        execution_guard, guard_kind = self._acquire_execution_guard(project_id, card_id, sandboxed=adapter.uses_sandbox(self.project_service.settings))
+        runtime_prefs = self.project_service.get_project_runtime_preferences(project_id)
+        execution_guard, guard_kind = self._acquire_execution_guard(
+            project_id, card_id, sandboxed=adapter.uses_sandbox(self.project_service.settings), execution_mode=runtime_prefs.execution_mode
+        )
         if execution_guard is None:
             raise HTTPException(
                 status_code=409,
@@ -495,7 +498,10 @@ class WorkerService:
         adapter = self.registry.get(run.worker_type)
         if adapter is None:
             raise HTTPException(status_code=400, detail=f"Unknown worker_type: {run.worker_type}")
-        execution_guard, guard_kind = self._acquire_execution_guard(project_id, run.card_id, sandboxed=adapter.uses_sandbox(self.project_service.settings))
+        packet = self.manifest_service.load_task_packet(project_id, run_id)
+        execution_guard, guard_kind = self._acquire_execution_guard(
+            project_id, run.card_id, sandboxed=adapter.uses_sandbox(self.project_service.settings), execution_mode=packet.execution_policy.mode
+        )
         if execution_guard is None:
             raise HTTPException(
                 status_code=409,
@@ -503,7 +509,6 @@ class WorkerService:
             )
         lock_transferred_to_thread = False
         try:
-            packet = self.manifest_service.load_task_packet(project_id, run_id)
             run_dir = self.project_service.project_path(project_id) / "runs" / run_id
             try:
                 launch_spec = adapter.build_launch_spec(
@@ -1430,7 +1435,17 @@ class WorkerService:
         finally:
             self._release_execution_guard(execution_guard, guard_kind)
 
-    def _acquire_execution_guard(self, project_id: str, card_id: str, *, sandboxed: bool) -> tuple[Lock | Semaphore | None, str]:
+    def _acquire_execution_guard(self, project_id: str, card_id: str, *, sandboxed: bool, execution_mode: str = "guarded") -> tuple[Lock | Semaphore | None, str]:
+        if execution_mode == "workspace_write":
+            # Serialize workspace_write runs per project regardless of sandbox.
+            card_lock = self._card_lock_for(project_id, card_id)
+            if not card_lock.acquire(blocking=False):
+                return None, "card_lock"
+            execution_lock = self._execution_lock_for(project_id)
+            if not execution_lock.acquire(blocking=False):
+                card_lock.release()
+                return None, "lock"
+            return _CompositeExecutionGuard(card_lock, execution_lock), "composite"
         if not sandboxed:
             execution_lock = self._execution_lock_for(project_id)
             if not execution_lock.acquire(blocking=False):
@@ -1838,6 +1853,10 @@ class WorkerService:
         expected_outputs.extend(self._system_expected_outputs(card.card_id, run_id))
 
         result_dir = f"results/{card.card_id}/{run_id}"
+        execution_mode = self.project_service.get_project_runtime_preferences(project_id).execution_mode
+        allowed_paths = [f"runs/{run_id}/", f"{result_dir}/", f"scripts/generated/{run_id}/"]
+        if execution_mode == "workspace_write":
+            allowed_paths.insert(0, "work/")
         return TaskPacket(
             task_id=run_id,
             project_id=project_id,
@@ -1849,11 +1868,11 @@ class WorkerService:
             card_inputs=card_inputs,
             card_outputs=card_outputs,
             expected_outputs=expected_outputs,
-            allowed_paths=[f"runs/{run_id}/", f"{result_dir}/", "scripts/generated/"],
+            allowed_paths=allowed_paths,
             readonly_paths=[asset.path for asset in input_assets],
             forbidden_paths=[".git/", "graph/"],
             execution_policy={
-                "mode": "guarded",
+                "mode": execution_mode,
                 "network": "prompt",
                 "write_policy": "allowed_paths_with_post_run_audit",
                 "on_policy_violation": "fail_or_quarantine",
@@ -1861,13 +1880,13 @@ class WorkerService:
             constraints=[
                 "Do not overwrite existing valid assets.",
                 f"Write outputs under {result_dir}/",
-                f"Write the candidate manifest to runs/{run_id}/manifest.candidate.json.",
-                f"Call runs/{run_id}/report_executor_result.py complete or fail exactly once before exiting.",
+                "Write the candidate manifest to $BLUEPRINT_MANIFEST_CANDIDATE_PATH.",
+                "Call $BLUEPRINT_EXECUTOR_RESULT_TOOL complete or fail exactly once before exiting.",
                 "Do not modify graph/, .git/, or upstream input assets.",
-                f"Do not install missing runtime packages. If required packages/tools are unavailable, use runs/{run_id}/report_executor_result.py fail to report them and stop.",
+                "Do not install missing runtime packages. If required packages/tools are unavailable, use $BLUEPRINT_EXECUTOR_RESULT_TOOL fail to report them and stop.",
             ],
             worker_instructions=(
-                "You are a bioinformatics worker agent. Read task_packet.json, use the declared inputs, "
+                "You are a bioinformatics worker agent. Read $BLUEPRINT_TASK_PACKET, use the declared inputs, "
                 "write only inside allowed_paths, and produce terminal reports plus a candidate manifest that matches expected_outputs."
             ),
             run_context=RunContext(
