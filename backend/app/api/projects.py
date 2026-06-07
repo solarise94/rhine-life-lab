@@ -18,6 +18,15 @@ class CreateProjectRequest(BaseModel):
     current_goal: str
 
 
+class CreateProjectFromDirectoryRequest(BaseModel):
+    root_id: str
+    parent_path: str
+    directory_name: str
+    project_id: str
+    name: str
+    current_goal: str
+
+
 class UpdateProjectRuntimePreferencesRequest(BaseModel):
     script_preference: Literal["auto", "prefer_python", "prefer_r", "prefer_mixed"] | None = None
     python_runtime: str | None = None
@@ -39,15 +48,32 @@ def create_project(request: CreateProjectRequest, project_service: ProjectServic
     return {"project": project}
 
 
+@router.post("/from-directory")
+def create_project_from_directory(
+    request: CreateProjectFromDirectoryRequest,
+    project_service: ProjectService = Depends(get_project_service),
+) -> dict:
+    project = project_service.create_project_from_directory(
+        root_id=request.root_id,
+        parent_path=request.parent_path,
+        directory_name=request.directory_name,
+        project_id=request.project_id,
+        name=request.name,
+        current_goal=request.current_goal,
+    )
+    return {"project": project}
+
+
 @router.delete("/{project_id}")
 def delete_project(
     project_id: str,
+    delete_directory: bool = False,
     project_service: ProjectService = Depends(get_project_service),
     worker_service: WorkerService = Depends(get_worker_service),
 ) -> dict:
     if worker_service.has_active_runs(project_id):
         raise HTTPException(status_code=409, detail=f"Project {project_id} has active runs and cannot be deleted.")
-    project_service.delete_project(project_id)
+    project_service.delete_project(project_id, delete_directory=delete_directory)
     return {"ok": True}
 
 

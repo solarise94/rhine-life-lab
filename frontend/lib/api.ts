@@ -9,12 +9,16 @@ import {
   ChatUploadResponse,
   ManagerAutoState,
   CreateProjectPayload,
+  CreateProjectFromDirectoryPayload,
+  WorkspaceRoot,
+  WorkspaceEntriesResponse,
   Proposal,
   ProjectFiles,
   ProjectEnvironment,
   ProjectSnapshot,
   ProjectState,
   ProjectSummary,
+  ProjectWorkEntriesResponse,
   ProjectRuntimePreferences,
   ReportExportResponse,
   DiagnosticExportResponse,
@@ -220,10 +224,32 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
-  deleteProject(projectId: string) {
-    return request<{ ok: boolean }>(`/projects/${projectId}`, {
+  createProjectFromDirectory(payload: CreateProjectFromDirectoryPayload) {
+    return request<{ project: ProjectState }>("/projects/from-directory", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+  deleteProject(projectId: string, deleteDirectory?: boolean) {
+    const query = deleteDirectory ? "?delete_directory=true" : "";
+    return request<{ ok: boolean }>(`/projects/${projectId}${query}`, {
       method: "DELETE",
     });
+  },
+  listWorkspaceRoots() {
+    return request<{ items: WorkspaceRoot[] }>("/workspace-roots");
+  },
+  listWorkspaceEntries(rootId: string, path: string, kind: "directory" | "all" = "directory") {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    params.set("kind", kind);
+    return request<WorkspaceEntriesResponse>(`/workspace-roots/${encodeURIComponent(rootId)}/entries?${params.toString()}`);
+  },
+  listProjectWorkEntries(projectId: string, path: string = "", kind: "directory" | "all" = "all") {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    params.set("kind", kind);
+    return request<ProjectWorkEntriesResponse>(`/projects/${encodeURIComponent(projectId)}/work-entries?${params.toString()}`);
   },
   getProject(projectId: string) {
     return request<ProjectSnapshot>(`/projects/${projectId}`);

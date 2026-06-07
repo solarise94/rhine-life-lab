@@ -1,11 +1,14 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Beaker, FolderOpen, Plus, Trash2 } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { Beaker, ChevronLeft, Folder, FolderOpen, Plus, Trash2 } from "lucide-react";
 
+import { api } from "@/lib/api";
 import { useCreateProjectMutation, useDeleteProjectMutation, useProjects } from "@/lib/hooks";
-import { ProjectSummary } from "@/lib/types";
+import { queryKeys } from "@/lib/query-keys";
+import { ProjectSummary, WorkspaceEntry, WorkspaceRoot } from "@/lib/types";
 
 function slugifyProjectId(value: string) {
   const slug = value
@@ -73,12 +76,266 @@ function ProjectRow({
   );
 }
 
+function DirectoryBrowserModal({
+  onClose,
+  onCreate,
+  busy,
+}: {
+  onClose: () => void;
+  onCreate: (payload: {
+    root_id: string;
+    parent_path: string;
+    directory_name: string;
+    project_id: string;
+    name: string;
+    current_goal: string;
+  }) => Promise<void>;
+  busy: boolean;
+}) {
+  const [roots, setRoots] = useState<WorkspaceRoot[]>([]);
+  const [selectedRoot, setSelectedRoot] = useState<WorkspaceRoot | null>(null);
+  const [currentPath, setCurrentPath] = useState("");
+  const [entries, setEntries] = useState<WorkspaceEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [browserError, setBrowserError] = useState<string | null>(null);
+
+  const [directoryName, setDirectoryName] = useState("");
+  const [projectName, setProjectName] = useState("");
+  const [projectId, setProjectId] = useState("");
+  const [projectIdTouched, setProjectIdTouched] = useState(false);
+  const [currentGoal, setCurrentGoal] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.listWorkspaceRoots()
+      .then((res) => {
+        setRoots(res.items);
+        if (res.items.length > 0) {
+          setSelectedRoot(res.items[0]);
+        }
+      })
+      .catch((err: Error) => {
+        setBrowserError(err.message);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!selectedRoot) return;
+    setLoading(true);
+    setBrowserError(null);
+    let cancelled = false;
+    api
+      .listWorkspaceEntries(selectedRoot.root_id, currentPath, "directory")
+      .then((res) => {
+        if (!cancelled) {
+          setEntries(res.items);
+        }
+      })
+      .catch((err: Error) => {
+        if (!cancelled) {
+          setBrowserError(err.message);
+          setEntries([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRoot, currentPath]);
+
+  function handleNameChange(value: string) {
+    setProjectName(value);
+    if (!projectIdTouched) {
+      setProjectId(slugifyProjectId(value));
+    }
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const nextDirName = directoryName.trim();
+    const nextName = projectName.trim();
+    const nextProjectId = slugifyProjectId(projectId || projectName);
+    const nextGoal = currentGoal.trim();
+    if (!selectedRoot) {
+      setFormError("请选择一个根目录。");
+      return;
+    }
+    if (!nextDirName) {
+      setFormError("请输入目录名称。");
+      return;
+    }
+    if (!nextName || !nextProjectId || !nextGoal) {
+      setFormError("请填写项目名称、Project ID 和项目目标。");
+      return;
+    }
+    setFormError(null);
+    await onCreate({
+      root_id: selectedRoot.root_id,
+      parent_path: currentPath,
+      directory_name: nextDirName,
+      project_id: nextProjectId,
+      name: nextName,
+      current_goal: nextGoal,
+    });
+  }
+
+  const pathParts = currentPath ? currentPath.split("/").filter(Boolean) : [];
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>新建服务器项目目录</h3>
+          <button type="button" className="btn secondary" onClick={onClose}>
+            取消
+          </button>
+        </div>
+
+        {(browserError || formError) ? (
+          <div className="notice-panel error">{browserError || formError}</div>
+        ) : null}
+
+        <form onSubmit={handleSubmit} className="directory-browser-form">
+          <div className="directory-browser-pane">
+            <div className="directory-browser-toolbar">
+              <select
+                value={selectedRoot?.root_id ?? ""}
+                onChange={(e) => {
+                  const root = roots.find((r) => r.root_id === e.target.value);
+                  setSelectedRoot(root || null);
+                  setCurrentPath("");
+                }}
+                disabled={loading}
+              >
+                {roots.map((r) => (
+                  <option key={r.root_id} value={r.root_id}>
+                    {r.label} ({r.path})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="directory-browser-breadcrumb">
+              <button
+                type="button"
+                className="breadcrumb-root"
+                onClick={() => setCurrentPath("")}
+                disabled={currentPath === ""}
+              >
+                {selectedRoot?.label ?? "Root"}
+              </button>
+              {pathParts.map((part, idx) => (
+                <span key={idx} className="breadcrumb-part">
+                  <span>/</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCurrentPath(pathParts.slice(0, idx + 1).join("/"))
+                    }
+                  >
+                    {part}
+                  </button>
+                </span>
+              ))}
+            </div>
+
+            <div className="directory-browser-list">
+              {loading ? <div className="browser-empty">加载中...</div> : null}
+              {!loading && currentPath !== "" ? (
+                <button
+                  type="button"
+                  className="browser-entry browser-up"
+                  onClick={() =>
+                    setCurrentPath(pathParts.slice(0, -1).join("/"))
+                  }
+                >
+                  <ChevronLeft size={16} />
+                  ..
+                </button>
+              ) : null}
+              {!loading && entries.length === 0 && currentPath === "" ? (
+                <div className="browser-empty">空目录</div>
+              ) : null}
+              {entries.map((entry) => (
+                <button
+                  key={entry.name}
+                  type="button"
+                  className="browser-entry"
+                  onClick={() => setCurrentPath(currentPath ? `${currentPath}/${entry.name}` : entry.name)}
+                >
+                  <Folder size={16} />
+                  <span className="entry-name">{entry.name}</span>
+                  {entry.is_empty ? <span className="entry-badge">空</span> : null}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="directory-browser-form-fields">
+            <label>
+              <span>目录名称</span>
+              <input
+                value={directoryName}
+                onChange={(e) => setDirectoryName(e.target.value)}
+                placeholder="my-project"
+                required
+              />
+            </label>
+            <label>
+              <span>项目名称</span>
+              <input
+                value={projectName}
+                onChange={(e) => handleNameChange(e.target.value)}
+                placeholder="My Project"
+                required
+              />
+            </label>
+            <label>
+              <span>Project ID</span>
+              <input
+                value={projectId}
+                onChange={(e) => {
+                  setProjectIdTouched(true);
+                  setProjectId(slugifyProjectId(e.target.value));
+                }}
+                placeholder="my-project"
+                required
+              />
+            </label>
+            <label>
+              <span>项目目标</span>
+              <textarea
+                value={currentGoal}
+                onChange={(e) => setCurrentGoal(e.target.value)}
+                placeholder="完成差异表达分析与下游解释"
+                required
+              />
+            </label>
+
+            <div className="directory-browser-actions">
+              <button type="submit" className="btn primary" disabled={busy || loading}>
+                创建并打开
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 export function ProjectDashboard() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const projectsQuery = useProjects();
   const createProjectMutation = useCreateProjectMutation();
   const deleteProjectMutation = useDeleteProjectMutation();
   const [isCreating, setIsCreating] = useState(false);
+  const [isCreatingFromDirectory, setIsCreatingFromDirectory] = useState(false);
   const [name, setName] = useState("");
   const [projectId, setProjectId] = useState("");
   const [projectIdTouched, setProjectIdTouched] = useState(false);
@@ -86,8 +343,11 @@ export function ProjectDashboard() {
   const [formError, setFormError] = useState<string | null>(null);
 
   const projects = useMemo(
-    () => [...(projectsQuery.data?.items ?? [])].sort((left, right) => right.updated_at.localeCompare(left.updated_at)),
-    [projectsQuery.data],
+    () =>
+      [...(projectsQuery.data?.items ?? [])].sort((left, right) =>
+        right.updated_at.localeCompare(left.updated_at)
+      ),
+    [projectsQuery.data]
   );
   const busy = createProjectMutation.isPending || deleteProjectMutation.isPending;
   const error =
@@ -131,8 +391,31 @@ export function ProjectDashboard() {
     router.push(`/projects/${response.project.project_id}/tasks`);
   }
 
+  async function handleCreateFromDirectory(payload: {
+    root_id: string;
+    parent_path: string;
+    directory_name: string;
+    project_id: string;
+    name: string;
+    current_goal: string;
+  }) {
+    setFormError(null);
+    try {
+      const response = await api.createProjectFromDirectory(payload);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
+      setIsCreatingFromDirectory(false);
+      router.push(`/projects/${response.project.project_id}/tasks`);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "创建项目失败");
+    }
+  }
+
   async function handleDelete(project: ProjectSummary) {
-    if (!window.confirm(`删除项目 "${project.name}"？这会删除 workspace/${project.project_id}。`)) {
+    const isManaged = project.root_kind === "managed_project_directory";
+    const message = isManaged
+      ? `删除项目 "${project.name}"？默认只从 Blueprint 移除，不会删除服务器上的目录。`
+      : `删除项目 "${project.name}"？这会删除 workspace/${project.project_id}。`;
+    if (!window.confirm(message)) {
       return;
     }
     await deleteProjectMutation.mutateAsync(project.project_id);
@@ -145,17 +428,30 @@ export function ProjectDashboard() {
           <h1>Projects</h1>
           <p>管理项目 workspace，打开后进入对应的 Sessions、Cards、文件和结果库。</p>
         </div>
-        <button
-          type="button"
-          className="btn primary"
-          onClick={() => {
-            setIsCreating(true);
-            setFormError(null);
-          }}
-        >
-          <Plus size={16} />
-          新建项目
-        </button>
+        <div className="projects-header-actions">
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() => {
+              setIsCreating(true);
+              setFormError(null);
+            }}
+          >
+            <Plus size={16} />
+            新建项目
+          </button>
+          <button
+            type="button"
+            className="btn secondary"
+            onClick={() => {
+              setIsCreatingFromDirectory(true);
+              setFormError(null);
+            }}
+          >
+            <FolderOpen size={16} />
+            新建服务器项目目录
+          </button>
+        </div>
       </section>
 
       {error ? <div className="notice-panel error">{error}</div> : null}
@@ -178,7 +474,11 @@ export function ProjectDashboard() {
           <form className="project-form" onSubmit={handleCreate}>
             <label>
               <span>项目名称</span>
-              <input value={name} onChange={(event) => handleNameChange(event.target.value)} placeholder="RNA-seq Project" />
+              <input
+                value={name}
+                onChange={(event) => handleNameChange(event.target.value)}
+                placeholder="RNA-seq Project"
+              />
             </label>
             <label>
               <span>Project ID</span>
@@ -208,6 +508,14 @@ export function ProjectDashboard() {
         </section>
       ) : null}
 
+      {isCreatingFromDirectory ? (
+        <DirectoryBrowserModal
+          onClose={() => setIsCreatingFromDirectory(false)}
+          onCreate={handleCreateFromDirectory}
+          busy={busy}
+        />
+      ) : null}
+
       <section className="panel">
         <div className="panel-header">
           <h3>项目列表</h3>
@@ -215,7 +523,9 @@ export function ProjectDashboard() {
         </div>
         <div className="project-list">
           {projectsQuery.isLoading ? <div className="project-empty">加载中...</div> : null}
-          {!projectsQuery.isLoading && !projects.length ? <div className="project-empty">还没有项目。</div> : null}
+          {!projectsQuery.isLoading && !projects.length ? (
+            <div className="project-empty">还没有项目。</div>
+          ) : null}
           {projects.map((project) => (
             <ProjectRow
               key={project.project_id}

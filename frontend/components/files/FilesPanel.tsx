@@ -1,11 +1,11 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { Download, FileCog, FileText, FolderUp, Link2, Loader2, Trash2 } from "lucide-react";
+import { ChevronLeft, Download, FileCog, FileText, Folder, FolderUp, Link2, Loader2, Trash2 } from "lucide-react";
 
 import { api } from "@/lib/api";
-import { Asset, ExecutionFileEntry, ProjectFiles } from "@/lib/types";
+import { Asset, ExecutionFileEntry, ProjectFiles, WorkspaceEntry } from "@/lib/types";
 
 const EXECUTION_CATEGORY_LABELS: Record<string, string> = {
   task_packet: "Task Packet",
@@ -149,6 +149,8 @@ export function FilesPanel({
         </div>
       </section>
 
+      <WorkDirectorySection projectId={projectId} />
+
       <AssetSection
         title="正在使用的数据资产"
         description="仍被 cards、报告或下游资产引用的数据资产，通常是最新 accepted 结果或当前输入。"
@@ -187,6 +189,93 @@ export function FilesPanel({
       />
       <ExecutionFilesSection projectId={projectId} items={files?.execution_files ?? []} />
     </div>
+  );
+}
+
+function WorkDirectorySection({ projectId }: { projectId: string }) {
+  const [entries, setEntries] = useState<WorkspaceEntry[]>([]);
+  const [currentPath, setCurrentPath] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    let cancelled = false;
+    api
+      .listProjectWorkEntries(projectId, currentPath, "all")
+      .then((res) => {
+        if (!cancelled) setEntries(res.items);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, currentPath]);
+
+  const pathParts = currentPath ? currentPath.split("/").filter(Boolean) : [];
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <h3>Work Directory</h3>
+        <span>{entries.length} entries</span>
+      </div>
+      <div className="panel-body stack">
+        {error ? <div className="notice-panel error">{error}</div> : null}
+        <div className="directory-browser-breadcrumb" style={{ padding: 0, border: 0 }}>
+          <button
+            type="button"
+            className="breadcrumb-root"
+            onClick={() => setCurrentPath("")}
+            disabled={currentPath === ""}
+          >
+            work/
+          </button>
+          {pathParts.map((part, idx) => (
+            <span key={idx} className="breadcrumb-part">
+              <span>/</span>
+              <button type="button" onClick={() => setCurrentPath(pathParts.slice(0, idx + 1).join("/"))}>
+                {part}
+              </button>
+            </span>
+          ))}
+        </div>
+        <div className="directory-browser-list" style={{ maxHeight: 320 }}>
+          {loading ? <div className="browser-empty">加载中...</div> : null}
+          {!loading && currentPath !== "" ? (
+            <button type="button" className="browser-entry browser-up" onClick={() => setCurrentPath(pathParts.slice(0, -1).join("/"))}>
+              <ChevronLeft size={16} />
+              ..
+            </button>
+          ) : null}
+          {!loading && entries.length === 0 && currentPath === "" ? (
+            <div className="browser-empty">work/ 目录为空</div>
+          ) : null}
+          {entries.map((entry) => (
+            <button
+              key={entry.name}
+              type="button"
+              className="browser-entry"
+              onClick={() => {
+                if (entry.kind === "directory") {
+                  setCurrentPath(currentPath ? `${currentPath}/${entry.name}` : entry.name);
+                }
+              }}
+            >
+              {entry.kind === "directory" ? <Folder size={16} /> : <FileText size={16} />}
+              <span className="entry-name">{entry.name}</span>
+              {entry.size_bytes != null ? <span className="entry-badge">{formatBytes(entry.size_bytes)}</span> : null}
+            </button>
+          ))}
+        </div>
+      </div>
+    </section>
   );
 }
 

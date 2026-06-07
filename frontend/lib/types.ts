@@ -450,6 +450,8 @@ export interface ProjectState {
   created_at: string;
   updated_at: string;
   runtime_preferences: ProjectRuntimePreferences;
+  project_root?: string | null;
+  root_kind?: "managed_project_directory" | "legacy_data_root";
 }
 
 export interface ProjectSummary extends ProjectState {
@@ -520,6 +522,43 @@ export interface CreateProjectPayload {
   project_id: string;
   name: string;
   current_goal: string;
+}
+
+export interface CreateProjectFromDirectoryPayload {
+  root_id: string;
+  parent_path: string;
+  directory_name: string;
+  project_id: string;
+  name: string;
+  current_goal: string;
+}
+
+export interface WorkspaceRoot {
+  root_id: string;
+  label: string;
+  path: string;
+}
+
+export interface WorkspaceEntry {
+  name: string;
+  kind: "directory" | "file";
+  is_empty?: boolean;
+  size_bytes?: number | null;
+  mtime: string | null;
+}
+
+export interface WorkspaceEntriesResponse {
+  root_id: string;
+  path: string;
+  items: WorkspaceEntry[];
+  next_cursor: string | null;
+}
+
+export interface ProjectWorkEntriesResponse {
+  project_id: string;
+  path: string;
+  items: WorkspaceEntry[];
+  next_cursor: string | null;
 }
 
 export interface AppSettings {

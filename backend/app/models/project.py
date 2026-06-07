@@ -14,6 +14,19 @@ class ProjectRuntimePreferences(BaseModel):
     r_runtime: str | None = None
 
 
+class ProjectRegistryEntry(BaseModel):
+    project_id: str
+    name: str
+    project_root: str
+    root_kind: Literal["managed_project_directory", "legacy_data_root"]
+    created_at: str
+    updated_at: str
+
+
+class ProjectRegistry(BaseModel):
+    items: list[ProjectRegistryEntry]
+
+
 class ProjectState(BaseModel):
     project_id: str
     name: str
@@ -23,6 +36,8 @@ class ProjectState(BaseModel):
     created_at: str
     updated_at: str
     runtime_preferences: ProjectRuntimePreferences = Field(default_factory=ProjectRuntimePreferences)
+    project_root: str | None = None
+    root_kind: Literal["managed_project_directory", "legacy_data_root"] = "legacy_data_root"
 
 
 class ProjectSummary(ProjectState):
