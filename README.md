@@ -53,11 +53,13 @@ bash scripts/deploy_user_systemd.sh
 
 ### 安装完成后
 
-- 前端：`http://127.0.0.1:13001`
+- 前端：`http://127.0.0.1:13001`（nginx gateway）
 - 后端：`http://127.0.0.1:18001`
+- Next.js：`http://127.0.0.1:13002`（internal）
 
-默认会启动这三个服务：
+默认会启动这四个服务：
 
+- `blueprint-re-nginx.service`
 - `blueprint-re-backend.service`
 - `blueprint-re-manager-agent.service`
 - `blueprint-re-frontend.service`
@@ -100,6 +102,7 @@ Manager 会根据上下文拆任务、创建或更新卡片，并安排执行。
 查看服务状态：
 
 ```bash
+systemctl --user status blueprint-re-nginx.service
 systemctl --user status blueprint-re-manager-agent.service
 systemctl --user status blueprint-re-backend.service
 systemctl --user status blueprint-re-frontend.service
@@ -108,6 +111,7 @@ systemctl --user status blueprint-re-frontend.service
 重启服务：
 
 ```bash
+systemctl --user restart blueprint-re-nginx.service
 systemctl --user restart blueprint-re-manager-agent.service
 systemctl --user restart blueprint-re-backend.service
 systemctl --user restart blueprint-re-frontend.service
@@ -116,6 +120,7 @@ systemctl --user restart blueprint-re-frontend.service
 看日志：
 
 ```bash
+journalctl --user -u blueprint-re-nginx.service -n 100 --no-pager
 journalctl --user -u blueprint-re-manager-agent.service -n 100 --no-pager
 journalctl --user -u blueprint-re-backend.service -n 100 --no-pager
 journalctl --user -u blueprint-re-frontend.service -n 100 --no-pager
@@ -176,7 +181,7 @@ python3.13 -m venv .venv/backend
 ```bash
 cd frontend
 npm install
-NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18001/api npm run dev
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18001/api NEXT_PUBLIC_UPLOAD_API_BASE_URL=http://127.0.0.1:18001/api npm run dev
 ```
 
 Manager agent：

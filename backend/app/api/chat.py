@@ -1,8 +1,10 @@
 import logging
 from pathlib import Path
 import re
+from uuid import uuid4
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
+from starlette.requests import ClientDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -239,43 +241,80 @@ async def upload_chat_file(
 
     safe_name = _safe_filename(file.filename)
     timestamp = utc_now().replace(":", "").replace("-", "").replace("Z", "")
-    asset_id = f"upload_{timestamp}_{Path(safe_name).stem[:32].lower()}"
+    asset_id = f"upload_{timestamp}_{uuid4().hex[:8]}_{Path(safe_name).stem[:32].lower()}"
     relative_path = f"data/uploads/{asset_id}_{safe_name}"
     project_root = project_service.project_path(project_id)
     target = project_root / relative_path
+    temp_target = target.with_name(target.name + ".part")
     target.parent.mkdir(parents=True, exist_ok=True)
 
     size = 0
+    assets_persisted = False
+    asset: Asset | None = None
+    digest: str | None = None
+
     try:
-        with target.open("wb") as handle:
+        with temp_target.open("wb") as handle:
             while chunk := await file.read(1024 * 1024):
                 size += len(chunk)
                 handle.write(chunk)
+
+        digest = sha256_file(temp_target)
+
+        with project_service.lock_for(project_id):
+            store = project_service.graph_store(project_id)
+            graph = store.load_graph()
+            if any(existing.asset_id == asset_id for existing in graph.assets):
+                raise HTTPException(status_code=409, detail="Uploaded asset id collision")
+
+            temp_target.replace(target)
+
+            asset = Asset(
+                asset_id=asset_id,
+                asset_type=_asset_type_for_upload(file.content_type, safe_name),
+                title=file.filename,
+                status="candidate",
+                path=relative_path,
+                summary=f"User uploaded file for Manager AI chat. Size: {size} bytes.",
+                metadata={
+                    "source": "manager_chat_upload",
+                    "content_type": file.content_type,
+                    "size_bytes": size,
+                    "sha256": digest,
+                    "uploaded_at": utc_now(),
+                },
+            )
+            graph.assets.append(asset)
+            store.save_assets(graph.assets)
+            assets_persisted = True
+
+    except ClientDisconnect:
+        logger.info("upload aborted by client: project=%s asset=%s", project_id, asset_id)
+        raise
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            logger.warning("upload asset id collision: project=%s asset=%s", project_id, asset_id)
+        raise
+    except Exception:
+        if assets_persisted:
+            logger.error(
+                "upload post-persist failure; file and assets.json may both be committed: %s",
+                asset_id,
+            )
+        logger.exception("upload pipeline failed: project=%s asset=%s", project_id, asset_id)
+        raise
     finally:
         await file.close()
+        # Only the staging .part is cleaned up here. The final target, once
+        # placed, is never removed by the exception path: deleting it after
+        # save_assets() has (possibly) committed would force the forbidden
+        # state "graph registered, file missing". Orphan final files are
+        # handled by reconcile_project_uploads() at backend startup.
+        if temp_target.exists():
+            temp_target.unlink()
 
-    store = project_service.graph_store(project_id)
-    graph = store.load_graph()
-    if any(asset.asset_id == asset_id for asset in graph.assets):
-        raise HTTPException(status_code=409, detail="Uploaded asset id collision")
-
-    asset = Asset(
-        asset_id=asset_id,
-        asset_type=_asset_type_for_upload(file.content_type, safe_name),
-        title=file.filename,
-        status="candidate",
-        path=relative_path,
-        summary=f"User uploaded file for Manager AI chat. Size: {size} bytes.",
-        metadata={
-            "source": "manager_chat_upload",
-            "content_type": file.content_type,
-            "size_bytes": size,
-            "sha256": sha256_file(target),
-            "uploaded_at": utc_now(),
-        },
-    )
-    graph.assets.append(asset)
-    store.save_graph(graph)
+    if asset is None:
+        raise HTTPException(status_code=500, detail="Upload failed: asset could not be created")
 
     return {
         "asset": asset,

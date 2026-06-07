@@ -4,10 +4,14 @@ system_packages:
     - python3-venv
     - nodejs
     - npm
+    - nginx
 runtime_checks:
   required_commands:
     - bwrap
     - npm
+    - git
+    - systemctl
+    - nginx
   bubblewrap_smoke_test:
     - bwrap
     - --die-with-parent

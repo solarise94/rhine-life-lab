@@ -6,10 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Blueprint RE v3 ("莱茵生命实验室") is a bioinformatics workflow management system. Users define analysis workflows as a DAG of "cards", execute them through sandboxed AI coding agents (executors), review results, and export reports. The primary AI provider is DeepSeek, with optional Anthropic/OpenAI support.
 
-## Three-Service Architecture
+## Four-Service Architecture
 
 ```
-Frontend (Next.js :13001)
+Browser
+    ↕ HTTP (127.0.0.1:13001)
+nginx Gateway (:13001)
+    ↕ /upload-api/* → :18001/api/*        (direct FastAPI, streaming uploads)
+    ↕ /*           → :13002/*             (Next.js UI + normal APIs)
+Frontend App (Next.js :13002, internal)
     ↕ HTTP proxy (/api/* → :18001/api/*)
 Backend (FastAPI :18001)
     ↕ HTTP (bidirectional)
@@ -49,7 +54,7 @@ SKIP_SLOW_TESTS=1 PYTHONPATH=backend .venv/backend/bin/python -m unittest discov
 ```bash
 cd frontend
 npm install
-NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18001/api npm run dev
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18001/api NEXT_PUBLIC_UPLOAD_API_BASE_URL=http://127.0.0.1:18001/api npm run dev
 npm run build          # validation (no test framework)
 ```
 

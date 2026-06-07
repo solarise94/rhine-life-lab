@@ -40,9 +40,14 @@ import type { ChatTokenUsage } from "./types";
 export type { ChatTokenUsage } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api";
+const UPLOAD_API_BASE = process.env.NEXT_PUBLIC_UPLOAD_API_BASE_URL ?? API_BASE;
 
 export function apiUrl(path: string) {
   return `${API_BASE}${path}`;
+}
+
+function uploadUrl(path: string) {
+  return `${UPLOAD_API_BASE}${path}`;
 }
 
 export interface ChatHistoryMessage {
@@ -56,6 +61,12 @@ export interface ChatRequestContext {
   script_preference?: "auto" | "prefer_python" | "prefer_r" | "prefer_mixed";
   python_runtime?: string | null;
   r_runtime?: string | null;
+}
+
+export interface UploadProgressEvent {
+  loaded: number;
+  total?: number;
+  lengthComputable: boolean;
 }
 
 export type ChatStreamEvent =
@@ -278,7 +289,7 @@ export const api = {
   async uploadChatFile(projectId: string, file: File) {
     const formData = new FormData();
     formData.append("file", file);
-    const response = await fetch(`${API_BASE}/projects/${projectId}/chat-uploads`, {
+    const response = await fetch(uploadUrl(`/projects/${projectId}/chat-uploads`), {
       method: "POST",
       body: formData,
       cache: "no-store",
@@ -288,6 +299,62 @@ export const api = {
       throw new Error(text || `Upload failed: ${response.status}`);
     }
     return response.json() as Promise<ChatUploadResponse>;
+  },
+  uploadChatFileWithProgress(
+    projectId: string,
+    file: File,
+    onProgress?: (event: UploadProgressEvent) => void,
+    signal?: AbortSignal,
+  ) {
+    return new Promise<ChatUploadResponse>((resolve, reject) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      const xhr = new XMLHttpRequest();
+      let settled = false;
+      const cleanup = () => {
+        signal?.removeEventListener("abort", abortUpload);
+      };
+      const rejectOnce = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      const abortUpload = () => {
+        xhr.abort();
+        rejectOnce(new DOMException("Upload aborted.", "AbortError"));
+      };
+      if (signal?.aborted) {
+        rejectOnce(new DOMException("Upload aborted.", "AbortError"));
+        return;
+      }
+      signal?.addEventListener("abort", abortUpload, { once: true });
+      xhr.open("POST", uploadUrl(`/projects/${projectId}/chat-uploads`));
+      xhr.upload.onprogress = (event) => {
+        onProgress?.({
+          loaded: event.loaded,
+          total: event.lengthComputable ? event.total : undefined,
+          lengthComputable: event.lengthComputable,
+        });
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(JSON.parse(xhr.responseText) as ChatUploadResponse);
+          } catch (error) {
+            rejectOnce(error instanceof Error ? error : new Error("Upload response parse failed."));
+          }
+          return;
+        }
+        rejectOnce(new Error(xhr.responseText || `Upload failed: ${xhr.status}`));
+      };
+      xhr.onerror = () => rejectOnce(new Error("Upload failed: network error."));
+      xhr.onabort = () => rejectOnce(new DOMException("Upload aborted.", "AbortError"));
+      xhr.send(formData);
+    });
   },
   getResults(projectId: string) {
     return request<{ accepted: Asset[]; candidate: Asset[]; other: Asset[] }>(`/projects/${projectId}/results`);

@@ -13,6 +13,7 @@ PYTHON_BIN=""
 PI_BIN=""
 OPENCODE_BIN=""
 CLAUDE_BIN=""
+NGINX_BIN=""
 DEPLOY_WARNINGS=()
 
 version_gte() {
@@ -63,6 +64,25 @@ find_node_bin() {
 find_optional_bin() {
   local name="$1"
   command -v "${name}" 2>/dev/null || true
+}
+
+find_nginx_bin() {
+  local candidate
+  for candidate in nginx /usr/sbin/nginx /usr/local/sbin/nginx; do
+    if command -v "${candidate}" >/dev/null 2>&1; then
+      printf '%s\n' "$(command -v "${candidate}")"
+      return 0
+    fi
+  done
+  return 1
+}
+
+disable_system_nginx_service() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    systemctl disable --now nginx 2>/dev/null || true
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo systemctl disable --now nginx 2>/dev/null || true
+  fi
 }
 
 warn_deploy() {
@@ -202,6 +222,9 @@ install_runtime_dependencies() {
       missing_runtime=1
     fi
   done
+  if ! find_nginx_bin >/dev/null 2>&1; then
+    missing_runtime=1
+  fi
   if ! venv_python_bin="$(find_python_bin 2>/dev/null)"; then
     missing_runtime=1
   elif ! "${venv_python_bin}" -m venv "${ROOT_DIR}/.venv/deploy-smoke" >/dev/null 2>&1; then
@@ -214,14 +237,16 @@ install_runtime_dependencies() {
   if command -v apt-get >/dev/null 2>&1; then
     if [[ "$(id -u)" -eq 0 ]]; then
       apt-get update
-      apt-get install -y bubblewrap python3 python3-venv python3-pip nodejs npm git systemd
+      apt-get install -y bubblewrap python3 python3-venv python3-pip nodejs npm git systemd nginx
     elif command -v sudo >/dev/null 2>&1; then
       sudo apt-get update
-      sudo apt-get install -y bubblewrap python3 python3-venv python3-pip nodejs npm git systemd
+      sudo apt-get install -y bubblewrap python3 python3-venv python3-pip nodejs npm git systemd nginx
     else
       echo "Missing runtime dependencies from deploy/runtime-dependencies.yml and sudo is unavailable." >&2
       exit 1
     fi
+    # Disable the system-level nginx service so only the user-level gateway is active.
+    disable_system_nginx_service
   else
     echo "Automatic dependency installation currently supports apt-based hosts only." >&2
     echo "Install the required packages from deploy/runtime-dependencies.yml, then rerun this script." >&2
@@ -236,6 +261,10 @@ check_runtime_dependencies() {
       exit 1
     fi
   done
+  if ! find_nginx_bin >/dev/null 2>&1; then
+    echo "Missing required runtime command: nginx. See deploy/runtime-dependencies.yml." >&2
+    exit 1
+  fi
   if ! find_python_bin >/dev/null 2>&1; then
     echo "Missing required Python ${REQUIRED_PYTHON_VERSION}+ runtime." >&2
     exit 1
@@ -271,8 +300,13 @@ check_language_versions() {
   PI_BIN="$(find_optional_bin pi)"
   OPENCODE_BIN="$(find_optional_bin opencode)"
   CLAUDE_BIN="$(find_optional_bin claude)"
+  if ! NGINX_BIN="$(find_nginx_bin)"; then
+    echo "nginx not found. Install nginx for the upload gateway." >&2
+    exit 1
+  fi
   echo "Using Python ${python_version} via ${PYTHON_BIN}"
   echo "Using Node ${node_version} via ${NODE_BIN}"
+  echo "Using nginx via ${NGINX_BIN}"
   [[ -n "${PI_BIN}" ]] && echo "Pi CLI found: ${PI_BIN}" || echo "Pi CLI not found (optional)"
   [[ -n "${OPENCODE_BIN}" ]] && echo "OpenCode found: ${OPENCODE_BIN}" || echo "OpenCode not found (optional)"
   [[ -n "${CLAUDE_BIN}" ]] && echo "Claude Code found: ${CLAUDE_BIN}" || echo "Claude Code not found (optional)"
@@ -407,8 +441,9 @@ EOF
 
 cat > "${APP_ENV_DIR}/frontend.env" <<EOF
 FRONTEND_HOST=127.0.0.1
-FRONTEND_PORT=13001
+FRONTEND_PORT=13002
 NEXT_PUBLIC_API_BASE_URL=/api
+NEXT_PUBLIC_UPLOAD_API_BASE_URL=/upload-api
 BACKEND_PROXY_TARGET=http://127.0.0.1:18001
 EOF
 
@@ -446,21 +481,30 @@ sed -e "s|__ROOT__|${ROOT_DIR}|g" -e "s|__NODE_BIN__|${NODE_BIN}|g" "${ROOT_DIR}
 sed -e "s|__ROOT__|${ROOT_DIR}|g" -e "s|__NODE_BIN__|${NODE_BIN}|g" "${ROOT_DIR}/deploy/systemd/blueprint-re-backend.service" > "${SYSTEMD_USER_DIR}/blueprint-re-backend.service"
 sed -e "s|__ROOT__|${ROOT_DIR}|g" -e "s|__FRONTEND_RELEASE_DIR__|${FRONTEND_RELEASE_DIR}|g" -e "s|__NODE_BIN__|${NODE_BIN}|g" "${ROOT_DIR}/deploy/systemd/blueprint-re-frontend.service" > "${SYSTEMD_USER_DIR}/blueprint-re-frontend.service"
 
+mkdir -p "${APP_ENV_DIR}/nginx-tmp/body" "${APP_ENV_DIR}/nginx-tmp/proxy" "${APP_ENV_DIR}/nginx-tmp/fastcgi" "${APP_ENV_DIR}/nginx-tmp/uwsgi" "${APP_ENV_DIR}/nginx-tmp/scgi"
+sed -e "s|__APP_ENV_DIR__|${APP_ENV_DIR}|g" "${ROOT_DIR}/deploy/nginx/blueprint-re.conf.template" > "${APP_ENV_DIR}/nginx.conf"
+sed -e "s|__NGINX_BIN__|${NGINX_BIN}|g" -e "s|__APP_ENV_DIR__|${APP_ENV_DIR}|g" "${ROOT_DIR}/deploy/systemd/blueprint-re-nginx.service" > "${SYSTEMD_USER_DIR}/blueprint-re-nginx.service"
+
 systemctl --user daemon-reload
 systemctl --user enable blueprint-re-manager-agent.service
 systemctl --user enable blueprint-re-backend.service
 systemctl --user enable blueprint-re-frontend.service
+systemctl --user enable blueprint-re-nginx.service
 
-# Stop the frontend before backend restart so Next.js proxy/SSE connections do
-# not keep the old backend process alive during systemd's graceful shutdown.
+# Stop nginx and the frontend before backend restart so Next.js proxy/SSE
+# connections do not keep the old backend process alive during systemd's
+# graceful shutdown, and port 13001 is free for nginx to rebind.
+systemctl --user stop blueprint-re-nginx.service || true
 systemctl --user stop blueprint-re-frontend.service || true
 systemctl --user restart blueprint-re-manager-agent.service
 systemctl --user restart blueprint-re-backend.service
 systemctl --user start blueprint-re-frontend.service
+systemctl --user start blueprint-re-nginx.service
 
 echo "Blueprint RE deployed."
-echo "Frontend: http://127.0.0.1:13001"
+echo "Frontend: http://127.0.0.1:13001  (nginx gateway)"
 echo "Backend:  http://127.0.0.1:18001"
+echo "Next.js:  http://127.0.0.1:13002  (internal)"
 if [[ -n "${CONDA_BASE}" ]]; then
   echo "Conda base: ${CONDA_BASE}"
 fi

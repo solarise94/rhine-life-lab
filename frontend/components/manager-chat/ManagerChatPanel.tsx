@@ -83,6 +83,16 @@ interface SlashCommandState {
   end: number;
 }
 
+interface UploadProgressState {
+  fileName: string;
+  fileSize: number;
+  loaded: number;
+  total?: number;
+  percent?: number;
+  speedBytesPerSecond?: number;
+  status: "uploading" | "processing";
+}
+
 interface SlashCommandOption {
   command: string;
   label: string;
@@ -233,6 +243,24 @@ function formatElapsedTime(startedAt?: number, endedAt?: number) {
   const seconds = totalSeconds % 60;
   if (minutes > 0) return `${minutes} 分 ${seconds} 秒`;
   return `${seconds} 秒`;
+}
+
+function formatUploadBytes(size: number) {
+  if (!Number.isFinite(size) || size <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = size;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  const digits = value >= 10 || index === 0 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[index]}`;
+}
+
+function formatUploadSpeed(speed?: number) {
+  if (!speed || speed <= 0) return "计算速度中";
+  return `${formatUploadBytes(speed)}/s`;
 }
 
 function upsertTimelineItem(
@@ -566,6 +594,9 @@ export function ManagerChatPanel({
   const isBtwSession = Boolean(effectiveManagerAuto?.enabled && sessionId && effectiveManagerAuto.owner_session_id && effectiveManagerAuto.owner_session_id !== sessionId);
   const autoScopedActive = Boolean(isAutoOwnerSession && effectiveManagerAuto?.enabled);
   const autoComposerState = !autoScopedActive ? "normal" : "auto_running";
+  const [uploadProgress, setUploadProgress] = useState<UploadProgressState | null>(null);
+  const uploadProgressRef = useRef({ loaded: 0, at: 0, speedBytesPerSecond: undefined as number | undefined });
+  const uploadAbortControllerRef = useRef<AbortController | null>(null);
   const chatSessionQuery = useChatSession(projectId, sessionId ?? undefined, Boolean(sessionId), {
     refetchInterval: effectiveManagerAuto?.enabled && !activeStreamControllerRef.current ? 4_000 : false,
   });
@@ -635,14 +666,68 @@ export function ManagerChatPanel({
     );
   }
   const uploadMutation = useMutation({
-    mutationFn: (file: File) => api.uploadChatFile(projectId, file),
+    mutationFn: (file: File) => {
+      uploadAbortControllerRef.current?.abort();
+      const controller = new AbortController();
+      uploadAbortControllerRef.current = controller;
+      uploadProgressRef.current = { loaded: 0, at: performance.now(), speedBytesPerSecond: undefined };
+      setUploadProgress({
+        fileName: file.name,
+        fileSize: file.size,
+        loaded: 0,
+        total: file.size || undefined,
+        percent: file.size ? 0 : undefined,
+        status: "uploading",
+      });
+      return api.uploadChatFileWithProgress(projectId, file, (event) => {
+        const now = performance.now();
+        const previous = uploadProgressRef.current;
+        const elapsedSeconds = Math.max((now - previous.at) / 1000, 0.001);
+        const instantSpeed = event.loaded > previous.loaded ? (event.loaded - previous.loaded) / elapsedSeconds : undefined;
+        const speedBytesPerSecond =
+          instantSpeed && previous.speedBytesPerSecond
+            ? previous.speedBytesPerSecond * 0.72 + instantSpeed * 0.28
+            : instantSpeed ?? previous.speedBytesPerSecond;
+        uploadProgressRef.current = { loaded: event.loaded, at: now, speedBytesPerSecond };
+        const total = event.total ?? file.size;
+        setUploadProgress({
+          fileName: file.name,
+          fileSize: file.size,
+          loaded: event.loaded,
+          total: total || undefined,
+          percent: event.lengthComputable && total ? Math.min(100, Math.round((event.loaded / total) * 100)) : undefined,
+          speedBytesPerSecond,
+          status: event.lengthComputable && total && event.loaded >= total ? "processing" : "uploading",
+        });
+      }, controller.signal);
+    },
     onSuccess: async (response) => {
       addAttachment(projectId, response.attachment);
       setError(null);
+      setUploadProgress((current) =>
+        current
+          ? {
+              ...current,
+              loaded: current.total ?? current.fileSize,
+              percent: current.total || current.fileSize ? 100 : current.percent,
+              status: "processing",
+            }
+          : current,
+      );
+      queryClient.invalidateQueries({ queryKey: queryKeys.files(projectId) });
       await onRefresh();
+      setUploadProgress(null);
     },
     onError: (nextError) => {
+      if (nextError instanceof DOMException && nextError.name === "AbortError") {
+        setUploadProgress(null);
+        return;
+      }
       setError(nextError instanceof Error ? nextError.message : "Upload failed.");
+      setUploadProgress(null);
+    },
+    onSettled: () => {
+      uploadAbortControllerRef.current = null;
     },
   });
   const acceptProposalMutation = useMutation({
@@ -652,6 +737,12 @@ export function ManagerChatPanel({
     mutationFn: (proposalId: string) => api.rejectProposal(projectId, proposalId),
   });
   const modifyProposalMutation = useModifyProposalMutation(projectId);
+
+  useEffect(() => {
+    return () => {
+      uploadAbortControllerRef.current?.abort();
+    };
+  }, [projectId, sessionId]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -2246,7 +2337,7 @@ export function ManagerChatPanel({
           <div className="attachment-bar">
             {attachments.map((a) => (
               <span key={a.id} className="attachment-pill" onClick={() => removeAttachment(projectId, a.id)}>
-                {a.type === "card" ? "📋" : "📎"} {a.label}
+                {a.type === "card" ? "📋" : "📎"} <span className="label">{a.label}</span>
                 <X size={12} />
               </span>
             ))}
@@ -2278,6 +2369,42 @@ export function ManagerChatPanel({
                   <span>{option.label}</span>
                 </button>
               ))}
+            </div>
+          ) : null}
+          {uploadProgress ? (
+            <div className="manager-upload-progress" role="status" aria-live="polite">
+              <div className="manager-upload-progress-header">
+                <span className="manager-upload-progress-name">{uploadProgress.fileName}</span>
+                <span className="manager-upload-progress-controls">
+                  <span className="manager-upload-progress-meta">
+                    {uploadProgress.status === "processing"
+                      ? "处理中"
+                      : uploadProgress.percent == null
+                        ? `上传中 · ${formatUploadSpeed(uploadProgress.speedBytesPerSecond)}`
+                        : `${uploadProgress.percent}% · ${formatUploadSpeed(uploadProgress.speedBytesPerSecond)}`}
+                  </span>
+                  {uploadProgress.status === "uploading" ? (
+                    <button
+                      type="button"
+                      className="manager-upload-progress-cancel"
+                      onClick={() => uploadAbortControllerRef.current?.abort()}
+                      aria-label="取消上传"
+                    >
+                      ✕
+                    </button>
+                  ) : null}
+                </span>
+              </div>
+              <div className="manager-upload-progress-track" aria-hidden="true">
+                <span
+                  className={`manager-upload-progress-fill ${uploadProgress.percent == null ? "indeterminate" : ""}`}
+                  style={uploadProgress.percent == null ? undefined : { width: `${uploadProgress.percent}%` }}
+                />
+              </div>
+              <div className="manager-upload-progress-footer">
+                <span>{formatUploadBytes(uploadProgress.loaded)}</span>
+                <span>{uploadProgress.total ? formatUploadBytes(uploadProgress.total) : formatUploadBytes(uploadProgress.fileSize)}</span>
+              </div>
             </div>
           ) : null}
           <div className="manager-composer">
