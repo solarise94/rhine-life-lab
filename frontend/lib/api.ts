@@ -7,14 +7,19 @@ import {
   ChatSessionMessageRecord,
   ChatSessionSummary,
   ChatUploadResponse,
+  DataDirectoryMount,
+  ExportHistoryEntry,
   ManagerAutoState,
   CreateProjectPayload,
+  WorkspaceRoot,
+  WorkspaceEntriesResponse,
   Proposal,
   ProjectFiles,
   ProjectEnvironment,
   ProjectSnapshot,
   ProjectState,
   ProjectSummary,
+  ProjectWorkEntriesResponse,
   ProjectRuntimePreferences,
   ReportExportResponse,
   DiagnosticExportResponse,
@@ -220,10 +225,59 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
-  deleteProject(projectId: string) {
-    return request<{ ok: boolean }>(`/projects/${projectId}`, {
+  deleteProject(projectId: string, deleteDirectory?: boolean) {
+    const query = deleteDirectory ? "?delete_directory=true" : "";
+    return request<{ ok: boolean }>(`/projects/${projectId}${query}`, {
       method: "DELETE",
     });
+  },
+  listWorkspaceRoots() {
+    return request<{ items: WorkspaceRoot[] }>("/workspace-roots");
+  },
+  listWorkspaceEntries(rootId: string, path: string, kind: "directory" | "all" = "directory") {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    params.set("kind", kind);
+    return request<WorkspaceEntriesResponse>(`/workspace-roots/${encodeURIComponent(rootId)}/entries?${params.toString()}`);
+  },
+  getProjectDataDirectory(projectId: string) {
+    return request<{ data_directory: DataDirectoryMount | null; available: boolean | null }>(`/projects/${encodeURIComponent(projectId)}/data-directory`);
+  },
+  updateProjectDataDirectory(projectId: string, payload: { root_id: string; path: string }) {
+    return request<{ data_directory: DataDirectoryMount }>(`/projects/${encodeURIComponent(projectId)}/data-directory`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+  },
+  listProjectDataDirectoryEntries(projectId: string, path: string = "", kind: "directory" | "all" = "all") {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    params.set("kind", kind);
+    return request<ProjectWorkEntriesResponse>(`/projects/${encodeURIComponent(projectId)}/data-directory/entries?${params.toString()}`);
+  },
+  registerDataDirectoryAsset(projectId: string, payload: { path: string }) {
+    return request<{ asset: Asset }>(`/projects/${encodeURIComponent(projectId)}/data-directory/assets/register`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+  deleteProjectDataDirectory(projectId: string) {
+    return request<{ data_directory: DataDirectoryMount | null; detached: boolean }>(
+      `/projects/${encodeURIComponent(projectId)}/data-directory`,
+      { method: "DELETE" },
+    );
+  },
+  exportAssetToDataDirectory(projectId: string, assetId: string, payload: { destination_path: string; overwrite?: boolean }) {
+    return request<{ ok: boolean; asset_id: string; source_path: string; destination_path: string; exported_at: string }>(
+      `/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(assetId)}/export-to-data-directory`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+  getProjectDataDirectoryExportHistory(projectId: string) {
+    return request<{ items: ExportHistoryEntry[] }>(`/projects/${encodeURIComponent(projectId)}/data-directory/export-history`);
   },
   getProject(projectId: string) {
     return request<ProjectSnapshot>(`/projects/${projectId}`);

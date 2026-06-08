@@ -1,11 +1,14 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Beaker, FolderOpen, Plus, Trash2 } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { Beaker, ChevronLeft, ChevronDown, ChevronRight, Folder, FolderOpen, Plus, Trash2 } from "lucide-react";
 
+import { api } from "@/lib/api";
 import { useCreateProjectMutation, useDeleteProjectMutation, useProjects } from "@/lib/hooks";
-import { ProjectSummary } from "@/lib/types";
+import { queryKeys } from "@/lib/query-keys";
+import { ProjectSummary, WorkspaceEntry, WorkspaceRoot } from "@/lib/types";
 
 function slugifyProjectId(value: string) {
   const slug = value
@@ -75,19 +78,35 @@ function ProjectRow({
 
 export function ProjectDashboard() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const projectsQuery = useProjects();
   const createProjectMutation = useCreateProjectMutation();
   const deleteProjectMutation = useDeleteProjectMutation();
   const [isCreating, setIsCreating] = useState(false);
+
+  // Basic project form state
   const [name, setName] = useState("");
   const [projectId, setProjectId] = useState("");
   const [projectIdTouched, setProjectIdTouched] = useState(false);
   const [currentGoal, setCurrentGoal] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
 
+  // Data directory mount state
+  const [mountExpanded, setMountExpanded] = useState(false);
+  const [dataRoots, setDataRoots] = useState<WorkspaceRoot[]>([]);
+  const [selectedDataRoot, setSelectedDataRoot] = useState<WorkspaceRoot | null>(null);
+  const [dataBrowserPath, setDataBrowserPath] = useState("");
+  const [dataBrowserEntries, setDataBrowserEntries] = useState<WorkspaceEntry[]>([]);
+  const [dataBrowserLoading, setDataBrowserLoading] = useState(false);
+  const [dataBrowserError, setDataBrowserError] = useState<string | null>(null);
+  const [selectedDataDirectory, setSelectedDataDirectory] = useState<{ root_id: string; path: string } | null>(null);
+
   const projects = useMemo(
-    () => [...(projectsQuery.data?.items ?? [])].sort((left, right) => right.updated_at.localeCompare(left.updated_at)),
-    [projectsQuery.data],
+    () =>
+      [...(projectsQuery.data?.items ?? [])].sort((left, right) =>
+        right.updated_at.localeCompare(left.updated_at)
+      ),
+    [projectsQuery.data]
   );
   const busy = createProjectMutation.isPending || deleteProjectMutation.isPending;
   const error =
@@ -102,6 +121,11 @@ export function ProjectDashboard() {
     setProjectIdTouched(false);
     setCurrentGoal("");
     setFormError(null);
+    setMountExpanded(false);
+    setSelectedDataDirectory(null);
+    setDataBrowserPath("");
+    setDataBrowserEntries([]);
+    setDataBrowserError(null);
   }
 
   function handleNameChange(value: string) {
@@ -110,6 +134,50 @@ export function ProjectDashboard() {
       setProjectId(slugifyProjectId(value));
     }
   }
+
+  // Load workspace roots when mount section is expanded
+  useEffect(() => {
+    if (!mountExpanded) return;
+    api.listWorkspaceRoots()
+      .then((res) => {
+        setDataRoots(res.items);
+        if (res.items.length > 0 && !selectedDataRoot) {
+          setSelectedDataRoot(res.items[0]);
+        }
+      })
+      .catch((err: Error) => {
+        setDataBrowserError(err.message);
+      });
+  }, [mountExpanded]);
+
+  // Load directory entries when root or path changes
+  useEffect(() => {
+    if (!mountExpanded || !selectedDataRoot) return;
+    setDataBrowserLoading(true);
+    setDataBrowserError(null);
+    let cancelled = false;
+    api
+      .listWorkspaceEntries(selectedDataRoot.root_id, dataBrowserPath, "directory")
+      .then((res) => {
+        if (!cancelled) {
+          setDataBrowserEntries(res.items);
+        }
+      })
+      .catch((err: Error) => {
+        if (!cancelled) {
+          setDataBrowserError(err.message);
+          setDataBrowserEntries([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setDataBrowserLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mountExpanded, selectedDataRoot, dataBrowserPath]);
 
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -121,22 +189,53 @@ export function ProjectDashboard() {
       return;
     }
     setFormError(null);
+
+    // Step 1: create the managed project
     const response = await createProjectMutation.mutateAsync({
       name: nextName,
       project_id: nextProjectId,
       current_goal: nextGoal,
     });
+
+    // Step 2: if a data directory is selected, mount it
+    if (selectedDataDirectory) {
+      try {
+        await api.updateProjectDataDirectory(
+          response.project.project_id,
+          {
+            root_id: selectedDataDirectory.root_id,
+            path: selectedDataDirectory.path,
+          }
+        );
+      } catch (err) {
+        // Mount failed but project was created; show warning and still navigate
+        setFormError(err instanceof Error ? `项目已创建，但挂载数据目录失败：${err.message}` : "项目已创建，但挂载数据目录失败。");
+        await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
+        setTimeout(() => {
+          router.push(`/projects/${response.project.project_id}/tasks`);
+        }, 2000);
+        return;
+      }
+    }
+
     resetForm();
     setIsCreating(false);
+    await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
     router.push(`/projects/${response.project.project_id}/tasks`);
   }
 
   async function handleDelete(project: ProjectSummary) {
-    if (!window.confirm(`删除项目 "${project.name}"？这会删除 workspace/${project.project_id}。`)) {
+    const isManaged = project.root_kind === "managed_project_directory";
+    const message = isManaged
+      ? `删除项目 "${project.name}"？默认只从 Blueprint 移除，不会删除服务器上的目录。`
+      : `删除项目 "${project.name}"？这会删除 workspace/${project.project_id}。`;
+    if (!window.confirm(message)) {
       return;
     }
     await deleteProjectMutation.mutateAsync(project.project_id);
   }
+
+  const dataPathParts = dataBrowserPath ? dataBrowserPath.split("/").filter(Boolean) : [];
 
   return (
     <main className="projects-page">
@@ -145,17 +244,19 @@ export function ProjectDashboard() {
           <h1>Projects</h1>
           <p>管理项目 workspace，打开后进入对应的 Sessions、Cards、文件和结果库。</p>
         </div>
-        <button
-          type="button"
-          className="btn primary"
-          onClick={() => {
-            setIsCreating(true);
-            setFormError(null);
-          }}
-        >
-          <Plus size={16} />
-          新建项目
-        </button>
+        <div className="projects-header-actions">
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() => {
+              setIsCreating(true);
+              setFormError(null);
+            }}
+          >
+            <Plus size={16} />
+            新建项目
+          </button>
+        </div>
       </section>
 
       {error ? <div className="notice-panel error">{error}</div> : null}
@@ -178,7 +279,12 @@ export function ProjectDashboard() {
           <form className="project-form" onSubmit={handleCreate}>
             <label>
               <span>项目名称</span>
-              <input value={name} onChange={(event) => handleNameChange(event.target.value)} placeholder="RNA-seq Project" />
+              <input
+                value={name}
+                onChange={(event) => handleNameChange(event.target.value)}
+                placeholder="RNA-seq Project"
+                required
+              />
             </label>
             <label>
               <span>Project ID</span>
@@ -189,6 +295,7 @@ export function ProjectDashboard() {
                   setProjectId(slugifyProjectId(event.target.value));
                 }}
                 placeholder="rna-seq-project"
+                required
               />
             </label>
             <label>
@@ -197,8 +304,150 @@ export function ProjectDashboard() {
                 value={currentGoal}
                 onChange={(event) => setCurrentGoal(event.target.value)}
                 placeholder="完成差异表达分析与下游解释"
+                required
               />
             </label>
+
+            {/* Optional data directory mount */}
+            <div className="mount-section">
+              <button
+                type="button"
+                className="mount-toggle"
+                onClick={() => setMountExpanded((v) => !v)}
+              >
+                {mountExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                挂载数据目录 (可选)
+              </button>
+              {mountExpanded && (
+                <div className="mount-browser">
+                  {selectedDataDirectory ? (
+                    <div className="mount-selection">
+                      <span>
+                        已选择：
+                        <strong>
+                          {selectedDataDirectory.root_id} / {selectedDataDirectory.path || "."}
+                        </strong>
+                      </span>
+                      <button
+                        type="button"
+                        className="btn secondary"
+                        onClick={() => setSelectedDataDirectory(null)}
+                      >
+                        清除选择
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="mount-hint">
+                      在下方浏览并选择一个已有的服务器数据目录，用于输入数据和结果导出。
+                    </div>
+                  )}
+
+                  {dataBrowserError ? (
+                    <div className="notice-panel error">{dataBrowserError}</div>
+                  ) : null}
+
+                  <div className="directory-browser-toolbar">
+                    <select
+                      value={selectedDataRoot?.root_id ?? ""}
+                      onChange={(e) => {
+                        const root = dataRoots.find((r) => r.root_id === e.target.value);
+                        setSelectedDataRoot(root || null);
+                        setDataBrowserPath("");
+                        setSelectedDataDirectory(null);
+                      }}
+                      disabled={dataBrowserLoading}
+                    >
+                      {dataRoots.map((r) => (
+                        <option key={r.root_id} value={r.root_id}>
+                          {r.label} ({r.path})
+                        </option>
+                      ))}
+                    </select>
+                    {!selectedDataDirectory && selectedDataRoot && (
+                      <button
+                        type="button"
+                        className="btn secondary"
+                        onClick={() => {
+                          if (selectedDataRoot) {
+                            setSelectedDataDirectory({
+                              root_id: selectedDataRoot.root_id,
+                              path: dataBrowserPath,
+                            });
+                          }
+                        }}
+                        disabled={dataBrowserLoading}
+                      >
+                        使用当前目录
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="directory-browser-breadcrumb">
+                    <button
+                      type="button"
+                      className="breadcrumb-root"
+                      onClick={() => setDataBrowserPath("")}
+                      disabled={dataBrowserPath === ""}
+                    >
+                      {selectedDataRoot?.label ?? "Root"}
+                    </button>
+                    {dataPathParts.map((part, idx) => (
+                      <span key={idx} className="breadcrumb-part">
+                        <span>/</span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDataBrowserPath(dataPathParts.slice(0, idx + 1).join("/"))
+                          }
+                        >
+                          {part}
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+
+                  <div className="directory-browser-list" style={{ maxHeight: 240 }}>
+                    {dataBrowserLoading ? (
+                      <div className="browser-empty">加载中...</div>
+                    ) : null}
+                    {!dataBrowserLoading && dataBrowserPath !== "" ? (
+                      <button
+                        type="button"
+                        className="browser-entry browser-up"
+                        onClick={() =>
+                          setDataBrowserPath(dataPathParts.slice(0, -1).join("/"))
+                        }
+                      >
+                        <ChevronLeft size={16} />
+                        ..
+                      </button>
+                    ) : null}
+                    {!dataBrowserLoading && dataBrowserEntries.length === 0 && dataBrowserPath === "" ? (
+                      <div className="browser-empty">空目录</div>
+                    ) : null}
+                    {dataBrowserEntries.map((entry) => (
+                      <button
+                        key={entry.name}
+                        type="button"
+                        className="browser-entry"
+                        onClick={() =>
+                          setDataBrowserPath(
+                            dataBrowserPath
+                              ? `${dataBrowserPath}/${entry.name}`
+                              : entry.name
+                          )
+                        }
+                      >
+                        <Folder size={16} />
+                        <span className="entry-name">{entry.name}</span>
+                        {entry.is_empty ? <span className="entry-badge">空</span> : null}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="project-form-actions">
               <button type="submit" className="btn primary" disabled={busy}>
                 创建并打开
@@ -215,7 +464,9 @@ export function ProjectDashboard() {
         </div>
         <div className="project-list">
           {projectsQuery.isLoading ? <div className="project-empty">加载中...</div> : null}
-          {!projectsQuery.isLoading && !projects.length ? <div className="project-empty">还没有项目。</div> : null}
+          {!projectsQuery.isLoading && !projects.length ? (
+            <div className="project-empty">还没有项目。</div>
+          ) : null}
           {projects.map((project) => (
             <ProjectRow
               key={project.project_id}

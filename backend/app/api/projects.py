@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Literal
@@ -22,11 +24,26 @@ class UpdateProjectRuntimePreferencesRequest(BaseModel):
     script_preference: Literal["auto", "prefer_python", "prefer_r", "prefer_mixed"] | None = None
     python_runtime: str | None = None
     r_runtime: str | None = None
+    execution_mode: Literal["guarded", "workspace_write"] | None = None
+
+
+class UpdateProjectDataDirectoryRequest(BaseModel):
+    root_id: str
+    path: str
 
 
 @router.get("")
 def list_projects(project_service: ProjectService = Depends(get_project_service)) -> dict:
-    return {"items": project_service.list_projects()}
+    items = project_service.list_projects()
+    enriched = []
+    for item in items:
+        data = item.model_dump()
+        if item.data_directory is not None:
+            data["data_directory_available"] = Path(item.data_directory.resolved_path).exists()
+        else:
+            data["data_directory_available"] = None
+        enriched.append(data)
+    return {"items": enriched}
 
 
 @router.post("")
@@ -42,12 +59,13 @@ def create_project(request: CreateProjectRequest, project_service: ProjectServic
 @router.delete("/{project_id}")
 def delete_project(
     project_id: str,
+    delete_directory: bool = False,
     project_service: ProjectService = Depends(get_project_service),
     worker_service: WorkerService = Depends(get_worker_service),
 ) -> dict:
     if worker_service.has_active_runs(project_id):
         raise HTTPException(status_code=409, detail=f"Project {project_id} has active runs and cannot be deleted.")
-    project_service.delete_project(project_id)
+    project_service.delete_project(project_id, delete_directory=delete_directory)
     return {"ok": True}
 
 
@@ -59,6 +77,11 @@ def get_project(
 ) -> dict:
     snapshot = project_service.get_project_snapshot_core(project_id)
     snapshot["manager_auto"] = manager_auto_service.get_state(project_id).model_dump()
+    mount = project_service.get_project_data_directory(project_id)
+    if mount is not None:
+        snapshot["data_directory_available"] = Path(mount.resolved_path).exists()
+    else:
+        snapshot["data_directory_available"] = None
     return snapshot
 
 
@@ -87,6 +110,56 @@ def update_project_runtime_preferences(
             request.model_dump(exclude_unset=True),
         ).model_dump()
     }
+
+
+@router.put("/{project_id}/data-directory")
+def update_project_data_directory(
+    project_id: str,
+    request: UpdateProjectDataDirectoryRequest,
+    project_service: ProjectService = Depends(get_project_service),
+    worker_service: WorkerService = Depends(get_worker_service),
+) -> dict:
+    if worker_service.has_active_runs(project_id):
+        raise HTTPException(status_code=409, detail=f"Project {project_id} has active runs and cannot modify data directory.")
+    mount = project_service.set_project_data_directory(project_id, request.root_id, request.path)
+    return {"data_directory": mount.model_dump()}
+
+
+@router.get("/{project_id}/data-directory")
+def get_project_data_directory(project_id: str, project_service: ProjectService = Depends(get_project_service)) -> dict:
+    mount = project_service.get_project_data_directory(project_id)
+    available = None
+    if mount is not None:
+        available = Path(mount.resolved_path).exists()
+    return {"data_directory": mount.model_dump() if mount else None, "available": available}
+
+
+@router.delete("/{project_id}/data-directory")
+def detach_project_data_directory(
+    project_id: str,
+    project_service: ProjectService = Depends(get_project_service),
+    worker_service: WorkerService = Depends(get_worker_service),
+) -> dict:
+    if worker_service.has_active_runs(project_id):
+        raise HTTPException(status_code=409, detail=f"Project {project_id} has active runs and cannot detach data directory.")
+    mount = project_service.detach_project_data_directory(project_id)
+    return {"data_directory": mount.model_dump() if mount else None, "detached": mount is not None}
+
+
+@router.get("/{project_id}/data-directory/export-history")
+def get_project_data_directory_export_history(
+    project_id: str,
+    project_service: ProjectService = Depends(get_project_service),
+) -> dict:
+    """Return export history for the project's mounted data directory."""
+    if not (project_service.project_path(project_id) / "project.json").exists():
+        raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+
+    store = project_service.graph_store(project_id)
+    graph = store.load_graph()
+    history = graph.metadata.get("export_history", []) if isinstance(graph.metadata, dict) else []
+    history = history or []
+    return {"items": history}
 
 
 @router.get("/{project_id}/skill-library")

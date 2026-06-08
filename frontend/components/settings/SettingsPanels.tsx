@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronDown, ChevronLeft, ChevronRight, Database, Folder, Link2, Loader2, Unlink } from "lucide-react";
 
+import { api } from "@/lib/api";
 import {
   useAppSettings,
   useExecutorProfiles,
@@ -14,9 +17,11 @@ import {
   useUpdateAppSettingsMutation,
   useUpdateProjectRuntimePreferencesMutation,
 } from "@/lib/hooks";
+import { queryKeys } from "@/lib/query-keys";
 import {
   ApiProviderProfile,
   ApiProviderProtocol,
+  DataDirectoryMount,
   DiagnosticExportResponse,
   ExecutorProfile,
   ProjectState,
@@ -25,6 +30,8 @@ import {
   PythonRuntime,
   RRuntime,
   TestApiProviderResponse,
+  WorkspaceEntry,
+  WorkspaceRoot,
 } from "@/lib/types";
 
 type ScriptPreference = "auto" | "prefer_python" | "prefer_r" | "prefer_mixed";
@@ -239,6 +246,264 @@ function ExecutorAuthModeSelector({ workerType }: { workerType: string }) {
   );
 }
 
+function DataDirectorySettingsSection({ projectId, readOnly = false }: { projectId: string; readOnly?: boolean }) {
+  const queryClient = useQueryClient();
+  const [browserExpanded, setBrowserExpanded] = useState(false);
+  const [dataRoots, setDataRoots] = useState<WorkspaceRoot[]>([]);
+  const [selectedDataRoot, setSelectedDataRoot] = useState<WorkspaceRoot | null>(null);
+  const [dataBrowserPath, setDataBrowserPath] = useState("");
+  const [dataBrowserEntries, setDataBrowserEntries] = useState<WorkspaceEntry[]>([]);
+  const [dataBrowserLoading, setDataBrowserLoading] = useState(false);
+  const [dataBrowserError, setDataBrowserError] = useState<string | null>(null);
+  const [mountError, setMountError] = useState<string | null>(null);
+  const [mountSuccess, setMountSuccess] = useState<string | null>(null);
+
+  const mountQuery = useQuery({
+    queryKey: ["data-directory", projectId],
+    queryFn: () => api.getProjectDataDirectory(projectId),
+  });
+
+  const mount: DataDirectoryMount | null = mountQuery.data?.data_directory ?? null;
+  const isMounted = mount != null;
+  const isAvailable = mountQuery.data?.available !== false;
+
+  // Load workspace roots when browser is expanded
+  useEffect(() => {
+    if (!browserExpanded) return;
+    api.listWorkspaceRoots()
+      .then((res) => {
+        setDataRoots(res.items);
+        if (res.items.length > 0 && !selectedDataRoot) {
+          setSelectedDataRoot(res.items[0]);
+        }
+      })
+      .catch((err: Error) => {
+        setDataBrowserError(err.message);
+      });
+  }, [browserExpanded]);
+
+  // Load directory entries when root or path changes
+  useEffect(() => {
+    if (!browserExpanded || !selectedDataRoot) return;
+    setDataBrowserLoading(true);
+    setDataBrowserError(null);
+    let cancelled = false;
+    api
+      .listWorkspaceEntries(selectedDataRoot.root_id, dataBrowserPath, "directory")
+      .then((res) => {
+        if (!cancelled) {
+          setDataBrowserEntries(res.items);
+        }
+      })
+      .catch((err: Error) => {
+        if (!cancelled) {
+          setDataBrowserError(err.message);
+          setDataBrowserEntries([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setDataBrowserLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [browserExpanded, selectedDataRoot, dataBrowserPath]);
+
+  async function handleMount(rootId: string, path: string) {
+    setMountError(null);
+    setMountSuccess(null);
+    try {
+      await api.updateProjectDataDirectory(projectId, { root_id: rootId, path });
+      setMountSuccess("数据目录已挂载。");
+      setBrowserExpanded(false);
+      await queryClient.invalidateQueries({ queryKey: ["data-directory", projectId] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.project(projectId) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.files(projectId) });
+      await queryClient.invalidateQueries({ queryKey: [...queryKeys.project(projectId), "export-history"] });
+    } catch (err) {
+      setMountError(err instanceof Error ? err.message : "挂载失败。");
+    }
+  }
+
+  async function handleDetach() {
+    setMountError(null);
+    setMountSuccess(null);
+    try {
+      await api.deleteProjectDataDirectory(projectId);
+      setMountSuccess("数据目录已解除挂载。");
+      await queryClient.invalidateQueries({ queryKey: ["data-directory", projectId] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.project(projectId) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.files(projectId) });
+      await queryClient.invalidateQueries({ queryKey: [...queryKeys.project(projectId), "export-history"] });
+    } catch (err) {
+      setMountError(err instanceof Error ? err.message : "解除挂载失败。");
+    }
+  }
+
+  const dataPathParts = dataBrowserPath ? dataBrowserPath.split("/").filter(Boolean) : [];
+
+  return (
+    <section className="settings-section">
+      <div className="settings-section-header">
+        <div>
+          <h3>数据目录</h3>
+          <p>挂载一个服务器数据目录到项目，用于输入数据和结果导出。</p>
+        </div>
+        {isMounted ? (
+          <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Database size={14} />
+            {isAvailable ? "已挂载" : "不可用"}
+          </span>
+        ) : (
+          <span>未挂载</span>
+        )}
+      </div>
+
+      <div className="panel-body stack">
+        {mountError ? <div className="notice-panel error">{mountError}</div> : null}
+        {mountSuccess ? <div className="notice-panel success">{mountSuccess}</div> : null}
+
+        {isMounted ? (
+          <div className="settings-kv-list">
+            <div><strong>根</strong><span>{mount?.root_id}</span></div>
+            <div><strong>路径</strong><span>{mount?.path || "."}</span></div>
+            <div><strong>解析路径</strong><span>{mount?.resolved_path}</span></div>
+            <div><strong>挂载时间</strong><span>{mount?.mounted_at}</span></div>
+            <div><strong>状态</strong><span>{isAvailable ? "可用" : "不可用"}</span></div>
+          </div>
+        ) : (
+          <div className="muted" style={{ fontSize: 13 }}>
+            此项目没有挂载数据目录。可以挂载一个已有的服务器数据目录，用于输入数据和结果导出。
+          </div>
+        )}
+
+        <div className="settings-actions">
+          {isMounted ? (
+            <>
+              <button
+                type="button"
+                className="settings-button danger"
+                onClick={() => {
+                  if (window.confirm("解除挂载将移除数据目录关联，但不会删除服务器上的目录。data_mount/ 资产将标记为不可用。确认解除挂载？")) {
+                    handleDetach();
+                  }
+                }}
+                disabled={readOnly}
+              >
+                <Unlink size={14} />
+                解除挂载
+              </button>
+              <button
+                type="button"
+                className="settings-button secondary"
+                onClick={() => setBrowserExpanded((v) => !v)}
+                disabled={readOnly}
+              >
+                <Link2 size={14} />
+                {browserExpanded ? "取消切换" : "切换目录"}
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="settings-button"
+              onClick={() => setBrowserExpanded((v) => !v)}
+              disabled={readOnly}
+            >
+              <Link2 size={14} />
+              {browserExpanded ? "取消挂载" : "挂载数据目录"}
+            </button>
+          )}
+        </div>
+
+        {browserExpanded ? (
+          <div className="mount-browser" style={{ marginTop: 12 }}>
+            {dataBrowserError ? <div className="notice-panel error">{dataBrowserError}</div> : null}
+
+            <div className="directory-browser-toolbar">
+              <select
+                value={selectedDataRoot?.root_id ?? ""}
+                onChange={(e) => {
+                  const root = dataRoots.find((r) => r.root_id === e.target.value);
+                  setSelectedDataRoot(root || null);
+                  setDataBrowserPath("");
+                }}
+                disabled={dataBrowserLoading}
+              >
+                {dataRoots.map((r) => (
+                  <option key={r.root_id} value={r.root_id}>
+                    {r.label} ({r.path})
+                  </option>
+                ))}
+              </select>
+              {selectedDataRoot && (
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={() => handleMount(selectedDataRoot.root_id, dataBrowserPath)}
+                  disabled={dataBrowserLoading || readOnly}
+                >
+                  使用当前目录
+                </button>
+              )}
+            </div>
+
+            <div className="directory-browser-breadcrumb">
+              <button
+                type="button"
+                className="breadcrumb-root"
+                onClick={() => setDataBrowserPath("")}
+                disabled={dataBrowserPath === ""}
+              >
+                {selectedDataRoot?.label ?? "Root"}
+              </button>
+              {dataPathParts.map((part, idx) => (
+                <span key={idx} className="breadcrumb-part">
+                  <span>/</span>
+                  <button type="button" onClick={() => setDataBrowserPath(dataPathParts.slice(0, idx + 1).join("/"))}>
+                    {part}
+                  </button>
+                </span>
+              ))}
+            </div>
+
+            <div className="directory-browser-list" style={{ maxHeight: 240 }}>
+              {dataBrowserLoading ? <div className="browser-empty">加载中...</div> : null}
+              {!dataBrowserLoading && dataBrowserPath !== "" ? (
+                <button
+                  type="button"
+                  className="browser-entry browser-up"
+                  onClick={() => setDataBrowserPath(dataPathParts.slice(0, -1).join("/"))}
+                >
+                  <ChevronLeft size={16} />
+                  ..
+                </button>
+              ) : null}
+              {!dataBrowserLoading && dataBrowserEntries.length === 0 && dataBrowserPath === "" ? (
+                <div className="browser-empty">空目录</div>
+              ) : null}
+              {dataBrowserEntries.map((entry) => (
+                <button
+                  key={entry.name}
+                  type="button"
+                  className="browser-entry"
+                  onClick={() => setDataBrowserPath(dataBrowserPath ? `${dataBrowserPath}/${entry.name}` : entry.name)}
+                >
+                  <Folder size={16} />
+                  <span className="entry-name">{entry.name}</span>
+                  {entry.is_empty ? <span className="entry-badge">空</span> : null}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
 export function SettingsPanels({
   projectId,
   project,
@@ -283,6 +548,7 @@ export function SettingsPanels({
   const [scriptPreference, setScriptPreference] = useState<ScriptPreference>(project.runtime_preferences.script_preference);
   const [pythonRuntime, setPythonRuntime] = useState(formatRuntimeLabel(project.runtime_preferences.python_runtime));
   const [rRuntime, setRRuntime] = useState(formatRuntimeLabel(project.runtime_preferences.r_runtime));
+  const [executionMode, setExecutionMode] = useState<"guarded" | "workspace_write">(project.runtime_preferences.execution_mode ?? "guarded");
   const [diagnosticInfo, setDiagnosticInfo] = useState<DiagnosticExportResponse | null>(null);
 
   const runtimeSummary = useMemo(() => {
@@ -294,8 +560,9 @@ export function SettingsPanels({
           : scriptPreference === "prefer_mixed"
             ? "按任务选择"
             : "让 Manager 询问";
-    return `${script} · Python ${pythonRuntime} · R ${rRuntime}`;
-  }, [pythonRuntime, rRuntime, scriptPreference]);
+    const mode = executionMode === "workspace_write" ? "Workspace Write" : "Guarded";
+    return `${script} · Python ${pythonRuntime} · R ${rRuntime} · ${mode}`;
+  }, [pythonRuntime, rRuntime, scriptPreference, executionMode]);
 
   useEffect(() => {
     if (!appSettingsQuery.data) return;
@@ -380,6 +647,7 @@ export function SettingsPanels({
         script_preference: scriptPreference,
         python_runtime: pythonRuntime === "__system__" ? null : pythonRuntime,
         r_runtime: rRuntime === "__system__" ? null : rRuntime,
+        execution_mode: executionMode,
       });
       setStatus("项目运行时偏好已保存。");
     } catch (error) {
@@ -571,6 +839,7 @@ export function SettingsPanels({
 
   return (
     <div className="stack settings-stack">
+      <DataDirectorySettingsSection projectId={projectId} readOnly={readOnly} />
       <section className="settings-section">
         <div className="settings-section-header">
           <div>
@@ -607,6 +876,13 @@ export function SettingsPanels({
                   {item.label}
                 </option>
               ))}
+            </select>
+          </label>
+          <label className="settings-field">
+            <span>执行模式</span>
+            <select value={executionMode} onChange={(event) => setExecutionMode(event.target.value as "guarded" | "workspace_write")} disabled={readOnly}>
+              <option value="guarded">Guarded（每 run 独立目录）</option>
+              <option value="workspace_write">Workspace Write（cwd 在 work/）</option>
             </select>
           </label>
         </div>

@@ -232,8 +232,19 @@ class WorkerService:
         if adapter is None:
             raise HTTPException(status_code=400, detail=f"Unknown worker_type: {resolved_worker_type}")
 
-        execution_guard, guard_kind = self._acquire_execution_guard(project_id, card_id, sandboxed=adapter.uses_sandbox(self.project_service.settings))
+        runtime_prefs = self.project_service.get_project_runtime_preferences(project_id)
+        execution_guard, guard_kind = self._acquire_execution_guard(
+            project_id, card_id, sandboxed=adapter.uses_sandbox(self.project_service.settings), execution_mode=runtime_prefs.execution_mode
+        )
         if execution_guard is None:
+            if guard_kind == "workspace_write_project_lock":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Project workspace_write mode allows only one run at a time because work/ is shared across runs.",
+                        "error_code": "workspace_write_lock_busy",
+                    },
+                )
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -495,15 +506,25 @@ class WorkerService:
         adapter = self.registry.get(run.worker_type)
         if adapter is None:
             raise HTTPException(status_code=400, detail=f"Unknown worker_type: {run.worker_type}")
-        execution_guard, guard_kind = self._acquire_execution_guard(project_id, run.card_id, sandboxed=adapter.uses_sandbox(self.project_service.settings))
+        packet = self.manifest_service.load_task_packet(project_id, run_id)
+        execution_guard, guard_kind = self._acquire_execution_guard(
+            project_id, run.card_id, sandboxed=adapter.uses_sandbox(self.project_service.settings), execution_mode=packet.execution_policy.mode
+        )
         if execution_guard is None:
+            if guard_kind == "workspace_write_project_lock":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Project workspace_write mode allows only one run at a time because work/ is shared across runs.",
+                        "error_code": "workspace_write_lock_busy",
+                    },
+                )
             raise HTTPException(
                 status_code=409,
                 detail="Project already has an executor run in progress. Continue this run after the current run finishes review.",
             )
         lock_transferred_to_thread = False
         try:
-            packet = self.manifest_service.load_task_packet(project_id, run_id)
             run_dir = self.project_service.project_path(project_id) / "runs" / run_id
             try:
                 launch_spec = adapter.build_launch_spec(
@@ -1385,6 +1406,14 @@ class WorkerService:
             self._flush_run_event_buffer(project_id, run_id, clear_sequence=True)
             self._processes.pop(run_id, None)
             self._threads.pop(run_id, None)
+            # Cleanup temporary data_mount bind point if empty
+            data_mount_point = self.project_service.project_path(project_id) / "data_mount"
+            try:
+                if data_mount_point.exists() and data_mount_point.is_dir():
+                    data_mount_point.rmdir()
+            except OSError:
+                # Not empty or not accessible — leave it alone
+                pass
 
     def _recover_manifest_candidate_after_timeout(self, project_id: str, run_id: str) -> tuple[bool, str]:
         run_dir = self.project_service.project_path(project_id) / "runs" / run_id
@@ -1430,7 +1459,17 @@ class WorkerService:
         finally:
             self._release_execution_guard(execution_guard, guard_kind)
 
-    def _acquire_execution_guard(self, project_id: str, card_id: str, *, sandboxed: bool) -> tuple[Lock | Semaphore | None, str]:
+    def _acquire_execution_guard(self, project_id: str, card_id: str, *, sandboxed: bool, execution_mode: str = "guarded") -> tuple[Lock | Semaphore | None, str]:
+        if execution_mode == "workspace_write":
+            # Serialize workspace_write runs per project regardless of sandbox.
+            card_lock = self._card_lock_for(project_id, card_id)
+            if not card_lock.acquire(blocking=False):
+                return None, "card_lock"
+            execution_lock = self._execution_lock_for(project_id)
+            if not execution_lock.acquire(blocking=False):
+                card_lock.release()
+                return None, "workspace_write_project_lock"
+            return _CompositeExecutionGuard(card_lock, execution_lock), "composite"
         if not sandboxed:
             execution_lock = self._execution_lock_for(project_id)
             if not execution_lock.acquire(blocking=False):
@@ -1809,6 +1848,34 @@ class WorkerService:
                 )
             )
         input_assets = list(input_assets_by_id.values())
+
+        # Fail fast if any data_mount input assets are stale or missing
+        data_mount_input_assets = [a for a in input_assets if a.path.startswith("data_mount/")]
+        if data_mount_input_assets:
+            issues = self.project_service.check_data_mount_assets_freshness(project_id)
+            if issues:
+                # Backfill updated statuses into the packet snapshot for consistency
+                fresh_graph = self.project_service.graph_store(project_id).load_graph()
+                fresh_asset_by_id = {a.asset_id: a for a in fresh_graph.assets}
+                for issue in issues:
+                    fresh_asset = fresh_asset_by_id.get(issue["asset_id"])
+                    if fresh_asset:
+                        new_status = fresh_asset.status
+                        if issue["asset_id"] in input_assets_by_id:
+                            input_assets_by_id[issue["asset_id"]].status = new_status
+                        for ci in card_inputs:
+                            if ci.asset_id == issue["asset_id"]:
+                                ci.status = new_status
+            stale_ids = {i["asset_id"] for i in issues}
+            bad_assets = [a for a in data_mount_input_assets if a.asset_id in stale_ids]
+            if bad_assets:
+                details = ", ".join(f"{a.path} ({next(i['reason'] for i in issues if i['asset_id'] == a.asset_id)})" for a in bad_assets)
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Stale or missing mounted data assets cannot be used as inputs: {details}. "
+                    "Please re-register the assets from the data directory.",
+                )
+
         output_refs = list(card.outputs)
         if not output_refs:
             raise HTTPException(
@@ -1838,6 +1905,25 @@ class WorkerService:
         expected_outputs.extend(self._system_expected_outputs(card.card_id, run_id))
 
         result_dir = f"results/{card.card_id}/{run_id}"
+        execution_mode = self.project_service.get_project_runtime_preferences(project_id).execution_mode
+        allowed_paths = [f"runs/{run_id}/", f"{result_dir}/", f"scripts/generated/{run_id}/"]
+        if execution_mode == "workspace_write":
+            allowed_paths.insert(0, "work/")
+
+        # Detect data_mount/... input assets and attach mounted data directory path
+        mounted_data_directory: str | None = None
+        for asset in input_assets:
+            if asset.path.startswith("data_mount/"):
+                mount = self.project_service.get_project_data_directory(project_id)
+                if mount is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This run requires data_mount/... inputs but the project does not have a mounted data directory. "
+                        "Please mount a data directory in project settings before running.",
+                    )
+                mounted_data_directory = mount.resolved_path
+                break
+
         return TaskPacket(
             task_id=run_id,
             project_id=project_id,
@@ -1849,11 +1935,11 @@ class WorkerService:
             card_inputs=card_inputs,
             card_outputs=card_outputs,
             expected_outputs=expected_outputs,
-            allowed_paths=[f"runs/{run_id}/", f"{result_dir}/", "scripts/generated/"],
+            allowed_paths=allowed_paths,
             readonly_paths=[asset.path for asset in input_assets],
             forbidden_paths=[".git/", "graph/"],
             execution_policy={
-                "mode": "guarded",
+                "mode": execution_mode,
                 "network": "prompt",
                 "write_policy": "allowed_paths_with_post_run_audit",
                 "on_policy_violation": "fail_or_quarantine",
@@ -1861,13 +1947,13 @@ class WorkerService:
             constraints=[
                 "Do not overwrite existing valid assets.",
                 f"Write outputs under {result_dir}/",
-                f"Write the candidate manifest to runs/{run_id}/manifest.candidate.json.",
-                f"Call runs/{run_id}/report_executor_result.py complete or fail exactly once before exiting.",
+                "Write the candidate manifest to $BLUEPRINT_MANIFEST_CANDIDATE_PATH.",
+                "Call $BLUEPRINT_EXECUTOR_RESULT_TOOL complete or fail exactly once before exiting.",
                 "Do not modify graph/, .git/, or upstream input assets.",
-                f"Do not install missing runtime packages. If required packages/tools are unavailable, use runs/{run_id}/report_executor_result.py fail to report them and stop.",
+                "Do not install missing runtime packages. If required packages/tools are unavailable, use $BLUEPRINT_EXECUTOR_RESULT_TOOL fail to report them and stop.",
             ],
             worker_instructions=(
-                "You are a bioinformatics worker agent. Read task_packet.json, use the declared inputs, "
+                "You are a bioinformatics worker agent. Read $BLUEPRINT_TASK_PACKET, use the declared inputs, "
                 "write only inside allowed_paths, and produce terminal reports plus a candidate manifest that matches expected_outputs."
             ),
             run_context=RunContext(
@@ -1879,6 +1965,7 @@ class WorkerService:
             ),
             executor_context=self._build_executor_context(project_id, card, worker_type, profile_id=profile_id, python_runtime=python_runtime, r_runtime=r_runtime),
             manager_reporting_contract=self._build_manager_reporting_contract(),
+            mounted_data_directory=mounted_data_directory,
         )
 
     @staticmethod

@@ -67,6 +67,12 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
     declares_network_access: bool = False
     supports_sandbox: bool = True
 
+    @staticmethod
+    def _resolve_project_path(project_root: Path, value: str) -> Path:
+        """Return an absolute path, treating ``value`` as relative to ``project_root`` unless already absolute."""
+        path = Path(value)
+        return path if path.is_absolute() else project_root / path
+
     def build_launch_spec(
         self,
         *,
@@ -79,15 +85,19 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         if not self.is_configured(settings):
             raise RuntimeError(f"Worker adapter {self.name} is not configured.")
         run_dir.mkdir(parents=True, exist_ok=True)
+        is_workspace_write = packet.execution_policy.mode == "workspace_write"
+        work_dir = project_root / "work"
+        if is_workspace_write:
+            work_dir.mkdir(parents=True, exist_ok=True)
         self._validate_executor_policy(packet)
         library_paths = self._write_library_bindings(packet=packet, run_dir=run_dir)
-        contract_paths = self._write_contract_files(packet=packet, run_dir=run_dir, library_paths=library_paths)
+        contract_paths = self._write_contract_files(packet=packet, run_dir=run_dir, project_root=project_root, library_paths=library_paths)
         r_profile_path = self._write_runtime_r_profile(run_dir)
         mapping = {
             "task_packet_path": str(packet_path),
             "run_dir": str(run_dir),
             "project_root": str(project_root),
-            "result_dir": str(project_root / packet.run_context.result_dir),
+            "result_dir": str(self._resolve_project_path(project_root, packet.run_context.result_dir)),
             "manifest_path": str(run_dir / "manifest.json"),
             "manifest_candidate_path": str(run_dir / "manifest.candidate.json"),
             "transcript_path": str(run_dir / "transcript.md"),
@@ -120,7 +130,10 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         r_extra_env = self._apply_r_runtime(r_env, settings=settings, base_path=python_extra_env.get("PATH"))
         extra_env = {**python_extra_env, **r_extra_env}
         adapter_extra_env = self.extra_environment(packet=packet, settings=settings)
-        effective_working_dir = str(run_dir)
+        is_workspace_write = packet.execution_policy.mode == "workspace_write"
+        work_dir = project_root / "work"
+        effective_cwd = work_dir if is_workspace_write else run_dir
+        effective_working_dir = str(effective_cwd)
         environment = {
             **os.environ,
             **runtime_env,
@@ -130,7 +143,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "BLUEPRINT_RUN_ID": packet.task_id,
             "BLUEPRINT_CARD_ID": packet.card_id,
             "BLUEPRINT_RUN_DIR": str(run_dir),
-            "BLUEPRINT_RESULT_DIR": packet.run_context.result_dir,
+            "BLUEPRINT_RESULT_DIR": str(self._resolve_project_path(project_root, packet.run_context.result_dir)) if packet.run_context else str(run_dir),
             "BLUEPRINT_TASK_PACKET": str(packet_path),
             "BLUEPRINT_MANIFEST_PATH": str(run_dir / "manifest.json"),
             "BLUEPRINT_MANIFEST_CANDIDATE_PATH": str(run_dir / "manifest.candidate.json"),
@@ -162,6 +175,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "BLUEPRINT_EXECUTOR_MCP_BINDINGS": str(library_paths["mcp_bindings_path"]),
             "BLUEPRINT_EXECUTOR_MCP_CONFIG": str(library_paths["mcp_config_path"]),
             "BLUEPRINT_PI_SKILL_PATHS": json.dumps(library_paths["skill_paths"]),
+            "BLUEPRINT_USER_WORKSPACE": str(work_dir),
             "BLUEPRINT_RUNTIME_WORKING_DIR": effective_working_dir,
             "BLUEPRINT_MANAGER_REPORT_STDOUT_PREFIX": (
                 packet.manager_reporting_contract.stdout_prefix if packet.manager_reporting_contract else "BP_EVENT "
@@ -172,6 +186,11 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         }
         environment.update(adapter_extra_env)
         sandboxed = self._should_use_bwrap(settings)
+        if not sandboxed and packet.mounted_data_directory:
+            raise RuntimeError(
+                "Runs with data_mount/... input assets require the bwrap sandbox. "
+                "Set BLUEPRINT_EXECUTOR_SANDBOX_MODE=bwrap and ensure bubblewrap is installed."
+            )
         if sandboxed:
             command = self._wrap_with_bwrap(
                 command,
@@ -184,7 +203,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             )
         return WorkerLaunchSpec(
             command=command,
-            cwd=run_dir,
+            cwd=effective_cwd,
             environment=environment,
             permission_requests=self._build_permission_requests(packet),
             sandboxed=sandboxed,
@@ -278,7 +297,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         settings: object,
     ) -> list[str]:
         bwrap = _ensure_bwrap_runtime()
-        result_dir = project_root / packet.run_context.result_dir
+        result_dir = CommandTemplateWorkerAdapter._resolve_project_path(project_root, packet.run_context.result_dir)
         script_run_dir = project_root / "scripts" / "generated" / packet.task_id
         tmp_dir = run_dir / "tmp"
         cache_dir = run_dir / "cache"
@@ -304,7 +323,11 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             path.mkdir(parents=True, exist_ok=True)
 
         host_root_readonly = bool(getattr(settings, "executor_host_root_readonly", True))
+        work_dir = project_root / "work"
+        is_workspace_write = packet.execution_policy.mode == "workspace_write"
         writable_binds = [run_dir, result_dir, script_run_dir]
+        if is_workspace_write:
+            writable_binds.append(work_dir)
         readonly_binds = [Path("/")] if host_root_readonly else [project_root]
         masked_paths = CommandTemplateWorkerAdapter._project_mask_paths(packet, project_root, run_dir)
         backend_root = Path(__file__).resolve().parents[2]
@@ -348,6 +371,35 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         )
         for path in masked_paths:
             bind_args.extend(["--tmpfs", str(path)])
+
+        # Data mount: ro-bind the mounted data directory when a run uses data_mount/... inputs
+        data_mount_point: Path | None = None
+        if packet.mounted_data_directory:
+            source = Path(packet.mounted_data_directory)
+            if not source.exists():
+                raise RuntimeError(
+                    f"Mounted data directory is not accessible: {source}. "
+                    "Detach and remount a valid data directory before running cards with data_mount/... inputs."
+                )
+            data_mount_point = project_root / "data_mount"
+            if data_mount_point.exists():
+                # Fail fast if data_mount exists and is non-empty (prevents user-created files from being hidden)
+                try:
+                    has_content = any(data_mount_point.iterdir())
+                except PermissionError:
+                    has_content = False
+                if has_content:
+                    raise RuntimeError(
+                        f"data_mount/ already exists in the project root and is non-empty: {data_mount_point}. "
+                        "Remove or rename it before running cards with data_mount/... inputs."
+                    )
+            else:
+                data_mount_point.mkdir(parents=False, exist_ok=False)
+            readonly_binds.append(source)
+            bind_args.extend(["--ro-bind", str(source), str(data_mount_point)])
+
+        if is_workspace_write and work_dir.exists():
+            bind_args.extend(["--bind", str(work_dir), str(work_dir)])
         bind_args.extend(
             [
                 "--bind",
@@ -360,7 +412,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
                 str(script_run_dir),
                 str(script_run_dir),
                 "--chdir",
-                str(run_dir),
+                str(work_dir if is_workspace_write else run_dir),
             ]
         )
         conda_base = Path(getattr(settings, "executor_conda_base", default_conda_base()))
@@ -389,6 +441,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "BLUEPRINT_API_PROTOCOL",
             "BLUEPRINT_EXECUTOR_SKILLS",
             "BLUEPRINT_RUNTIME_WORKING_DIR",
+            "BLUEPRINT_USER_WORKSPACE",
             "BLUEPRINT_MANAGER_REPORT_STDOUT_PREFIX",
             "BLUEPRINT_RSCRIPT",
             "BLUEPRINT_R_RUNTIME",
@@ -504,6 +557,10 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "backend_root": str(backend_root),
             "python_executable": str(current_python),
             "clearenv": True,
+            "data_mount": {
+                "source": packet.mounted_data_directory,
+                "mount_point": str(data_mount_point) if data_mount_point else None,
+            } if packet.mounted_data_directory else None,
             "env_keys": sorted(key for key in env_keys if key in environment),
             "runtime_env_keys": sorted(packet.executor_context.runtime_bindings.env) if packet.executor_context else [],
             "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -589,10 +646,10 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         return CommandTemplateWorkerAdapter._dedupe_paths(paths)
 
     @staticmethod
-    def _r_user_library_ro_binds(settings: object) -> list[Path]:
-        return CommandTemplateWorkerAdapter._r_user_library_paths(
+    def _r_user_library_ro_binds(settings: object) -> list[str]:
+        return [str(p) for p in CommandTemplateWorkerAdapter._r_user_library_paths(
             CommandTemplateWorkerAdapter._resolve_rscript_runtime(None, settings)
-        )
+        )]
 
     @staticmethod
     def _r_user_library_paths(rscript_path: Path | None = None) -> list[Path]:
@@ -685,9 +742,9 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             ),
             PermissionRequest(
                 request_id=f"perm_{packet.task_id}_write_generated_scripts",
-                target="scripts/generated/",
+                target=f"scripts/generated/{packet.task_id}/",
                 action="write",
-                reason="Worker may generate reusable helper scripts under scripts/generated/.",
+                reason="Worker may generate reusable helper scripts under the current run's scripts/generated directory.",
             ),
         ]
         network_policy = packet.executor_context.tool_policy.network if packet.executor_context else "prompt"
@@ -723,6 +780,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         *,
         packet: TaskPacket,
         run_dir: Path,
+        project_root: Path,
         library_paths: dict[str, object],
     ) -> dict[str, Path]:
         executor_brief_path = run_dir / "executor_brief.md"
@@ -738,22 +796,22 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             json.dumps(
                 {
                     "worker_type": self.name,
-                    "task_packet_path": "task_packet.json",
-                    "executor_prompt_path": "executor_prompt.md",
+                    "task_packet_path": str(run_dir / "task_packet.json"),
+                    "executor_prompt_path": str(run_dir / "executor_prompt.md"),
                     "compatibility": {
-                        "manifest_candidate_path": "manifest.candidate.json",
-                        "dependency_issue_path": "dependency_issue.json",
-                        "dependency_report_tool_path": "report_dependency_issue.py",
+                        "manifest_candidate_path": str(run_dir / "manifest.candidate.json"),
+                        "dependency_issue_path": str(run_dir / "dependency_issue.json"),
+                        "dependency_report_tool_path": str(dependency_report_tool_path),
                     },
-                    "executor_completion_path": "executor_completion.json",
-                    "executor_failure_path": "executor_failure.json",
-                    "terminal_report_path": "terminal_report.json",
-                    "executor_result_state_path": "executor_result_state.json",
-                    "executor_validation_path": "executor_validation.json",
-                    "executor_result_tool_path": "report_executor_result.py",
-                    "skill_bindings_path": str(Path(str(library_paths["skill_bindings_path"])).relative_to(run_dir)),
-                    "mcp_bindings_path": str(Path(str(library_paths["mcp_bindings_path"])).relative_to(run_dir)),
-                    "mcp_config_path": str(Path(str(library_paths["mcp_config_path"])).relative_to(run_dir)),
+                    "executor_completion_path": str(run_dir / "executor_completion.json"),
+                    "executor_failure_path": str(run_dir / "executor_failure.json"),
+                    "terminal_report_path": str(run_dir / "terminal_report.json"),
+                    "executor_result_state_path": str(run_dir / "executor_result_state.json"),
+                    "executor_validation_path": str(run_dir / "executor_validation.json"),
+                    "executor_result_tool_path": str(executor_result_tool_path),
+                    "skill_bindings_path": str(library_paths["skill_bindings_path"]),
+                    "mcp_bindings_path": str(library_paths["mcp_bindings_path"]),
+                    "mcp_config_path": str(library_paths["mcp_config_path"]),
                     "allowed_paths": packet.allowed_paths,
                     "readonly_paths": packet.readonly_paths,
                     "forbidden_paths": packet.forbidden_paths,
@@ -776,19 +834,19 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
                     "executor_tools": [
                         {
                             "name": "report_executor_result",
-                            "path": "report_executor_result.py",
+                            "path": str(executor_result_tool_path),
                             "purpose": "Submit the terminal completion or failure report for this executor run.",
                             "subcommands": {
                                 "complete": (
-                                    "python runs/{run_id}/report_executor_result.py complete "
-                                    "--manifest runs/{run_id}/manifest.candidate.json"
-                                ).format(run_id=packet.task_id),
+                                    f"python {executor_result_tool_path} complete "
+                                    f"--manifest {run_dir / 'manifest.candidate.json'}"
+                                ),
                                 "fail": (
-                                    "python runs/{run_id}/report_executor_result.py fail "
-                                    "--reason-code runtime_dependency_missing "
-                                    "--summary 'Required enrichment packages are unavailable.' "
-                                    "--details-json '{{\"ecosystem\":\"R\",\"missing_packages\":[\"clusterProfiler\"]}}'"
-                                ).format(run_id=packet.task_id),
+                                    f"python {executor_result_tool_path} fail "
+                                    f"--reason-code runtime_dependency_missing "
+                                    f"--summary 'Required enrichment packages are unavailable.' "
+                                    f"--details-json '{{\"ecosystem\":\"R\",\"missing_packages\":[\"clusterProfiler\"]}}'"
+                                ),
                             },
                         }
                     ],
@@ -1026,6 +1084,16 @@ def _validate_candidate_manifest(candidate_path: Path, packet: TaskPacket) -> tu
             continue
         if not asset.path.startswith(allowed_prefixes):
             errors.append(f"{candidate_path.name} output is outside allowed_paths: {asset.path}")
+            continue
+        # workspace_write allows free writes in work/, but formal expected outputs must go through results/.
+        if (
+            packet.execution_policy.mode == "workspace_write"
+            and asset.path.startswith("work/")
+        ):
+            errors.append(
+                f"{candidate_path.name} output must not be placed in work/ directory: {asset.path}"
+            )
+            continue
         output_path = (project_root / asset.path).resolve()
         project_root_resolved = project_root.resolve()
         if output_path != project_root_resolved and project_root_resolved not in output_path.parents:
@@ -1357,7 +1425,12 @@ if __name__ == "__main__":
             f"- Goal: {packet.goal}",
             "",
             "## Inputs",
+            "Input asset paths are project-root-relative. Resolve them from $BLUEPRINT_PROJECT_ROOT, not from the current working directory.",
         ]
+        if packet.execution_policy.mode == "workspace_write":
+            lines.append(
+                "In workspace_write mode, work/ is persistent across runs; inspect or clean only when instructed."
+            )
         if packet.input_assets:
             lines.extend(f"- {item.asset_id}: {item.path} [{item.type}]" for item in packet.input_assets)
         else:
@@ -1393,9 +1466,9 @@ if __name__ == "__main__":
                     f"- MCP servers: {', '.join(packet.executor_context.mcp_servers) if packet.executor_context.mcp_servers else 'none'}",
                     f"- Python runtime: {python_runtime}",
                     f"- R runtime: {r_runtime}",
-                    f"- Skill bindings file: runs/{packet.task_id}/library/skill_bindings.json",
-                    f"- MCP bindings file: runs/{packet.task_id}/library/mcp_bindings.json",
-                    f"- MCP config file: runs/{packet.task_id}/library/mcp.json",
+                    f"- Skill bindings file: $BLUEPRINT_EXECUTOR_SKILL_BINDINGS",
+                    f"- MCP bindings file: $BLUEPRINT_EXECUTOR_MCP_BINDINGS",
+                    f"- MCP config file: $BLUEPRINT_EXECUTOR_MCP_CONFIG",
                 ]
             )
             lines.extend(f"- Instruction: {item}" for item in packet.executor_context.instruction_blocks)
@@ -1406,10 +1479,10 @@ if __name__ == "__main__":
             [
                 "",
                 "## Reporting Contract",
-                "- Use report_executor_result.py to submit either the complete or fail terminal report.",
+                "- Use $BLUEPRINT_EXECUTOR_RESULT_TOOL to submit either the complete or fail terminal report.",
                 "- Do not write or update manager_brief.json directly.",
                 "- Preserve executed code under scripts/generated/{run_id}/ and declare it in manifest.code_artifacts.",
-                "- Write a candidate manifest first; the backend promotes it to manifest.json only after validation.",
+                "- Write a candidate manifest to $BLUEPRINT_MANIFEST_CANDIDATE_PATH first; the backend promotes it to manifest.json only after validation.",
                 "- Backend validation will reject missing outputs, missing code evidence, path violations, and placeholder data.",
             ]
         )
@@ -1423,19 +1496,18 @@ if __name__ == "__main__":
             packet.goal,
             "",
             "Executor contract:",
-            "- The backend validates outputs using task_packet.json, adapter_contract.json, "
-            "manifest.candidate.json, terminal reports, and preserved code artifacts.",
+            "- The backend validates outputs using $BLUEPRINT_TASK_PACKET, $BLUEPRINT_ADAPTER_CONTRACT, "
+            "$BLUEPRINT_MANIFEST_CANDIDATE_PATH, terminal reports, and preserved code artifacts.",
             "- If validation fails, the run will return structured errors for repair instead of being accepted by Manager.",
             "- Keep executable analysis code under scripts/generated/{run_id}/ and declare it in manifest.code_artifacts.",
-            "- Write your candidate manifest to manifest.candidate.json and then call the terminal result helper with the complete subcommand.",
-            "- If your launch environment provides BLUEPRINT_MANIFEST_CANDIDATE_PATH, write the candidate manifest there.",
+            "- Write your candidate manifest to $BLUEPRINT_MANIFEST_CANDIDATE_PATH and then call the terminal result helper with the complete subcommand.",
             "- If required runtime dependencies are missing, do not install packages with pip, conda, install.packages, or BiocManager. "
-            "Call the terminal result helper with the fail subcommand and stop the analysis until the runtime is fixed.",
+            "Call $BLUEPRINT_EXECUTOR_RESULT_TOOL with the fail subcommand and stop the analysis until the runtime is fixed.",
             "- After your terminal result has been accepted, exit immediately. "
             "Do not keep chatting, inspecting files, or printing result contents.",
             "",
             "Task packet:",
-            "- JSON path: task_packet.json",
+            "- JSON path: $BLUEPRINT_TASK_PACKET",
             f"- Project root: {packet.run_context.project_root if packet.run_context else '.'}",
             f"- Run dir: {packet.run_context.run_dir if packet.run_context else 'runs/current'}",
             f"- Result dir: {packet.run_context.result_dir if packet.run_context else 'results/current'}",
@@ -1443,8 +1515,19 @@ if __name__ == "__main__":
             f"- R runtime: {packet.executor_context.runtime_bindings.r_env if packet.executor_context and packet.executor_context.runtime_bindings.r_env else 'system'}",
             "- For R work, prefer BLUEPRINT_RSCRIPT when set; do not assume the Python conda environment also contains R.",
             "",
-            "Input assets:",
+            "Input asset paths are project-root-relative. Resolve them from $BLUEPRINT_PROJECT_ROOT, not from the current working directory.",
         ]
+        if packet.execution_policy.mode == "workspace_write":
+            lines.append(
+                "In workspace_write mode, files under $BLUEPRINT_USER_WORKSPACE may persist across runs. "
+                "Do not assume work/ is clean unless the user explicitly requested cleanup."
+            )
+        lines.extend(
+            [
+                "",
+                "Input assets:",
+            ]
+        )
         if packet.input_assets:
             lines.extend(f"- {item.asset_id}: {item.path} ({item.type})" for item in packet.input_assets)
         else:
@@ -1467,14 +1550,13 @@ if __name__ == "__main__":
                     f"- Profile: {packet.executor_context.executor_profile or 'none'}",
                     f"- Skills: {', '.join(packet.executor_context.skills) if packet.executor_context.skills else 'none'}",
                     f"- MCP servers: {', '.join(packet.executor_context.mcp_servers) if packet.executor_context.mcp_servers else 'none'}",
-                    f"- Skill bindings file: runs/{packet.task_id}/library/skill_bindings.json",
-                    f"- MCP bindings file: runs/{packet.task_id}/library/mcp_bindings.json",
-                    f"- MCP config file: runs/{packet.task_id}/library/mcp.json",
+                    f"- Skill bindings file: $BLUEPRINT_EXECUTOR_SKILL_BINDINGS",
+                    f"- MCP bindings file: $BLUEPRINT_EXECUTOR_MCP_BINDINGS",
+                    f"- MCP config file: $BLUEPRINT_EXECUTOR_MCP_CONFIG",
                 ]
             )
             lines.extend(f"- Instruction: {item}" for item in packet.executor_context.instruction_blocks)
             lines.extend(f"- Reference: {item.path} ({item.type})" for item in packet.executor_context.references)
-        result_tool_path = f"runs/{packet.task_id}/report_executor_result.py"
         lines.extend(
             [
                 "",
@@ -1488,21 +1570,21 @@ if __name__ == "__main__":
                 "- Probe required Python/R/system packages before doing expensive analysis.",
                 "- Do not create or modify conda environments and do not install missing analysis packages inside the run.",
                 "- When a required dependency is missing, call the terminal result helper with fail, then stop rather than substituting a weaker method silently.",
-                f"- Tool: python {result_tool_path} fail --reason-code runtime_dependency_missing --summary 'Required package is unavailable.' --details-json '{{\"ecosystem\":\"R\",\"missing_packages\":[\"clusterProfiler\"],\"package_manager\":\"Bioconductor\"}}'",
+                "- Tool: python $BLUEPRINT_EXECUTOR_RESULT_TOOL fail --reason-code runtime_dependency_missing --summary 'Required package is unavailable.' --details-json '{\"ecosystem\":\"R\",\"missing_packages\":[\"clusterProfiler\"],\"package_manager\":\"Bioconductor\"}'",
             ]
         )
         lines.extend(
             [
                 "",
                 "Output contract:",
-                "- manifest.candidate.json must declare every created asset in created_assets with role/path.",
-                "- manifest.candidate.json must declare preserved code in code_artifacts when assets are created.",
-                "- manifest.candidate.json must set schema_version=executor_manifest.v2.",
-                "- manifest.candidate.json must include summary and manager_report.summary.",
+                "- $BLUEPRINT_MANIFEST_CANDIDATE_PATH must declare every created asset in created_assets with role/path.",
+                "- $BLUEPRINT_MANIFEST_CANDIDATE_PATH must declare preserved code in code_artifacts when assets are created.",
+                "- $BLUEPRINT_MANIFEST_CANDIDATE_PATH must set schema_version=executor_manifest.v2.",
+                "- $BLUEPRINT_MANIFEST_CANDIDATE_PATH must include summary and manager_report.summary.",
                 "- Use created_assets, not outputs.",
                 "- Do not include run_id, status, inputs_used, commands_executed, validation_evidence, top-level metrics, top-level key_findings, recommended_graph_updates, or top-level warnings.",
                 "- Keep warnings under manager_report.warnings.",
-                f"- Completion tool: python {result_tool_path} complete --manifest runs/{packet.task_id}/manifest.candidate.json",
+                "- Completion tool: python $BLUEPRINT_EXECUTOR_RESULT_TOOL complete --manifest $BLUEPRINT_MANIFEST_CANDIDATE_PATH",
             ]
         )
         return "\n".join(lines) + "\n"

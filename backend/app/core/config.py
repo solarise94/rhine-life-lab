@@ -5,6 +5,21 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings
 
 
+def _parse_project_roots(raw: str) -> list[Path]:
+    """Parse BLUEPRINT_PROJECT_ROOTS into a list of absolute Paths."""
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        p = Path(part).expanduser().resolve()
+        if p not in seen:
+            seen.add(p)
+            roots.append(p)
+    return roots
+
+
 def default_conda_base() -> Path:
     return Path.home() / "miniconda3"
 
@@ -131,6 +146,9 @@ class Settings(BaseSettings):
     runtime_dependency_fallback_policy: str = "allow_safe_registry_install"
     runtime_dependency_probe_timeout_seconds: int = 60
     runtime_dependency_cache_ttl_seconds: int = 3600
+    project_roots: str = ""
+    data_directory_roots: str = ""
+    data_mount_hash_limit_bytes: int = 100 * 1024 * 1024  # 100 MB default
 
     model_config = {
         "env_prefix": "BLUEPRINT_",

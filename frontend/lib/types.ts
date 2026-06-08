@@ -441,6 +441,21 @@ export interface Proposal {
   updated_at: string;
 }
 
+export interface DataDirectoryMount {
+  root_id: string;
+  path: string;
+  resolved_path: string;
+  mounted_at: string;
+}
+
+export interface ExportHistoryEntry {
+  asset_id: string;
+  source_path: string;
+  destination_path: string;
+  exported_at: string;
+  actor: string;
+}
+
 export interface ProjectState {
   project_id: string;
   name: string;
@@ -450,6 +465,9 @@ export interface ProjectState {
   created_at: string;
   updated_at: string;
   runtime_preferences: ProjectRuntimePreferences;
+  project_root?: string | null;
+  root_kind?: "managed_project_directory" | "legacy_data_root";
+  data_directory?: DataDirectoryMount | null;
 }
 
 export interface ProjectSummary extends ProjectState {
@@ -520,6 +538,34 @@ export interface CreateProjectPayload {
   project_id: string;
   name: string;
   current_goal: string;
+}
+
+export interface WorkspaceRoot {
+  root_id: string;
+  label: string;
+  path: string;
+}
+
+export interface WorkspaceEntry {
+  name: string;
+  kind: "directory" | "file";
+  is_empty?: boolean;
+  size_bytes?: number | null;
+  mtime: string | null;
+}
+
+export interface WorkspaceEntriesResponse {
+  root_id: string;
+  path: string;
+  items: WorkspaceEntry[];
+  next_cursor: string | null;
+}
+
+export interface ProjectWorkEntriesResponse {
+  project_id: string;
+  path: string;
+  items: WorkspaceEntry[];
+  next_cursor: string | null;
 }
 
 export interface AppSettings {
@@ -615,12 +661,14 @@ export interface UpdateProjectRuntimePreferencesPayload {
   script_preference?: "auto" | "prefer_python" | "prefer_r" | "prefer_mixed" | null;
   python_runtime?: string | null;
   r_runtime?: string | null;
+  execution_mode?: "guarded" | "workspace_write" | null;
 }
 
 export interface ProjectRuntimePreferences {
   script_preference: "auto" | "prefer_python" | "prefer_r" | "prefer_mixed";
   python_runtime?: string | null;
   r_runtime?: string | null;
+  execution_mode?: "guarded" | "workspace_write";
 }
 
 export interface LibraryEntry {

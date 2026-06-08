@@ -12,6 +12,27 @@ class ProjectRuntimePreferences(BaseModel):
     script_preference: Literal["auto", "prefer_python", "prefer_r", "prefer_mixed"] = "auto"
     python_runtime: str | None = None
     r_runtime: str | None = None
+    execution_mode: Literal["guarded", "workspace_write"] = "guarded"
+
+
+class DataDirectoryMount(BaseModel):
+    root_id: str
+    path: str
+    resolved_path: str
+    mounted_at: str
+
+
+class ProjectRegistryEntry(BaseModel):
+    project_id: str
+    name: str
+    project_root: str
+    root_kind: Literal["managed_project_directory", "legacy_data_root"]
+    created_at: str
+    updated_at: str
+
+
+class ProjectRegistry(BaseModel):
+    items: list[ProjectRegistryEntry]
 
 
 class ProjectState(BaseModel):
@@ -23,6 +44,9 @@ class ProjectState(BaseModel):
     created_at: str
     updated_at: str
     runtime_preferences: ProjectRuntimePreferences = Field(default_factory=ProjectRuntimePreferences)
+    project_root: str | None = None
+    root_kind: Literal["managed_project_directory", "legacy_data_root"] = "legacy_data_root"
+    data_directory: DataDirectoryMount | None = None
 
 
 class ProjectSummary(ProjectState):
