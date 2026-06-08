@@ -237,6 +237,14 @@ class WorkerService:
             project_id, card_id, sandboxed=adapter.uses_sandbox(self.project_service.settings), execution_mode=runtime_prefs.execution_mode
         )
         if execution_guard is None:
+            if guard_kind == "workspace_write_project_lock":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Project workspace_write mode allows only one run at a time because work/ is shared across runs.",
+                        "error_code": "workspace_write_lock_busy",
+                    },
+                )
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -503,6 +511,14 @@ class WorkerService:
             project_id, run.card_id, sandboxed=adapter.uses_sandbox(self.project_service.settings), execution_mode=packet.execution_policy.mode
         )
         if execution_guard is None:
+            if guard_kind == "workspace_write_project_lock":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Project workspace_write mode allows only one run at a time because work/ is shared across runs.",
+                        "error_code": "workspace_write_lock_busy",
+                    },
+                )
             raise HTTPException(
                 status_code=409,
                 detail="Project already has an executor run in progress. Continue this run after the current run finishes review.",
@@ -1390,6 +1406,14 @@ class WorkerService:
             self._flush_run_event_buffer(project_id, run_id, clear_sequence=True)
             self._processes.pop(run_id, None)
             self._threads.pop(run_id, None)
+            # Cleanup temporary data_mount bind point if empty
+            data_mount_point = self.project_service.project_path(project_id) / "data_mount"
+            try:
+                if data_mount_point.exists() and data_mount_point.is_dir():
+                    data_mount_point.rmdir()
+            except OSError:
+                # Not empty or not accessible — leave it alone
+                pass
 
     def _recover_manifest_candidate_after_timeout(self, project_id: str, run_id: str) -> tuple[bool, str]:
         run_dir = self.project_service.project_path(project_id) / "runs" / run_id
@@ -1444,7 +1468,7 @@ class WorkerService:
             execution_lock = self._execution_lock_for(project_id)
             if not execution_lock.acquire(blocking=False):
                 card_lock.release()
-                return None, "lock"
+                return None, "workspace_write_project_lock"
             return _CompositeExecutionGuard(card_lock, execution_lock), "composite"
         if not sandboxed:
             execution_lock = self._execution_lock_for(project_id)
@@ -1857,6 +1881,21 @@ class WorkerService:
         allowed_paths = [f"runs/{run_id}/", f"{result_dir}/", f"scripts/generated/{run_id}/"]
         if execution_mode == "workspace_write":
             allowed_paths.insert(0, "work/")
+
+        # Detect data_mount/... input assets and attach mounted data directory path
+        mounted_data_directory: str | None = None
+        for asset in input_assets:
+            if asset.path.startswith("data_mount/"):
+                mount = self.project_service.get_project_data_directory(project_id)
+                if mount is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This run requires data_mount/... inputs but the project does not have a mounted data directory. "
+                        "Please mount a data directory in project settings before running.",
+                    )
+                mounted_data_directory = mount.resolved_path
+                break
+
         return TaskPacket(
             task_id=run_id,
             project_id=project_id,
@@ -1898,6 +1937,7 @@ class WorkerService:
             ),
             executor_context=self._build_executor_context(project_id, card, worker_type, profile_id=profile_id, python_runtime=python_runtime, r_runtime=r_runtime),
             manager_reporting_contract=self._build_manager_reporting_contract(),
+            mounted_data_directory=mounted_data_directory,
         )
 
     @staticmethod

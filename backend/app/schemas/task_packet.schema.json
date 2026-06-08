@@ -877,6 +877,18 @@
         }
       ],
       "default": null
+    },
+    "mounted_data_directory": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Mounted Data Directory"
     }
   },
   "required": [

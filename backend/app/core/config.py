@@ -147,6 +147,8 @@ class Settings(BaseSettings):
     runtime_dependency_probe_timeout_seconds: int = 60
     runtime_dependency_cache_ttl_seconds: int = 3600
     project_roots: str = ""
+    data_directory_roots: str = ""
+    data_mount_hash_limit_bytes: int = 100 * 1024 * 1024  # 100 MB default
 
     model_config = {
         "env_prefix": "BLUEPRINT_",

@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
-import { ChevronLeft, Download, FileCog, FileText, Folder, FolderUp, Link2, Loader2, Trash2 } from "lucide-react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { ChevronLeft, Database, Download, ExternalLink, FileCog, FileText, Folder, FolderUp, Link2, Loader2, Trash2 } from "lucide-react";
 
 import { api } from "@/lib/api";
-import { Asset, ExecutionFileEntry, ProjectFiles, WorkspaceEntry } from "@/lib/types";
+import { Asset, DataDirectoryMount, ExecutionFileEntry, ProjectFiles, WorkspaceEntry } from "@/lib/types";
 
 const EXECUTION_CATEGORY_LABELS: Record<string, string> = {
   task_packet: "Task Packet",
@@ -149,7 +149,7 @@ export function FilesPanel({
         </div>
       </section>
 
-      <WorkDirectorySection projectId={projectId} onRefresh={onRefresh} />
+      <DataDirectorySection projectId={projectId} onRefresh={onRefresh} readOnly={readOnly} />
 
       <AssetSection
         title="正在使用的数据资产"
@@ -192,19 +192,27 @@ export function FilesPanel({
   );
 }
 
-function WorkDirectorySection({ projectId, onRefresh }: { projectId: string; onRefresh: () => Promise<void> }) {
+function DataDirectorySection({ projectId, onRefresh, readOnly = false }: { projectId: string; onRefresh: () => Promise<void>; readOnly?: boolean }) {
   const [entries, setEntries] = useState<WorkspaceEntry[]>([]);
   const [currentPath, setCurrentPath] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
   const [registerError, setRegisterError] = useState<string | null>(null);
   const [registerSuccess, setRegisterSuccess] = useState<string | null>(null);
 
+  const mountQuery = useQuery({
+    queryKey: ["data-directory", projectId],
+    queryFn: () => api.getProjectDataDirectory(projectId),
+  });
+
+  const mount: DataDirectoryMount | null = mountQuery.data?.data_directory ?? null;
+  const isMounted = mount != null;
+
   const registerMutation = useMutation({
-    mutationFn: (path: string) => api.registerWorkAsset(projectId, { path }),
+    mutationFn: (path: string) => api.registerDataDirectoryAsset(projectId, { path }),
     onSuccess: async () => {
       setRegisterError(null);
-      setRegisterSuccess("已注册为项目资产。");
+      setRegisterSuccess("已注册为数据资产 (data_mount/...)。");
       await onRefresh();
       setTimeout(() => setRegisterSuccess(null), 3000);
     },
@@ -215,16 +223,24 @@ function WorkDirectorySection({ projectId, onRefresh }: { projectId: string; onR
   });
 
   useEffect(() => {
+    if (!isMounted) return;
     setLoading(true);
-    setError(null);
+    setListError(null);
     let cancelled = false;
     api
-      .listProjectWorkEntries(projectId, currentPath, "all")
+      .listProjectDataDirectoryEntries(projectId, currentPath, "all")
       .then((res) => {
-        if (!cancelled) setEntries(res.items);
+        if (!cancelled) {
+          if ("available" in res && res.available === false) {
+            setListError("数据目录不可用");
+            setEntries([]);
+          } else {
+            setEntries(res.items);
+          }
+        }
       })
       .catch((err: Error) => {
-        if (!cancelled) setError(err.message);
+        if (!cancelled) setListError(err.message);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -232,18 +248,47 @@ function WorkDirectorySection({ projectId, onRefresh }: { projectId: string; onR
     return () => {
       cancelled = true;
     };
-  }, [projectId, currentPath]);
+  }, [projectId, currentPath, isMounted]);
+
+  if (mountQuery.isLoading) {
+    return (
+      <section className="panel">
+        <div className="panel-header"><h3>数据目录</h3></div>
+        <div className="panel-body"><div className="browser-empty">加载中...</div></div>
+      </section>
+    );
+  }
+
+  if (!isMounted) {
+    return (
+      <section className="panel">
+        <div className="panel-header">
+          <h3>数据目录</h3>
+          <span>未挂载</span>
+        </div>
+        <div className="panel-body stack">
+          <div className="muted" style={{ fontSize: 13 }}>
+            此项目没有挂载数据目录。在项目设置中可以挂载一个已有的服务器数据目录，用于输入数据和结果导出。
+          </div>
+        </div>
+      </section>
+    );
+  }
 
   const pathParts = currentPath ? currentPath.split("/").filter(Boolean) : [];
+  const mountLabel = mount.path || mount.resolved_path.split("/").slice(-1)[0] || "data";
 
   return (
     <section className="panel">
       <div className="panel-header">
-        <h3>Work Directory</h3>
-        <span>{entries.length} entries</span>
+        <h3>数据目录</h3>
+        <span>
+          <Database size={14} style={{ marginRight: 4 }} />
+          {mountLabel} — {entries.length} entries
+        </span>
       </div>
       <div className="panel-body stack">
-        {error ? <div className="notice-panel error">{error}</div> : null}
+        {listError ? <div className="notice-panel error">{listError}</div> : null}
         {registerError ? <div className="notice-panel error">{registerError}</div> : null}
         {registerSuccess ? <div className="notice-panel success">{registerSuccess}</div> : null}
         <div className="directory-browser-breadcrumb" style={{ padding: 0, border: 0 }}>
@@ -253,7 +298,7 @@ function WorkDirectorySection({ projectId, onRefresh }: { projectId: string; onR
             onClick={() => setCurrentPath("")}
             disabled={currentPath === ""}
           >
-            work/
+            data_mount/
           </button>
           {pathParts.map((part, idx) => (
             <span key={idx} className="breadcrumb-part">
@@ -273,7 +318,7 @@ function WorkDirectorySection({ projectId, onRefresh }: { projectId: string; onR
             </button>
           ) : null}
           {!loading && entries.length === 0 && currentPath === "" ? (
-            <div className="browser-empty">work/ 目录为空</div>
+            <div className="browser-empty">数据目录为空</div>
           ) : null}
           {entries.map((entry) => (
             <div key={entry.name} className="browser-entry" style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -300,15 +345,15 @@ function WorkDirectorySection({ projectId, onRefresh }: { projectId: string; onR
                     const fullPath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
                     registerMutation.mutate(fullPath);
                   }}
-                  disabled={registerMutation.isPending}
-                  title="注册为项目资产，可作为 card 输入"
+                  disabled={readOnly || registerMutation.isPending}
+                  title="注册为数据资产 (data_mount/...)，可作为 card 输入"
                 >
                   {registerMutation.isPending && registerMutation.variables === (currentPath ? `${currentPath}/${entry.name}` : entry.name) ? (
                     <Loader2 size={12} className="spinning" />
                   ) : (
                     <Link2 size={12} />
                   )}
-                  用作输入
+                  注册资产
                 </button>
               ) : null}
             </div>

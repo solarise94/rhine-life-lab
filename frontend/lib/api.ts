@@ -7,9 +7,9 @@ import {
   ChatSessionMessageRecord,
   ChatSessionSummary,
   ChatUploadResponse,
+  DataDirectoryMount,
   ManagerAutoState,
   CreateProjectPayload,
-  CreateProjectFromDirectoryPayload,
   WorkspaceRoot,
   WorkspaceEntriesResponse,
   Proposal,
@@ -224,12 +224,6 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
-  createProjectFromDirectory(payload: CreateProjectFromDirectoryPayload) {
-    return request<{ project: ProjectState }>("/projects/from-directory", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-  },
   deleteProject(projectId: string, deleteDirectory?: boolean) {
     const query = deleteDirectory ? "?delete_directory=true" : "";
     return request<{ ok: boolean }>(`/projects/${projectId}${query}`, {
@@ -245,17 +239,35 @@ export const api = {
     params.set("kind", kind);
     return request<WorkspaceEntriesResponse>(`/workspace-roots/${encodeURIComponent(rootId)}/entries?${params.toString()}`);
   },
-  listProjectWorkEntries(projectId: string, path: string = "", kind: "directory" | "all" = "all") {
+  getProjectDataDirectory(projectId: string) {
+    return request<{ data_directory: DataDirectoryMount | null }>(`/projects/${encodeURIComponent(projectId)}/data-directory`);
+  },
+  updateProjectDataDirectory(projectId: string, payload: { root_id: string; path: string }) {
+    return request<{ data_directory: DataDirectoryMount }>(`/projects/${encodeURIComponent(projectId)}/data-directory`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+  },
+  listProjectDataDirectoryEntries(projectId: string, path: string = "", kind: "directory" | "all" = "all") {
     const params = new URLSearchParams();
     if (path) params.set("path", path);
     params.set("kind", kind);
-    return request<ProjectWorkEntriesResponse>(`/projects/${encodeURIComponent(projectId)}/work-entries?${params.toString()}`);
+    return request<ProjectWorkEntriesResponse>(`/projects/${encodeURIComponent(projectId)}/data-directory/entries?${params.toString()}`);
   },
-  registerWorkAsset(projectId: string, payload: { path: string }) {
-    return request<{ asset: Asset }>(`/projects/${encodeURIComponent(projectId)}/work-assets/register`, {
+  registerDataDirectoryAsset(projectId: string, payload: { path: string }) {
+    return request<{ asset: Asset }>(`/projects/${encodeURIComponent(projectId)}/data-directory/assets/register`, {
       method: "POST",
       body: JSON.stringify(payload),
     });
+  },
+  exportAssetToDataDirectory(projectId: string, assetId: string, payload: { destination_path: string; overwrite?: boolean }) {
+    return request<{ ok: boolean; asset_id: string; source_path: string; destination_path: string; exported_at: string }>(
+      `/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(assetId)}/export-to-data-directory`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }
+    );
   },
   getProject(projectId: string) {
     return request<ProjectSnapshot>(`/projects/${projectId}`);

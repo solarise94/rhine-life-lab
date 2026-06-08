@@ -441,6 +441,13 @@ export interface Proposal {
   updated_at: string;
 }
 
+export interface DataDirectoryMount {
+  root_id: string;
+  path: string;
+  resolved_path: string;
+  mounted_at: string;
+}
+
 export interface ProjectState {
   project_id: string;
   name: string;
@@ -452,6 +459,7 @@ export interface ProjectState {
   runtime_preferences: ProjectRuntimePreferences;
   project_root?: string | null;
   root_kind?: "managed_project_directory" | "legacy_data_root";
+  data_directory?: DataDirectoryMount | null;
 }
 
 export interface ProjectSummary extends ProjectState {
@@ -519,15 +527,6 @@ export interface PythonRuntime {
 export type RRuntime = PythonRuntime;
 
 export interface CreateProjectPayload {
-  project_id: string;
-  name: string;
-  current_goal: string;
-}
-
-export interface CreateProjectFromDirectoryPayload {
-  root_id: string;
-  parent_path: string;
-  directory_name: string;
   project_id: string;
   name: string;
   current_goal: string;

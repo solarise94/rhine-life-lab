@@ -26,6 +26,7 @@ from app.models.cards import Card, CardAssetRef
 from app.models.graph import Asset, Claim, GraphState, Module, ModuleRef, ReportItem
 from app.models.output_contracts import CardOutputSpec
 from app.models.project import (
+    DataDirectoryMount,
     ProjectRegistry,
     ProjectRegistryEntry,
     ProjectRuntimePreferences,
@@ -282,6 +283,8 @@ class ProjectService:
         name: str,
         current_goal: str,
         seed_demo: bool = False,
+        data_directory: DataDirectoryMount | None = None,
+        root_kind: str = "legacy_data_root",
     ) -> ProjectState:
         root = self.project_path(project_id)
         if root.exists():
@@ -303,6 +306,8 @@ class ProjectService:
             created_at=now,
             updated_at=now,
             runtime_preferences=runtime_preferences,
+            data_directory=data_directory,
+            root_kind=root_kind,  # type: ignore[arg-type]
         )
         store = GraphStore(root)
         store.save_project_state(state)
@@ -381,7 +386,7 @@ class ProjectService:
         name: str,
         current_goal: str,
     ) -> ProjectState:
-        """Create a Blueprint project inside a user-selected server directory."""
+        """Create a managed Blueprint project under data_root and mount a user-selected data directory."""
         # ---- 1. Validation that does not touch disk ----
         self._validate_project_id(project_id)
         if not directory_name or directory_name.strip() == "." or directory_name.strip() == "..":
@@ -396,143 +401,30 @@ class ProjectService:
         if (self.settings.data_root / project_id).exists():
             raise HTTPException(status_code=409, detail=f"Project ID already exists in data root: {project_id}")
 
-        roots = self._workspace_roots()
-        root_info = next((r for r in roots if r["root_id"] == root_id), None)
-        if root_info is None:
-            raise HTTPException(status_code=404, detail=f"Workspace root not found: {root_id}")
+        # Validate the selected data directory
+        relative_path = f"{parent_path.strip('/').rstrip('/')}/{directory_name.strip('/')}".strip("/")
+        resolved_data_dir = self._validate_data_directory(root_id, relative_path, project_id)
 
-        root_path = Path(root_info["path"]).resolve()
-        target = (root_path / parent_path.strip("/") / directory_name.strip("/")).resolve()
+        # ---- 2. Create managed project under data_root and mount data directory ----
+        now = utc_now()
+        mount = DataDirectoryMount(
+            root_id=root_id,
+            path=relative_path,
+            resolved_path=str(resolved_data_dir),
+            mounted_at=now,
+        )
 
-        # Boundary check: target must be inside the selected root
-        if target != root_path and root_path not in target.parents:
-            raise HTTPException(status_code=403, detail="Selected directory is outside the allowed workspace root.")
+        state = self.create_project(
+            project_id=project_id,
+            name=name,
+            current_goal=current_goal,
+            data_directory=mount,
+            root_kind="managed_project_directory",
+        )
 
-        # Check target state (existence, emptiness, Blueprint state, .git)
-        created_target = False
-        if target.exists():
-            if (target / "graph" / "cards.json").exists() or (target / "project.json").exists():
-                raise HTTPException(
-                    status_code=409,
-                    detail="Target directory already contains a Blueprint project. Choose a different name.",
-                )
-            try:
-                entries = list(target.iterdir())
-                if entries:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Opening existing non-empty directories is not supported yet.",
-                    )
-            except PermissionError as exc:
-                raise HTTPException(status_code=403, detail=f"Cannot access directory: {exc}") from exc
-            # Empty existing directory: allow reuse
-        else:
-            try:
-                target.mkdir(parents=False, exist_ok=True)
-                created_target = True
-            except FileNotFoundError as exc:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Parent directory does not exist: {exc}",
-                ) from exc
-
-        # Post-creation boundary re-check: defend against TOCTOU symlink swap
-        resolved_after_mkdir = target.resolve()
-        if resolved_after_mkdir != root_path and root_path not in resolved_after_mkdir.parents:
-            if created_target:
-                shutil.rmtree(target, ignore_errors=True)
-            raise HTTPException(status_code=403, detail="Selected directory resolves outside the allowed workspace root.")
-
-        # Reject existing git checkouts in MVP
-        if (target / ".git").exists():
-            if created_target:
-                shutil.rmtree(target, ignore_errors=True)
-            raise HTTPException(
-                status_code=409,
-                detail="Opening existing git checkouts is not supported yet.",
-            )
-
-        # ---- 2. Scaffold and commit ----
-        scaffold_started = False
-        try:
-            self._scaffold_project_directories(target)
-            scaffold_started = True
-
-            now = utc_now()
-            runtime_preferences = ProjectRuntimePreferences(
-                python_runtime=self.settings.default_python_runtime,
-                r_runtime=self.settings.default_r_runtime,
-            )
-            state = ProjectState(
-                project_id=project_id,
-                name=name,
-                status="active",
-                schema_version=self.settings.schema_version,
-                current_goal=current_goal,
-                created_at=now,
-                updated_at=now,
-                runtime_preferences=runtime_preferences,
-                project_root=str(target),
-                root_kind="managed_project_directory",
-            )
-            store = GraphStore(target)
-            store.save_project_state(state)
-            store.save_cards([])
-            store.save_graph(
-                GraphState(
-                    metadata={
-                        "schema_version": self.settings.schema_version,
-                        "runtime_preferences": state.runtime_preferences.model_dump(),
-                        "default_conda_env": state.runtime_preferences.python_runtime,
-                        "default_r_env": state.runtime_preferences.r_runtime,
-                    }
-                )
-            )
-            store.save_proposals([])
-            store.save_chat_sessions([])
-            store.save_project_memory([])
-            atomic_write_json(target / "graph" / "cleanup.json", [])
-            (target / "configs" / "params.yaml").write_text(
-                f"project_id: {project_id}\nname: {name}\n",
-                encoding="utf-8",
-            )
-            (target / ".gitignore").write_text(
-                "\n".join(
-                    [
-                        "data/**",
-                        "results/**/*.h5ad",
-                        "results/**/*.bam",
-                        "results/**/*.fastq",
-                        "results/**/*.fq",
-                        "results/**/*.cram",
-                        "artifact_store/**",
-                        "!artifacts/pointers/*.json",
-                        "__pycache__/",
-                        ".pytest_cache/",
-                        "chat/**",
-                        "work/**",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            git = GitService(target)
-            git.init_repo()
-            git.commit("Initialize project scaffold")
-
-            # Register in project registry (last mutating step)
-            self._add_registry_entry(project_id, name, target, "managed_project_directory")
-            return state
-        except Exception:
-            # Rollback: if we created the directory, remove it entirely.
-            # If we reused an empty directory, leave it but mark recovery needed.
-            if created_target:
-                shutil.rmtree(target, ignore_errors=True)
-            elif scaffold_started:
-                self._write_project_recovery_marker(
-                    target, "Project creation failed before registry commit; manual cleanup may be needed."
-                )
-            raise
+        # Register in project registry
+        self._add_registry_entry(project_id, name, self.project_path(project_id), "managed_project_directory")
+        return state
 
     def delete_project(self, project_id: str, delete_directory: bool = False) -> None:
         root = self.project_path(project_id)
@@ -584,6 +476,95 @@ class ProjectService:
                 "path": str(p),
             })
         return roots
+
+    def data_directory_roots(self) -> list[dict]:
+        roots: list[dict] = [{"root_id": "home", "label": "Home", "path": str(Path.home().resolve())}]
+        extra = _parse_project_roots(self.settings.data_directory_roots)
+        for idx, p in enumerate(extra, start=1):
+            roots.append({
+                "root_id": f"extra_{idx}",
+                "label": str(p.name) or str(p),
+                "path": str(p),
+            })
+        return roots
+
+    def _validate_data_directory(self, root_id: str, relative_path: str, project_id: str) -> Path:
+        """Validate a selected data directory and return its resolved path."""
+        roots = self.data_directory_roots()
+        root_info = next((r for r in roots if r["root_id"] == root_id), None)
+        if root_info is None:
+            raise HTTPException(status_code=404, detail=f"Data directory root not found: {root_id}")
+
+        root_path = Path(root_info["path"]).resolve()
+        target = (root_path / relative_path.strip("/")).resolve()
+
+        # Boundary check
+        if target != root_path and root_path not in target.parents:
+            raise HTTPException(status_code=403, detail="Selected data directory is outside the allowed root.")
+
+        # Must exist and be readable
+        if not target.exists():
+            raise HTTPException(status_code=404, detail=f"Data directory does not exist: {relative_path}")
+        if not target.is_dir():
+            raise HTTPException(status_code=400, detail=f"Path is not a directory: {relative_path}")
+
+        # Symlink escape check
+        if target.is_symlink():
+            real_target = target.resolve()
+            if real_target != root_path and root_path not in real_target.parents:
+                raise HTTPException(status_code=403, detail="Symlink points outside the allowed root.")
+
+        # Reject Blueprint project state inside the data directory
+        if (target / "project.json").exists() or (target / "graph" / "cards.json").exists():
+            raise HTTPException(
+                status_code=409,
+                detail="Selected directory already contains a Blueprint project. Choose a different directory.",
+            )
+
+        # Overlap check: mounted dir must not equal or contain the managed project dir,
+        # and must not be inside it.
+        managed_project = project_root(self.settings.data_root, project_id).resolve()
+        try:
+            target.relative_to(managed_project)
+            raise HTTPException(status_code=409, detail="Data directory cannot be inside the managed project directory.")
+        except ValueError:
+            pass
+        try:
+            managed_project.relative_to(target)
+            raise HTTPException(status_code=409, detail="Data directory cannot contain the managed project directory.")
+        except ValueError:
+            pass
+
+        return target
+
+    def set_project_data_directory(self, project_id: str, root_id: str, path: str) -> DataDirectoryMount:
+        """Mount a data directory to an existing project."""
+        if not (self.project_path(project_id) / "project.json").exists():
+            raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+
+        resolved_path = self._validate_data_directory(root_id, path, project_id)
+
+        mount = DataDirectoryMount(
+            root_id=root_id,
+            path=path.strip("/"),
+            resolved_path=str(resolved_path),
+            mounted_at=utc_now(),
+        )
+
+        with self.lock_for(project_id):
+            store = self.graph_store(project_id)
+            project = self._project_state_with_runtime_preferences(store)
+            project = project.model_copy(update={"data_directory": mount, "updated_at": utc_now()})
+            store.save_project_state(project)
+
+        return mount
+
+    def get_project_data_directory(self, project_id: str) -> DataDirectoryMount | None:
+        if not (self.project_path(project_id) / "project.json").exists():
+            raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+        store = self.graph_store(project_id)
+        project = self._project_state_with_runtime_preferences(store)
+        return project.data_directory
 
     def _seed_demo(self, store: GraphStore, state: ProjectState) -> None:
         now = utc_now()

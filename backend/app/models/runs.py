@@ -86,6 +86,7 @@ class TaskPacket(BaseModel):
     run_context: RunContext | None = None
     executor_context: ExecutorContext | None = None
     manager_reporting_contract: ManagerReportingContract | None = None
+    mounted_data_directory: str | None = None
 
 
 class CodeArtifact(BaseModel):

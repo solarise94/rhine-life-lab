@@ -129,11 +129,16 @@ class TestCreateFromDirectory(TestCase):
             svc._workspace_roots = lambda: [
                 {"root_id": "home", "label": "Home", "path": str(self.user_home.resolve())}
             ]
+            svc.data_directory_roots = lambda: [
+                {"root_id": "home", "label": "Home", "path": str(self.user_home.resolve())}
+            ]
             return svc
 
     def test_creates_work_directory_and_registry(self) -> None:
         """Successful creation scaffolds work/, writes registry, .gitignore has work/**."""
         svc = self._svc()
+        # Create the data directory first (it must exist for mounting)
+        (self.user_home / "oaa-2").mkdir()
         state = svc.create_project_from_directory(
             root_id="home",
             parent_path="",
@@ -145,11 +150,17 @@ class TestCreateFromDirectory(TestCase):
         self.assertEqual(state.project_id, "oaa-2")
         self.assertEqual(state.root_kind, "managed_project_directory")
 
-        target = self.user_home / "oaa-2"
-        self.assertTrue((target / "work").is_dir())
-        self.assertTrue((target / "project.json").exists())
+        # Managed project is under data_root, NOT inside the data directory
+        managed_root = svc.project_path("oaa-2")
+        self.assertTrue((managed_root / "work").is_dir())
+        self.assertTrue((managed_root / "project.json").exists())
 
-        gitignore = (target / ".gitignore").read_text(encoding="utf-8")
+        # Data directory is untouched (no Blueprint state scaffolded inside it)
+        data_dir = self.user_home / "oaa-2"
+        self.assertTrue(data_dir.is_dir())
+        self.assertFalse((data_dir / "project.json").exists())
+
+        gitignore = (managed_root / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("work/**", gitignore)
 
         registry_path = self.data_root / "_system" / "project_registry.json"
@@ -178,41 +189,48 @@ class TestCreateFromDirectory(TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertFalse((self.user_home / "new-dir").exists())
 
-    def test_existing_non_empty_rejected(self) -> None:
-        """Non-empty existing directory is rejected."""
+    def test_existing_non_empty_allowed(self) -> None:
+        """Non-empty existing data directory is allowed (plan: mounted data directories may be existing and non-empty)."""
         svc = self._svc()
         target = self.user_home / "has-stuff"
         target.mkdir()
         (target / "readme.txt").write_text("hello")
 
-        with self.assertRaises(HTTPException) as ctx:
-            svc.create_project_from_directory(
-                root_id="home",
-                parent_path="",
-                directory_name="has-stuff",
-                project_id="has-stuff",
-                name="Has Stuff",
-                current_goal="test",
-            )
-        self.assertEqual(ctx.exception.status_code, 409)
+        state = svc.create_project_from_directory(
+            root_id="home",
+            parent_path="",
+            directory_name="has-stuff",
+            project_id="has-stuff",
+            name="Has Stuff",
+            current_goal="test",
+        )
+        self.assertEqual(state.project_id, "has-stuff")
+        # Managed project is under data_root, not inside the data directory
+        project_root = svc.project_path("has-stuff")
+        self.assertTrue(project_root.exists())
+        # Data directory is untouched (no Blueprint state scaffolded inside it)
+        self.assertFalse((target / "project.json").exists())
 
-    def test_existing_git_rejected(self) -> None:
-        """Directory containing .git is rejected."""
+    def test_existing_git_allowed(self) -> None:
+        """Directory containing .git is allowed (plan: MVP should not write git state into mounted data directory, so .git is not a blocker)."""
         svc = self._svc()
         target = self.user_home / "git-repo"
         target.mkdir()
         (target / ".git").mkdir()
 
-        with self.assertRaises(HTTPException) as ctx:
-            svc.create_project_from_directory(
-                root_id="home",
-                parent_path="",
-                directory_name="git-repo",
-                project_id="git-repo",
-                name="Git Repo",
-                current_goal="test",
-            )
-        self.assertEqual(ctx.exception.status_code, 409)
+        state = svc.create_project_from_directory(
+            root_id="home",
+            parent_path="",
+            directory_name="git-repo",
+            project_id="git-repo",
+            name="Git Repo",
+            current_goal="test",
+        )
+        self.assertEqual(state.project_id, "git-repo")
+        # Managed project root is under data_root, not inside the data directory
+        self.assertFalse((target / "project.json").exists())
+        # .git inside data directory is untouched
+        self.assertTrue((target / ".git").exists())
 
     def test_path_traversal_rejected(self) -> None:
         """Path traversal is rejected."""
@@ -266,9 +284,11 @@ class TestWorkspaceRootsEndpoint(TestCase):
     def _svc(self) -> ProjectService:
         with patch("app.services.project_service.get_settings", return_value=self.settings):
             svc = ProjectService()
-            svc._workspace_roots = lambda: [
+            test_roots = [
                 {"root_id": "home", "label": "Home", "path": str(self.user_home.resolve())}
             ]
+            svc._workspace_roots = lambda: test_roots
+            svc.data_directory_roots = lambda: test_roots
             return svc
 
     def test_workspace_roots_list_directories(self) -> None:
@@ -765,6 +785,182 @@ class TestWorkspaceWriteMode(TestCase):
             any("outside allowed_paths" in e for e in errors),
             f"Expected allowed_paths rejection, got: {errors}"
         )
+
+    def test_workspace_write_prompt_states_input_paths_project_root_relative(self) -> None:
+        """Prompt explicitly states input paths are project-root-relative."""
+        from app.workers.command_worker import CommandTemplateWorkerAdapter
+        from app.models.runs import TaskPacket, ExecutionPolicy
+        from app.models.executor import ExecutorContext, ExecutorToolPolicy, RuntimeBindings
+
+        adapter = CommandTemplateWorkerAdapter()
+        adapter.command_template = "echo hello"
+        packet = TaskPacket(
+            task_id="run-1",
+            project_id="test-proj",
+            card_id="card-1",
+            goal="test",
+            worker_instructions="test",
+            execution_policy=ExecutionPolicy(mode="workspace_write"),
+            executor_context=ExecutorContext(
+                tool_policy=ExecutorToolPolicy(),
+                runtime_bindings=RuntimeBindings(),
+            ),
+        )
+        prompt = adapter._render_executor_prompt(packet)
+        self.assertIn("project-root-relative", prompt)
+        self.assertIn("$BLUEPRINT_PROJECT_ROOT", prompt)
+
+    def test_workspace_write_prompt_warns_work_dir_persists(self) -> None:
+        """workspace_write prompt warns that work/ persists across runs."""
+        from app.workers.command_worker import CommandTemplateWorkerAdapter
+        from app.models.runs import TaskPacket, ExecutionPolicy
+        from app.models.executor import ExecutorContext, ExecutorToolPolicy, RuntimeBindings
+
+        adapter = CommandTemplateWorkerAdapter()
+        adapter.command_template = "echo hello"
+        packet = TaskPacket(
+            task_id="run-1",
+            project_id="test-proj",
+            card_id="card-1",
+            goal="test",
+            worker_instructions="test",
+            execution_policy=ExecutionPolicy(mode="workspace_write"),
+            executor_context=ExecutorContext(
+                tool_policy=ExecutorToolPolicy(),
+                runtime_bindings=RuntimeBindings(),
+            ),
+        )
+        prompt = adapter._render_executor_prompt(packet)
+        self.assertIn("persist across runs", prompt)
+
+        # Guarded mode should NOT contain the persistence warning
+        packet_guarded = packet.model_copy(update={"execution_policy": ExecutionPolicy(mode="guarded")})
+        prompt_guarded = adapter._render_executor_prompt(packet_guarded)
+        self.assertNotIn("persist across runs", prompt_guarded)
+
+    def test_workspace_write_brief_states_input_paths_project_root_relative(self) -> None:
+        """Brief explicitly states input paths are project-root-relative."""
+        from app.workers.command_worker import CommandTemplateWorkerAdapter
+        from app.models.runs import TaskPacket, ExecutionPolicy
+
+        adapter = CommandTemplateWorkerAdapter()
+        adapter.command_template = "echo hello"
+        packet = TaskPacket(
+            task_id="run-1",
+            project_id="test-proj",
+            card_id="card-1",
+            goal="test",
+            worker_instructions="test",
+            execution_policy=ExecutionPolicy(mode="workspace_write"),
+        )
+        brief = adapter._render_executor_brief(packet)
+        self.assertIn("project-root-relative", brief)
+
+    def test_workspace_write_lock_returns_specific_error_code(self) -> None:
+        """workspace_write project lock busy returns specific error_code."""
+        from app.services.worker_service import WorkerService
+        from app.services.manifest_service import ManifestService
+        from app.services.runtime_approval_service import RuntimeApprovalService
+
+        svc = self._svc()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+        svc.update_project_runtime_preferences("test-proj", {"execution_mode": "workspace_write"})
+
+        worker_service = WorkerService(
+            project_service=svc,
+            manifest_service=ManifestService(svc),
+            runtime_approval_service=RuntimeApprovalService(svc),
+        )
+
+        # First acquisition should succeed
+        guard1, kind1 = worker_service._acquire_execution_guard("test-proj", "card-1", sandboxed=True, execution_mode="workspace_write")
+        self.assertIsNotNone(guard1)
+        self.assertEqual(kind1, "composite")
+
+        # Second acquisition should fail with specific kind
+        guard2, kind2 = worker_service._acquire_execution_guard("test-proj", "card-2", sandboxed=True, execution_mode="workspace_write")
+        self.assertIsNone(guard2)
+        self.assertEqual(kind2, "workspace_write_project_lock")
+
+        guard1.release()
+
+    def test_result_dir_env_handles_absolute_result_dir(self) -> None:
+        """_resolve_project_path handles both relative and absolute result_dir."""
+        from app.workers.command_worker import CommandTemplateWorkerAdapter
+
+        project_root = self.data_root / "test-proj"
+        project_root.mkdir()
+
+        adapter = CommandTemplateWorkerAdapter()
+
+        # Relative path
+        rel = adapter._resolve_project_path(project_root, "results/card-1/run-1")
+        self.assertEqual(rel, project_root / "results" / "card-1" / "run-1")
+
+        # Absolute path (should be returned as-is)
+        abs_path = str(self.data_root / "absolute" / "results")
+        result = adapter._resolve_project_path(project_root, abs_path)
+        self.assertEqual(result, Path(abs_path))
+
+    def test_workspace_write_bwrap_includes_work_bind_when_host_root_not_readonly(self) -> None:
+        """workspace_write bwrap includes work bind even when host root is not readonly."""
+        from app.workers.command_worker import CommandTemplateWorkerAdapter
+        from app.models.runs import TaskPacket, RunContext, ExecutionPolicy
+        from app.models.executor import ExecutorContext, ExecutorToolPolicy, RuntimeBindings
+
+        import shutil
+        if not shutil.which("bwrap"):
+            self.skipTest("bwrap not available")
+
+        adapter = CommandTemplateWorkerAdapter()
+        adapter.command_template = "echo hello"
+        project_root = self.data_root / "test-proj"
+        project_root.mkdir()
+        run_dir = project_root / "runs" / "run-1"
+        run_dir.mkdir(parents=True)
+        work_dir = project_root / "work"
+        work_dir.mkdir()
+
+        class FakeSettings:
+            executor_sandbox_mode = "bwrap"
+            executor_host_root_readonly = False  # <-- key difference
+            executor_conda_base = ""
+            executor_extra_ro_binds = ""
+            executor_max_concurrent_runs = 1
+
+        packet = TaskPacket(
+            task_id="run-1",
+            project_id="test-proj",
+            card_id="card-1",
+            goal="test",
+            worker_instructions="test",
+            run_context=RunContext(
+                run_id="run-1",
+                worker_type="test",
+                project_root=str(project_root),
+                run_dir=str(run_dir),
+                result_dir="results/card-1/run-1",
+            ),
+            execution_policy=ExecutionPolicy(mode="workspace_write"),
+            executor_context=ExecutorContext(
+                tool_policy=ExecutorToolPolicy(),
+                runtime_bindings=RuntimeBindings(),
+            ),
+        )
+        packet_path = run_dir / "task_packet.json"
+        packet_path.write_text(packet.model_dump_json())
+
+        spec = adapter.build_launch_spec(
+            packet=packet,
+            packet_path=packet_path,
+            run_dir=run_dir,
+            project_root=project_root,
+            settings=FakeSettings(),
+        )
+        self.assertTrue(spec.sandboxed)
+        cmd_str = " ".join(spec.command)
+        self.assertIn(f"--bind {work_dir} {work_dir}", cmd_str)
+        self.assertIn(f"--chdir {work_dir}", cmd_str)
 
 
 class TestRegisterWorkAsset(TestCase):

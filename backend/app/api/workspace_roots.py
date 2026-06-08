@@ -15,7 +15,7 @@ router = APIRouter(prefix="/workspace-roots", tags=["workspace-roots"])
 
 @router.get("")
 def list_workspace_roots(project_service: ProjectService = Depends(get_project_service)) -> dict:
-    return {"items": project_service.workspace_roots()}
+    return {"items": project_service.data_directory_roots()}
 
 
 @router.get("/{root_id}/entries")
@@ -34,7 +34,7 @@ def list_workspace_entries(
     - ``cursor``: pagination cursor (not yet implemented; placeholder for large directories).
     - ``show_hidden``: whether to include dot-entries.
     """
-    roots = project_service.workspace_roots()
+    roots = project_service.data_directory_roots()
     root_info = next((r for r in roots if r["root_id"] == root_id), None)
     if root_info is None:
         raise HTTPException(status_code=404, detail=f"Workspace root not found: {root_id}")

@@ -18,20 +18,16 @@ class CreateProjectRequest(BaseModel):
     current_goal: str
 
 
-class CreateProjectFromDirectoryRequest(BaseModel):
-    root_id: str
-    parent_path: str
-    directory_name: str
-    project_id: str
-    name: str
-    current_goal: str
-
-
 class UpdateProjectRuntimePreferencesRequest(BaseModel):
     script_preference: Literal["auto", "prefer_python", "prefer_r", "prefer_mixed"] | None = None
     python_runtime: str | None = None
     r_runtime: str | None = None
     execution_mode: Literal["guarded", "workspace_write"] | None = None
+
+
+class UpdateProjectDataDirectoryRequest(BaseModel):
+    root_id: str
+    path: str
 
 
 @router.get("")
@@ -42,22 +38,6 @@ def list_projects(project_service: ProjectService = Depends(get_project_service)
 @router.post("")
 def create_project(request: CreateProjectRequest, project_service: ProjectService = Depends(get_project_service)) -> dict:
     project = project_service.create_project(
-        project_id=request.project_id,
-        name=request.name,
-        current_goal=request.current_goal,
-    )
-    return {"project": project}
-
-
-@router.post("/from-directory")
-def create_project_from_directory(
-    request: CreateProjectFromDirectoryRequest,
-    project_service: ProjectService = Depends(get_project_service),
-) -> dict:
-    project = project_service.create_project_from_directory(
-        root_id=request.root_id,
-        parent_path=request.parent_path,
-        directory_name=request.directory_name,
         project_id=request.project_id,
         name=request.name,
         current_goal=request.current_goal,
@@ -114,6 +94,25 @@ def update_project_runtime_preferences(
             request.model_dump(exclude_unset=True),
         ).model_dump()
     }
+
+
+@router.put("/{project_id}/data-directory")
+def update_project_data_directory(
+    project_id: str,
+    request: UpdateProjectDataDirectoryRequest,
+    project_service: ProjectService = Depends(get_project_service),
+    worker_service: WorkerService = Depends(get_worker_service),
+) -> dict:
+    if worker_service.has_active_runs(project_id):
+        raise HTTPException(status_code=409, detail=f"Project {project_id} has active runs and cannot modify data directory.")
+    mount = project_service.set_project_data_directory(project_id, request.root_id, request.path)
+    return {"data_directory": mount.model_dump()}
+
+
+@router.get("/{project_id}/data-directory")
+def get_project_data_directory(project_id: str, project_service: ProjectService = Depends(get_project_service)) -> dict:
+    mount = project_service.get_project_data_directory(project_id)
+    return {"data_directory": mount.model_dump() if mount else None}
 
 
 @router.get("/{project_id}/skill-library")

@@ -15,6 +15,13 @@ class ProjectRuntimePreferences(BaseModel):
     execution_mode: Literal["guarded", "workspace_write"] = "guarded"
 
 
+class DataDirectoryMount(BaseModel):
+    root_id: str
+    path: str
+    resolved_path: str
+    mounted_at: str
+
+
 class ProjectRegistryEntry(BaseModel):
     project_id: str
     name: str
@@ -39,6 +46,7 @@ class ProjectState(BaseModel):
     runtime_preferences: ProjectRuntimePreferences = Field(default_factory=ProjectRuntimePreferences)
     project_root: str | None = None
     root_kind: Literal["managed_project_directory", "legacy_data_root"] = "legacy_data_root"
+    data_directory: DataDirectoryMount | None = None
 
 
 class ProjectSummary(ProjectState):

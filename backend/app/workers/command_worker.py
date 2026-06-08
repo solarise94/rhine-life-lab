@@ -67,6 +67,12 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
     declares_network_access: bool = False
     supports_sandbox: bool = True
 
+    @staticmethod
+    def _resolve_project_path(project_root: Path, value: str) -> Path:
+        """Return an absolute path, treating ``value`` as relative to ``project_root`` unless already absolute."""
+        path = Path(value)
+        return path if path.is_absolute() else project_root / path
+
     def build_launch_spec(
         self,
         *,
@@ -91,7 +97,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "task_packet_path": str(packet_path),
             "run_dir": str(run_dir),
             "project_root": str(project_root),
-            "result_dir": str(project_root / packet.run_context.result_dir),
+            "result_dir": str(self._resolve_project_path(project_root, packet.run_context.result_dir)),
             "manifest_path": str(run_dir / "manifest.json"),
             "manifest_candidate_path": str(run_dir / "manifest.candidate.json"),
             "transcript_path": str(run_dir / "transcript.md"),
@@ -137,7 +143,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "BLUEPRINT_RUN_ID": packet.task_id,
             "BLUEPRINT_CARD_ID": packet.card_id,
             "BLUEPRINT_RUN_DIR": str(run_dir),
-            "BLUEPRINT_RESULT_DIR": str(project_root / packet.run_context.result_dir) if packet.run_context else str(run_dir),
+            "BLUEPRINT_RESULT_DIR": str(self._resolve_project_path(project_root, packet.run_context.result_dir)) if packet.run_context else str(run_dir),
             "BLUEPRINT_TASK_PACKET": str(packet_path),
             "BLUEPRINT_MANIFEST_PATH": str(run_dir / "manifest.json"),
             "BLUEPRINT_MANIFEST_CANDIDATE_PATH": str(run_dir / "manifest.candidate.json"),
@@ -180,6 +186,11 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         }
         environment.update(adapter_extra_env)
         sandboxed = self._should_use_bwrap(settings)
+        if not sandboxed and packet.mounted_data_directory:
+            raise RuntimeError(
+                "Runs with data_mount/... input assets require the bwrap sandbox. "
+                "Set BLUEPRINT_EXECUTOR_SANDBOX_MODE=bwrap and ensure bubblewrap is installed."
+            )
         if sandboxed:
             command = self._wrap_with_bwrap(
                 command,
@@ -286,7 +297,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         settings: object,
     ) -> list[str]:
         bwrap = _ensure_bwrap_runtime()
-        result_dir = project_root / packet.run_context.result_dir
+        result_dir = CommandTemplateWorkerAdapter._resolve_project_path(project_root, packet.run_context.result_dir)
         script_run_dir = project_root / "scripts" / "generated" / packet.task_id
         tmp_dir = run_dir / "tmp"
         cache_dir = run_dir / "cache"
@@ -360,6 +371,33 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         )
         for path in masked_paths:
             bind_args.extend(["--tmpfs", str(path)])
+
+        # Data mount: ro-bind the mounted data directory when a run uses data_mount/... inputs
+        data_mount_point: Path | None = None
+        if packet.mounted_data_directory:
+            source = Path(packet.mounted_data_directory)
+            if not source.exists():
+                raise RuntimeError(
+                    f"Mounted data directory is not accessible: {source}. "
+                    "Detach and remount a valid data directory before running cards with data_mount/... inputs."
+                )
+            data_mount_point = project_root / "data_mount"
+            if data_mount_point.exists():
+                # Fail fast if data_mount exists and is non-empty (prevents user-created files from being hidden)
+                try:
+                    has_content = any(data_mount_point.iterdir())
+                except PermissionError:
+                    has_content = False
+                if has_content:
+                    raise RuntimeError(
+                        f"data_mount/ already exists in the project root and is non-empty: {data_mount_point}. "
+                        "Remove or rename it before running cards with data_mount/... inputs."
+                    )
+            else:
+                data_mount_point.mkdir(parents=False, exist_ok=False)
+            readonly_binds.append(source)
+            bind_args.extend(["--ro-bind", str(source), str(data_mount_point)])
+
         if is_workspace_write and work_dir.exists():
             bind_args.extend(["--bind", str(work_dir), str(work_dir)])
         bind_args.extend(
@@ -519,6 +557,10 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "backend_root": str(backend_root),
             "python_executable": str(current_python),
             "clearenv": True,
+            "data_mount": {
+                "source": packet.mounted_data_directory,
+                "mount_point": str(data_mount_point) if data_mount_point else None,
+            } if packet.mounted_data_directory else None,
             "env_keys": sorted(key for key in env_keys if key in environment),
             "runtime_env_keys": sorted(packet.executor_context.runtime_bindings.env) if packet.executor_context else [],
             "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -604,10 +646,10 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         return CommandTemplateWorkerAdapter._dedupe_paths(paths)
 
     @staticmethod
-    def _r_user_library_ro_binds(settings: object) -> list[Path]:
-        return CommandTemplateWorkerAdapter._r_user_library_paths(
+    def _r_user_library_ro_binds(settings: object) -> list[str]:
+        return [str(p) for p in CommandTemplateWorkerAdapter._r_user_library_paths(
             CommandTemplateWorkerAdapter._resolve_rscript_runtime(None, settings)
-        )
+        )]
 
     @staticmethod
     def _r_user_library_paths(rscript_path: Path | None = None) -> list[Path]:
@@ -1383,7 +1425,12 @@ if __name__ == "__main__":
             f"- Goal: {packet.goal}",
             "",
             "## Inputs",
+            "Input asset paths are project-root-relative. Resolve them from $BLUEPRINT_PROJECT_ROOT, not from the current working directory.",
         ]
+        if packet.execution_policy.mode == "workspace_write":
+            lines.append(
+                "In workspace_write mode, work/ is persistent across runs; inspect or clean only when instructed."
+            )
         if packet.input_assets:
             lines.extend(f"- {item.asset_id}: {item.path} [{item.type}]" for item in packet.input_assets)
         else:
@@ -1468,8 +1515,19 @@ if __name__ == "__main__":
             f"- R runtime: {packet.executor_context.runtime_bindings.r_env if packet.executor_context and packet.executor_context.runtime_bindings.r_env else 'system'}",
             "- For R work, prefer BLUEPRINT_RSCRIPT when set; do not assume the Python conda environment also contains R.",
             "",
-            "Input assets:",
+            "Input asset paths are project-root-relative. Resolve them from $BLUEPRINT_PROJECT_ROOT, not from the current working directory.",
         ]
+        if packet.execution_policy.mode == "workspace_write":
+            lines.append(
+                "In workspace_write mode, files under $BLUEPRINT_USER_WORKSPACE may persist across runs. "
+                "Do not assume work/ is clean unless the user explicitly requested cleanup."
+            )
+        lines.extend(
+            [
+                "",
+                "Input assets:",
+            ]
+        )
         if packet.input_assets:
             lines.extend(f"- {item.asset_id}: {item.path} ({item.type})" for item in packet.input_assets)
         else:
