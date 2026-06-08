@@ -448,6 +448,14 @@ export interface DataDirectoryMount {
   mounted_at: string;
 }
 
+export interface ExportHistoryEntry {
+  asset_id: string;
+  source_path: string;
+  destination_path: string;
+  exported_at: string;
+  actor: string;
+}
+
 export interface ProjectState {
   project_id: string;
   name: string;

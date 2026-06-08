@@ -35,15 +35,11 @@ class ResultAssetService:
         asset = self.get_asset(project_id, asset_id)
 
         # For data_mount assets, check freshness before building preview
-        if asset.path.startswith("data_mount/") and asset.status not in {"missing", "archived"}:
-            issues = self.project_service.check_data_mount_assets_freshness(project_id)
-            for issue in issues:
-                if issue["asset_id"] == asset.asset_id:
-                    asset = self.get_asset(project_id, asset_id)
-                    break
+        if asset.path.startswith("data_mount/") and asset.status != "archived":
+            self.project_service.check_data_mount_assets_freshness(project_id)
+            asset = self.get_asset(project_id, asset_id)
 
-        project_root = self.project_service.project_path(project_id)
-        path = resolve_within(project_root, asset.path)
+        path = self._resolve_asset_path(project_id, asset)
         exists = path.exists()
         preview = {
             "kind": "missing" if not exists else "binary",
@@ -62,10 +58,31 @@ class ResultAssetService:
 
     def get_asset_content_response(self, project_id: str, asset_id: str) -> FileResponse:
         asset = self.get_asset(project_id, asset_id)
-        project_root = self.project_service.project_path(project_id)
-        path = resolve_within(project_root, asset.path)
+
+        # For data_mount assets, check freshness before serving content
+        if asset.path.startswith("data_mount/") and asset.status != "archived":
+            self.project_service.check_data_mount_assets_freshness(project_id)
+            asset = self.get_asset(project_id, asset_id)
+
+        path = self._resolve_asset_path(project_id, asset)
         media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         return FileResponse(path, media_type=media_type, filename=path.name)
+
+    def _resolve_asset_path(self, project_id: str, asset: Asset) -> Path:
+        """Resolve the filesystem path for an asset.
+
+        For data_mount/... assets, resolves to the actual source file under the
+        mounted data directory. For regular assets, resolves within the project root.
+        """
+        if asset.path.startswith("data_mount/"):
+            mount = self.project_service.get_project_data_directory(project_id)
+            if mount:
+                relative = asset.metadata.get("mount_relative_path", asset.path.replace("data_mount/", "", 1))
+                try:
+                    return resolve_within(Path(mount.resolved_path), relative) if relative else Path(mount.resolved_path)
+                except ValueError:
+                    pass
+        return resolve_within(self.project_service.project_path(project_id), asset.path)
 
     def _build_preview(self, project_id: str, asset: Asset, path: Path) -> dict:
         suffix = path.suffix.lower()

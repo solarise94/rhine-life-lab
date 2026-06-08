@@ -1853,6 +1853,19 @@ class WorkerService:
         data_mount_input_assets = [a for a in input_assets if a.path.startswith("data_mount/")]
         if data_mount_input_assets:
             issues = self.project_service.check_data_mount_assets_freshness(project_id)
+            if issues:
+                # Backfill updated statuses into the packet snapshot for consistency
+                fresh_graph = self.project_service.graph_store(project_id).load_graph()
+                fresh_asset_by_id = {a.asset_id: a for a in fresh_graph.assets}
+                for issue in issues:
+                    fresh_asset = fresh_asset_by_id.get(issue["asset_id"])
+                    if fresh_asset:
+                        new_status = fresh_asset.status
+                        if issue["asset_id"] in input_assets_by_id:
+                            input_assets_by_id[issue["asset_id"]].status = new_status
+                        for ci in card_inputs:
+                            if ci.asset_id == issue["asset_id"]:
+                                ci.status = new_status
             stale_ids = {i["asset_id"] for i in issues}
             bad_assets = [a for a in data_mount_input_assets if a.asset_id in stale_ids]
             if bad_assets:

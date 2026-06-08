@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 import re
 import shutil
@@ -36,7 +37,7 @@ from app.models.project import (
 from app.services.asset_materialization_service import AssetMaterializationService
 from app.services.git_service import GitService
 from app.services.graph_store import GraphStore
-from app.services.utils import atomic_write_json, read_json, utc_now
+from app.services.utils import atomic_write_json, read_json, resolve_within, utc_now
 from app.workers.registry import build_worker_registry
 
 
@@ -618,7 +619,7 @@ class ProjectService:
             for asset in graph.assets:
                 if not asset.path.startswith("data_mount/"):
                     continue
-                if asset.status in {"missing", "archived"}:
+                if asset.status == "archived":
                     continue
 
                 # If no mount record, mark missing immediately
@@ -682,6 +683,11 @@ class ProjectService:
                         "path": asset.path,
                         "reason": "; ".join(reason_parts) if reason_parts else "integrity check failed",
                     })
+                    changed = True
+
+                # Recovery: restore missing/stale assets when mount/file are back and integrity passes
+                if asset.status in {"missing", "stale"} and not (size_changed or mtime_changed or digest_mismatch):
+                    asset.status = "valid"
                     changed = True
 
             if changed:

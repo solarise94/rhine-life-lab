@@ -412,3 +412,11 @@ export function useReportExportMutation(projectId: string) {
     mutationFn: () => api.exportReportHtml(projectId),
   });
 }
+
+export function useProjectDataDirectoryExportHistory(projectId: string, enabled: boolean = true) {
+  return useQuery({
+    queryKey: [...queryKeys.project(projectId), "export-history"],
+    queryFn: () => api.getProjectDataDirectoryExportHistory(projectId),
+    enabled,
+  });
+}

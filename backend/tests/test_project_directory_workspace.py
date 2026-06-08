@@ -11,6 +11,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from app.core.config import Settings, get_settings
+from app.models.graph import Asset
 from app.models.project import ProjectRegistry, ProjectRegistryEntry
 from app.services.project_service import ProjectService
 from app.services.utils import atomic_write_json, read_json, utc_now
@@ -1033,3 +1034,331 @@ class TestRegisterWorkAsset(TestCase):
         resp1 = register_work_asset("test-proj", type("Req", (), {"path": "data.csv"})(), svc)
         resp2 = register_work_asset("test-proj", type("Req", (), {"path": "data.csv"})(), svc)
         self.assertEqual(resp1["asset"]["asset_id"], resp2["asset"]["asset_id"])
+
+
+class TestDataMountAssetRecovery(TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.data_root = Path(self.tmpdir.name) / "workspace"
+        self.data_root.mkdir(parents=True)
+        self.user_home = Path(self.tmpdir.name) / "home" / "user"
+        self.user_home.mkdir(parents=True)
+        self.settings = Settings(data_root=self.data_root)
+        get_settings.cache_clear()
+
+    def tearDown(self) -> None:
+        get_settings.cache_clear()
+        self.tmpdir.cleanup()
+
+    def _svc(self) -> ProjectService:
+        with patch("app.services.project_service.get_settings", return_value=self.settings):
+            svc = ProjectService()
+            test_roots = [
+                {"root_id": "home", "label": "Home", "path": str(self.user_home.resolve())}
+            ]
+            svc._workspace_roots = lambda: test_roots
+            svc.data_directory_roots = lambda: test_roots
+            return svc
+
+    def _create_data_mount_asset(self, svc: ProjectService, project_id: str, asset_id: str, path: str, status: str, relative_path: str, size_bytes: int | None = None, mtime: str | None = None) -> None:
+        """Seed a data_mount asset directly into the graph store."""
+        store = svc.graph_store(project_id)
+        metadata: dict = {
+            "source": "mounted_data_directory",
+            "mount_relative_path": relative_path,
+            "integrity_kind": "size_mtime",
+        }
+        if size_bytes is not None:
+            metadata["registered_size_bytes"] = size_bytes
+        if mtime is not None:
+            metadata["registered_mtime"] = mtime
+        asset = Asset(
+            asset_id=asset_id,
+            asset_type="document",
+            title="test.txt",
+            status=status,
+            path=path,
+            summary="Test",
+            metadata=metadata,
+        )
+        store.save_assets([asset])
+
+    def test_missing_asset_recovered_via_get_asset_detail(self) -> None:
+        """A missing data_mount asset is restored to valid when its source file reappears."""
+        from app.services.result_asset_service import ResultAssetService
+
+        svc = self._svc()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+
+        # Create data directory with source file
+        data_dir = self.user_home / "data"
+        data_dir.mkdir()
+        (data_dir / "test.txt").write_text("hello")
+
+        # Mount data directory
+        svc.set_project_data_directory("test-proj", "home", "data")
+
+        # Seed a missing asset
+        self._create_data_mount_asset(svc, "test-proj", "dm-1", "data_mount/test.txt", "missing", "test.txt")
+
+        result_svc = ResultAssetService(svc)
+        detail = result_svc.get_asset_detail("test-proj", "dm-1")
+
+        self.assertEqual(detail["asset"].status, "valid")
+        self.assertEqual(detail["preview"]["kind"], "text")
+
+    def test_missing_asset_recovered_via_get_asset_content_response(self) -> None:
+        """A missing data_mount asset is restored to valid when content is requested."""
+        from app.services.result_asset_service import ResultAssetService
+
+        svc = self._svc()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+
+        data_dir = self.user_home / "data"
+        data_dir.mkdir()
+        (data_dir / "test.txt").write_text("hello")
+
+        svc.set_project_data_directory("test-proj", "home", "data")
+        self._create_data_mount_asset(svc, "test-proj", "dm-1", "data_mount/test.txt", "missing", "test.txt")
+
+        result_svc = ResultAssetService(svc)
+        resp = result_svc.get_asset_content_response("test-proj", "dm-1")
+
+        # FileResponse should point to the real source file, not project_root/data_mount/...
+        self.assertEqual(Path(resp.path), data_dir / "test.txt")
+
+    def test_content_response_resolves_to_real_mounted_path(self) -> None:
+        """get_asset_content_response resolves data_mount assets to the actual source file."""
+        from app.services.result_asset_service import ResultAssetService
+
+        svc = self._svc()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+
+        data_dir = self.user_home / "data"
+        data_dir.mkdir()
+        (data_dir / "test.txt").write_text("hello")
+
+        svc.set_project_data_directory("test-proj", "home", "data")
+        self._create_data_mount_asset(svc, "test-proj", "dm-1", "data_mount/test.txt", "valid", "test.txt")
+
+        result_svc = ResultAssetService(svc)
+        resp = result_svc.get_asset_content_response("test-proj", "dm-1")
+
+        self.assertEqual(Path(resp.path), data_dir / "test.txt")
+
+
+class TestTaskPacketFreshnessBackfill(TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.data_root = Path(self.tmpdir.name) / "workspace"
+        self.data_root.mkdir(parents=True)
+        self.user_home = Path(self.tmpdir.name) / "home" / "user"
+        self.user_home.mkdir(parents=True)
+        self.settings = Settings(data_root=self.data_root)
+        get_settings.cache_clear()
+
+    def tearDown(self) -> None:
+        get_settings.cache_clear()
+        self.tmpdir.cleanup()
+
+    def _svc(self) -> ProjectService:
+        with patch("app.services.project_service.get_settings", return_value=self.settings):
+            svc = ProjectService()
+            test_roots = [
+                {"root_id": "home", "label": "Home", "path": str(self.user_home.resolve())}
+            ]
+            svc._workspace_roots = lambda: test_roots
+            svc.data_directory_roots = lambda: test_roots
+            return svc
+
+    def _create_data_mount_asset(self, svc: ProjectService, project_id: str, asset_id: str, path: str, status: str, relative_path: str, size_bytes: int | None = None, mtime: str | None = None) -> None:
+        store = svc.graph_store(project_id)
+        metadata: dict = {
+            "source": "mounted_data_directory",
+            "mount_relative_path": relative_path,
+            "integrity_kind": "size_mtime",
+        }
+        if size_bytes is not None:
+            metadata["registered_size_bytes"] = size_bytes
+        if mtime is not None:
+            metadata["registered_mtime"] = mtime
+        asset = Asset(
+            asset_id=asset_id,
+            asset_type="document",
+            title="test.txt",
+            status=status,
+            path=path,
+            summary="Test",
+            metadata=metadata,
+        )
+        store.save_assets([asset])
+
+    def test_task_packet_raises_409_when_data_mount_input_missing(self) -> None:
+        """_task_packet raises 409 when a data_mount input's source file is missing, and updates the store."""
+        from app.models.cards import Card, CardAssetRef
+        from app.models.output_contracts import CardOutputSpec
+        from app.services.worker_service import WorkerService
+        from app.services.manifest_service import ManifestService
+        from app.services.runtime_approval_service import RuntimeApprovalService
+        from app.models.graph import Asset
+
+        svc = self._svc()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+
+        data_dir = self.user_home / "data"
+        data_dir.mkdir()
+        (data_dir / "test.txt").write_text("hello")
+
+        svc.set_project_data_directory("test-proj", "home", "data")
+        self._create_data_mount_asset(svc, "test-proj", "dm-1", "data_mount/test.txt", "valid", "test.txt")
+
+        # Delete the source file to make the asset stale/missing
+        (data_dir / "test.txt").unlink()
+
+        # Seed a card that uses the data_mount asset as input
+        store = svc.graph_store("test-proj")
+        card = Card(
+            card_id="card-1",
+            card_type="run",
+            title="Test Card",
+            status="planned",
+            summary="Test",
+            inputs=[CardAssetRef(label="input", asset_id="dm-1")],
+            outputs=[
+                CardOutputSpec(
+                    role="output",
+                    label="Output",
+                    artifact_class="document",
+                    accepted_formats=["csv"],
+                    path_hint="results/card-1/run-1/output.csv",
+                ),
+            ],
+        )
+        store.save_cards([card])
+
+        ws = WorkerService(
+            project_service=svc,
+            manifest_service=ManifestService(svc),
+            runtime_approval_service=RuntimeApprovalService(svc),
+        )
+
+        asset = Asset(
+            asset_id="dm-1",
+            asset_type="document",
+            title="test.txt",
+            status="valid",
+            path="data_mount/test.txt",
+            summary="Test",
+            metadata={
+                "source": "mounted_data_directory",
+                "mount_relative_path": "test.txt",
+                "registered_size_bytes": 5,
+                "registered_mtime": "2024-01-01T00:00:00Z",
+                "integrity_kind": "size_mtime",
+            },
+        )
+
+        with self.assertRaises(HTTPException) as ctx:
+            ws._task_packet(
+                project_id="test-proj",
+                run_id="run-1",
+                card=card,
+                assets=[asset],
+                worker_type="test",
+                cards=[card],
+                runs=[],
+            )
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("Stale or missing mounted data assets", str(ctx.exception.detail))
+
+        # The store should have been updated to reflect the missing status
+        fresh_assets = svc.graph_store("test-proj").load_assets()
+        fresh_asset = next((a for a in fresh_assets if a.asset_id == "dm-1"), None)
+        self.assertIsNotNone(fresh_asset)
+        self.assertEqual(fresh_asset.status, "missing")
+
+    def test_task_packet_raises_409_when_data_mount_input_stale(self) -> None:
+        """_task_packet raises 409 when a data_mount input's source file changed, and updates the store."""
+        from app.models.cards import Card, CardAssetRef
+        from app.models.output_contracts import CardOutputSpec
+        from app.services.worker_service import WorkerService
+        from app.services.manifest_service import ManifestService
+        from app.services.runtime_approval_service import RuntimeApprovalService
+        from app.models.graph import Asset
+
+        svc = self._svc()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+
+        data_dir = self.user_home / "data"
+        data_dir.mkdir()
+        (data_dir / "test.txt").write_text("hello")
+
+        svc.set_project_data_directory("test-proj", "home", "data")
+        self._create_data_mount_asset(
+            svc, "test-proj", "dm-1", "data_mount/test.txt", "valid", "test.txt",
+            size_bytes=5, mtime="2024-01-01T00:00:00Z",
+        )
+
+        # Change the source file to make it stale
+        (data_dir / "test.txt").write_text("changed content")
+
+        store = svc.graph_store("test-proj")
+        card = Card(
+            card_id="card-1",
+            card_type="run",
+            title="Test Card",
+            status="planned",
+            summary="Test",
+            inputs=[CardAssetRef(label="input", asset_id="dm-1")],
+            outputs=[
+                CardOutputSpec(
+                    role="output",
+                    label="Output",
+                    artifact_class="document",
+                    accepted_formats=["csv"],
+                    path_hint="results/card-1/run-1/output.csv",
+                ),
+            ],
+        )
+        store.save_cards([card])
+
+        ws = WorkerService(
+            project_service=svc,
+            manifest_service=ManifestService(svc),
+            runtime_approval_service=RuntimeApprovalService(svc),
+        )
+
+        asset = Asset(
+            asset_id="dm-1",
+            asset_type="document",
+            title="test.txt",
+            status="valid",
+            path="data_mount/test.txt",
+            summary="Test",
+            metadata={
+                "source": "mounted_data_directory",
+                "mount_relative_path": "test.txt",
+                "registered_size_bytes": 5,
+                "registered_mtime": "2024-01-01T00:00:00Z",
+                "integrity_kind": "size_mtime",
+            },
+        )
+
+        with self.assertRaises(HTTPException) as ctx:
+            ws._task_packet(
+                project_id="test-proj",
+                run_id="run-1",
+                card=card,
+                assets=[asset],
+                worker_type="test",
+                cards=[card],
+                runs=[],
+            )
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("Stale or missing mounted data assets", str(ctx.exception.detail))
+
+        # The store should have been updated to reflect the stale status
+        fresh_assets = svc.graph_store("test-proj").load_assets()
+        fresh_asset = next((a for a in fresh_assets if a.asset_id == "dm-1"), None)
+        self.assertIsNotNone(fresh_asset)
+        self.assertEqual(fresh_asset.status, "stale")

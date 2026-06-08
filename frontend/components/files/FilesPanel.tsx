@@ -2,10 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronLeft, Database, Download, ExternalLink, FileCog, FileText, Folder, FolderUp, Link2, Loader2, Trash2, Unlink } from "lucide-react";
+import { ChevronLeft, Database, Download, ExternalLink, FileCog, FileText, Folder, FolderUp, History, Link2, Loader2, Trash2, Unlink } from "lucide-react";
 
 import { api } from "@/lib/api";
-import { Asset, DataDirectoryMount, ExecutionFileEntry, ProjectFiles, WorkspaceEntry } from "@/lib/types";
+import { useProjectDataDirectoryExportHistory } from "@/lib/hooks";
+import { Asset, DataDirectoryMount, ExecutionFileEntry, ExportHistoryEntry, ProjectFiles, WorkspaceEntry } from "@/lib/types";
 
 const EXECUTION_CATEGORY_LABELS: Record<string, string> = {
   task_packet: "Task Packet",
@@ -188,7 +189,62 @@ export function FilesPanel({
         deletingAssetId={deleteUploadMutation.isPending ? deleteUploadMutation.variables : undefined}
       />
       <ExecutionFilesSection projectId={projectId} items={files?.execution_files ?? []} />
+      <ExportHistorySection projectId={projectId} />
     </div>
+  );
+}
+
+function ExportHistorySection({ projectId }: { projectId: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const historyQuery = useProjectDataDirectoryExportHistory(projectId, expanded);
+
+  function handleToggle() {
+    setExpanded((v) => !v);
+  }
+
+  const items = historyQuery.data?.items ?? [];
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <h3>导出历史</h3>
+        <span>{items.length} records</span>
+      </div>
+      <div className="panel-body stack">
+        <button type="button" className="btn secondary" onClick={handleToggle}>
+          <History size={14} />
+          {expanded ? "收起" : "查看导出历史"}
+        </button>
+        {expanded ? (
+          historyQuery.isLoading ? (
+            <div className="browser-empty">加载中...</div>
+          ) : items.length === 0 ? (
+            <div className="empty-state">暂无导出记录。</div>
+          ) : (
+            <div className="files-execution-list">
+              {items.map((item: ExportHistoryEntry, idx: number) => (
+                <div key={idx} className="files-execution-row">
+                  <div className="files-execution-main">
+                    <div className="files-asset-icon" style={{ width: 34, height: 34 }}>
+                      <Download size={15} />
+                    </div>
+                    <div className="files-execution-meta">
+                      <strong>{item.asset_id}</strong>
+                      <span className="muted">{item.actor}</span>
+                      <div className="muted files-path">源: {item.source_path}</div>
+                      <div className="muted files-path">目标: {item.destination_path}</div>
+                    </div>
+                  </div>
+                  <div className="files-execution-side">
+                    <span>{item.exported_at}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )
+        ) : null}
+      </div>
+    </section>
   );
 }
 
@@ -320,7 +376,11 @@ function DataDirectorySection({ projectId, onRefresh, readOnly = false }: { proj
       <div className="panel-body stack">
         {!isAvailable ? (
           <div className="notice-panel error">
-            数据目录不可用。目录可能已被删除或无法访问。请检查挂载路径或重新挂载数据目录。
+            <div>数据目录不可用。目录可能已被删除或无法访问。</div>
+            <a href={`/projects/${projectId}/settings`} className="btn secondary" style={{ marginTop: 8, display: "inline-flex" }}>
+              <Link2 size={14} />
+              前往项目设置重新挂载
+            </a>
           </div>
         ) : null}
         {listError ? <div className="notice-panel error">{listError}</div> : null}

@@ -8,6 +8,7 @@ import {
   ChatSessionSummary,
   ChatUploadResponse,
   DataDirectoryMount,
+  ExportHistoryEntry,
   ManagerAutoState,
   CreateProjectPayload,
   WorkspaceRoot,
@@ -274,6 +275,9 @@ export const api = {
         body: JSON.stringify(payload),
       }
     );
+  },
+  getProjectDataDirectoryExportHistory(projectId: string) {
+    return request<{ items: ExportHistoryEntry[] }>(`/projects/${encodeURIComponent(projectId)}/data-directory/export-history`);
   },
   getProject(projectId: string) {
     return request<ProjectSnapshot>(`/projects/${projectId}`);

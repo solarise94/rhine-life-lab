@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Literal
@@ -142,6 +144,22 @@ def detach_project_data_directory(
         raise HTTPException(status_code=409, detail=f"Project {project_id} has active runs and cannot detach data directory.")
     mount = project_service.detach_project_data_directory(project_id)
     return {"data_directory": mount.model_dump() if mount else None, "detached": mount is not None}
+
+
+@router.get("/{project_id}/data-directory/export-history")
+def get_project_data_directory_export_history(
+    project_id: str,
+    project_service: ProjectService = Depends(get_project_service),
+) -> dict:
+    """Return export history for the project's mounted data directory."""
+    if not (project_service.project_path(project_id) / "project.json").exists():
+        raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+
+    store = project_service.graph_store(project_id)
+    graph = store.load_graph()
+    history = graph.metadata.get("export_history", []) if isinstance(graph.metadata, dict) else []
+    history = history or []
+    return {"items": history}
 
 
 @router.get("/{project_id}/skill-library")
