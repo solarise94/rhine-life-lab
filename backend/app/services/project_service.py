@@ -37,7 +37,7 @@ from app.models.project import (
 from app.services.asset_materialization_service import AssetMaterializationService
 from app.services.git_service import GitService
 from app.services.graph_store import GraphStore
-from app.services.utils import atomic_write_json, read_json, resolve_within, utc_now
+from app.services.utils import atomic_write_json, read_json, resolve_within, sha256_file, utc_now
 from app.workers.registry import build_worker_registry
 
 

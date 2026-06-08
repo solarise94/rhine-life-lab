@@ -202,6 +202,62 @@ def find_assets(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.post("/data-directory/list")
+def list_data_directory(
+    project_id: str,
+    payload: dict | None = None,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.list_data_directory(project_id, payload or {})
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/data-directory/register")
+def register_data_asset(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.register_data_asset(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/data-assets/{asset_id}/describe")
+def describe_data_asset(
+    project_id: str,
+    asset_id: str,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.describe_data_asset(project_id, asset_id)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/data-assets/export")
+def export_result(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.export_result(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/cards")
 def create_card(
     project_id: str,

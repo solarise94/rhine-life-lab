@@ -27,6 +27,7 @@ from app.services.dependency_attention_service import DependencyAttentionService
 from app.services.library_registry_service import LibraryRegistryService
 from app.services.manager_planner import ManagerPlanningError
 from app.services.module_group_state_service import ModuleGroupStateService
+from app.services.mounted_data_directory_service import MountedDataDirectoryService
 from app.services.project_service import ProjectService
 from app.services.result_asset_service import ResultAssetService
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
@@ -57,7 +58,6 @@ from app.services.worker_service import WorkerService
 
 
 logger = logging.getLogger(__name__)
-
 
 class DependencyResolutionError(ManagerPlanningError):
     def __init__(self, payload: dict[str, Any]) -> None:
@@ -267,6 +267,7 @@ class ManagerBlueprintTools:
         self.asset_timeline_service = AssetTimelineService()
         self.dependency_attention_service = DependencyAttentionService()
         self.background_workboard_service = background_workboard_service
+        self.mounted_data_directory_service = MountedDataDirectoryService(project_service, worker_service)
 
     def get_project_context(self, project_id: str) -> dict:
         snapshot = self.project_service.get_project_snapshot(project_id)
@@ -980,6 +981,57 @@ class ManagerBlueprintTools:
         if not asset_id:
             raise ManagerPlanningError("read_result_asset requires asset_id.")
         return self.result_asset_service.get_asset_detail(project_id, asset_id)
+
+    def list_data_directory(self, project_id: str, payload: dict | None = None) -> dict:
+        body = payload or {}
+        path = str(body.get("path") or "").strip()
+        kind = str(body.get("kind") or "all").strip() or "all"
+        cursor_value = body.get("cursor")
+        cursor = str(cursor_value).strip() if cursor_value not in {None, ""} else None
+        show_hidden = bool(body.get("show_hidden", False))
+        try:
+            return self.mounted_data_directory_service.list_entries(
+                project_id,
+                path=path,
+                kind=kind,
+                cursor=cursor,
+                show_hidden=show_hidden,
+            )
+        except HTTPException as exc:
+            raise ManagerPlanningError(str(exc.detail)) from exc
+
+    def register_data_asset(self, project_id: str, payload: dict) -> dict:
+        path = str(payload.get("path") or "").strip()
+        if not path:
+            raise ManagerPlanningError("register_data_asset requires path.")
+        try:
+            return self.mounted_data_directory_service.register_asset(project_id, path=path)
+        except HTTPException as exc:
+            raise ManagerPlanningError(str(exc.detail)) from exc
+
+    def describe_data_asset(self, project_id: str, asset_id: str) -> dict:
+        if not asset_id:
+            raise ManagerPlanningError("describe_data_asset requires asset_id.")
+        return self.result_asset_service.get_asset_detail(project_id, asset_id)
+
+    def export_result(self, project_id: str, payload: dict) -> dict:
+        asset_id = str(payload.get("asset_id") or "").strip()
+        destination = str(payload.get("destination") or "").strip()
+        overwrite = bool(payload.get("overwrite", False))
+        if not asset_id:
+            raise ManagerPlanningError("export_result requires asset_id.")
+        if not destination:
+            raise ManagerPlanningError("export_result requires destination.")
+        try:
+            return self.mounted_data_directory_service.export_asset(
+                project_id,
+                asset_id=asset_id,
+                destination_path=destination,
+                overwrite=overwrite,
+                actor="manager",
+            )
+        except HTTPException as exc:
+            raise ManagerPlanningError(str(exc.detail)) from exc
 
     def list_skill_library(self, project_id: str) -> dict:
         payload = self.library_registry_service.list_entries("skill", minimal=True)

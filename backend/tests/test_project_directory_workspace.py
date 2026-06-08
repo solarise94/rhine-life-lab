@@ -1362,3 +1362,257 @@ class TestTaskPacketFreshnessBackfill(TestCase):
         fresh_asset = next((a for a in fresh_assets if a.asset_id == "dm-1"), None)
         self.assertIsNotNone(fresh_asset)
         self.assertEqual(fresh_asset.status, "stale")
+
+
+class TestManagerMountedDataDirectoryTools(TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.data_root = Path(self.tmpdir.name) / "workspace"
+        self.data_root.mkdir(parents=True)
+        self.user_home = Path(self.tmpdir.name) / "home" / "user"
+        self.user_home.mkdir(parents=True)
+        self.settings = Settings(data_root=self.data_root)
+        get_settings.cache_clear()
+
+    def tearDown(self) -> None:
+        get_settings.cache_clear()
+        self.tmpdir.cleanup()
+
+    def _svc(self) -> ProjectService:
+        with patch("app.services.project_service.get_settings", return_value=self.settings):
+            svc = ProjectService()
+            test_roots = [
+                {"root_id": "home", "label": "Home", "path": str(self.user_home.resolve())}
+            ]
+            svc._workspace_roots = lambda: test_roots
+            svc.data_directory_roots = lambda: test_roots
+            return svc
+
+    def _tools(self) -> tuple[ProjectService, object]:
+        from app.services.manifest_service import ManifestService
+        from app.services.manager_blueprint_tools import ManagerBlueprintTools
+        from app.services.runtime_approval_service import RuntimeApprovalService
+        from app.services.worker_service import WorkerService
+
+        svc = self._svc()
+        worker = WorkerService(
+            project_service=svc,
+            manifest_service=ManifestService(svc),
+            runtime_approval_service=RuntimeApprovalService(svc),
+        )
+        tools = ManagerBlueprintTools(project_service=svc, worker_service=worker)
+        return svc, tools
+
+    def test_list_data_directory_uses_project_scoped_browser(self) -> None:
+        svc, tools = self._tools()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+        data_dir = self.user_home / "data"
+        data_dir.mkdir()
+        (data_dir / "subdir").mkdir()
+        (data_dir / "counts.csv").write_text("a,b\n1,2")
+        svc.set_project_data_directory("test-proj", "home", "data")
+
+        resp = tools.list_data_directory("test-proj", {"path": "", "kind": "all"})
+        names = {item["name"] for item in resp["items"]}
+        self.assertIn("subdir", names)
+        self.assertIn("counts.csv", names)
+
+    def test_register_data_asset_reuses_backend_registration_path(self) -> None:
+        svc, tools = self._tools()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+        data_dir = self.user_home / "data"
+        data_dir.mkdir()
+        (data_dir / "counts.csv").write_text("a,b\n1,2")
+        svc.set_project_data_directory("test-proj", "home", "data")
+
+        resp = tools.register_data_asset("test-proj", {"path": "counts.csv"})
+        self.assertEqual(resp["asset"]["path"], "data_mount/counts.csv")
+        self.assertEqual(resp["asset"]["metadata"]["source"], "mounted_data_directory")
+
+    def test_describe_data_asset_returns_preview_for_mounted_file(self) -> None:
+        svc, tools = self._tools()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+        data_dir = self.user_home / "data"
+        data_dir.mkdir()
+        (data_dir / "counts.csv").write_text("gene,count\nA,1\n")
+        svc.set_project_data_directory("test-proj", "home", "data")
+
+        asset = tools.register_data_asset("test-proj", {"path": "counts.csv"})["asset"]
+        detail = tools.describe_data_asset("test-proj", asset["asset_id"])
+        self.assertEqual(detail["asset"].path, "data_mount/counts.csv")
+        self.assertEqual(detail["preview"]["kind"], "table")
+
+    def test_export_result_reuses_backend_export_rules_and_audit(self) -> None:
+        from app.models.graph import Asset
+
+        svc, tools = self._tools()
+        svc.create_project(project_id="test-proj", name="Test", current_goal="test")
+        data_dir = self.user_home / "data"
+        data_dir.mkdir()
+        export_dir = data_dir / "exports"
+        export_dir.mkdir()
+        svc.set_project_data_directory("test-proj", "home", "data")
+
+        project_root = svc.project_path("test-proj")
+        result_path = project_root / "results" / "card-1" / "run-1" / "report.csv"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("a,b\n1,2\n")
+        store = svc.graph_store("test-proj")
+        store.save_assets([
+            Asset(
+                asset_id="result-1",
+                asset_type="document",
+                title="report.csv",
+                status="valid",
+                path="results/card-1/run-1/report.csv",
+                summary="test",
+                metadata={},
+            )
+        ])
+
+        resp = tools.export_result("test-proj", {"asset_id": "result-1", "destination": "exports"})
+        self.assertEqual(resp["destination_path"], "exports/report.csv")
+
+        graph = store.load_graph()
+        history = graph.metadata.get("export_history", [])
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["asset_id"], "result-1")
+        self.assertTrue((export_dir / "report.csv").exists())
+        self.assertEqual(history[0]["actor"], "manager")
+
+
+class TestManagerMountedDataDirectoryToolEndpoints(TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.data_root = Path(self.tmpdir.name) / "workspace"
+        self.data_root.mkdir(parents=True)
+        self.user_home = Path(self.tmpdir.name) / "home" / "user"
+        self.user_home.mkdir(parents=True)
+        self.settings = Settings(
+            data_root=self.data_root,
+            internal_tool_token="test-internal-token",
+        )
+        get_settings.cache_clear()
+
+    def tearDown(self) -> None:
+        get_settings.cache_clear()
+        self.tmpdir.cleanup()
+
+    def _services(self):
+        from app.services.manifest_service import ManifestService
+        from app.services.manager_service import ManagerService
+        from app.services.runtime_approval_service import RuntimeApprovalService
+        from app.services.worker_service import WorkerService
+
+        with patch("app.services.project_service.get_settings", return_value=self.settings):
+            project_service = ProjectService()
+            test_roots = [{"root_id": "home", "label": "Home", "path": str(self.user_home.resolve())}]
+            project_service._workspace_roots = lambda: test_roots
+            project_service.data_directory_roots = lambda: test_roots
+        worker_service = WorkerService(
+            project_service=project_service,
+            manifest_service=ManifestService(project_service),
+            runtime_approval_service=RuntimeApprovalService(project_service),
+        )
+        manager_service = ManagerService(project_service, worker_service=worker_service)
+        return project_service, worker_service, manager_service
+
+    def test_list_endpoint_returns_entries(self) -> None:
+        from app.api.manager_tools import list_data_directory
+
+        project_service, _, manager_service = self._services()
+        project_service.create_project(project_id="test-proj", name="Test", current_goal="test")
+        data_dir = self.user_home / "data"
+        data_dir.mkdir()
+        (data_dir / "counts.csv").write_text("a,b\n1,2\n")
+        project_service.set_project_data_directory("test-proj", "home", "data")
+        with patch("app.api.manager_tools.get_settings", return_value=self.settings):
+            response = list_data_directory(
+                "test-proj",
+                {"path": "", "kind": "all"},
+                authorization="Bearer test-internal-token",
+                manager_service=manager_service,
+            )
+
+        names = {item["name"] for item in response["items"]}
+        self.assertIn("counts.csv", names)
+
+    def test_register_endpoint_creates_mounted_asset(self) -> None:
+        from app.api.manager_tools import register_data_asset
+
+        project_service, _, manager_service = self._services()
+        project_service.create_project(project_id="test-proj", name="Test", current_goal="test")
+        data_dir = self.user_home / "data"
+        data_dir.mkdir()
+        (data_dir / "counts.csv").write_text("a,b\n1,2\n")
+        project_service.set_project_data_directory("test-proj", "home", "data")
+        with patch("app.api.manager_tools.get_settings", return_value=self.settings):
+            response = register_data_asset(
+                "test-proj",
+                {"path": "counts.csv"},
+                authorization="Bearer test-internal-token",
+                manager_service=manager_service,
+            )
+
+        self.assertEqual(response["asset"]["path"], "data_mount/counts.csv")
+
+    def test_describe_endpoint_reads_registered_asset(self) -> None:
+        from app.api.manager_tools import describe_data_asset
+
+        project_service, _, manager_service = self._services()
+        project_service.create_project(project_id="test-proj", name="Test", current_goal="test")
+        data_dir = self.user_home / "data"
+        data_dir.mkdir()
+        (data_dir / "counts.csv").write_text("gene,count\nA,1\n")
+        project_service.set_project_data_directory("test-proj", "home", "data")
+        asset = manager_service.blueprint_tools.register_data_asset("test-proj", {"path": "counts.csv"})["asset"]
+        with patch("app.api.manager_tools.get_settings", return_value=self.settings):
+            response = describe_data_asset(
+                "test-proj",
+                asset["asset_id"],
+                authorization="Bearer test-internal-token",
+                manager_service=manager_service,
+            )
+
+        self.assertEqual(response["asset"].path, "data_mount/counts.csv")
+        self.assertEqual(response["preview"]["kind"], "table")
+
+    def test_export_endpoint_uses_manager_actor_audit(self) -> None:
+        from app.api.manager_tools import export_result
+
+        project_service, _, manager_service = self._services()
+        project_service.create_project(project_id="test-proj", name="Test", current_goal="test")
+        data_dir = self.user_home / "data"
+        data_dir.mkdir()
+        (data_dir / "exports").mkdir()
+        project_service.set_project_data_directory("test-proj", "home", "data")
+
+        project_root = project_service.project_path("test-proj")
+        result_path = project_root / "results" / "card-1" / "run-1" / "report.csv"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("a,b\n1,2\n")
+        project_service.graph_store("test-proj").save_assets([
+            Asset(
+                asset_id="result-1",
+                asset_type="document",
+                title="report.csv",
+                status="valid",
+                path="results/card-1/run-1/report.csv",
+                summary="test",
+                metadata={},
+            )
+        ])
+
+        with patch("app.api.manager_tools.get_settings", return_value=self.settings):
+            response = export_result(
+                "test-proj",
+                {"asset_id": "result-1", "destination": "exports"},
+                authorization="Bearer test-internal-token",
+                manager_service=manager_service,
+            )
+
+        self.assertEqual(response["destination_path"], "exports/report.csv")
+        graph = project_service.graph_store("test-proj").load_graph()
+        history = graph.metadata.get("export_history", [])
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["actor"], "manager")
