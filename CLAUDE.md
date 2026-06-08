@@ -74,10 +74,13 @@ bash scripts/install_blueprint_re.sh        # interactive install
 bash scripts/deploy_user_systemd.sh          # unattended deploy from .env
 
 # Service management
+systemctl --user status blueprint-re-nginx.service
 systemctl --user status blueprint-re-backend.service
 systemctl --user status blueprint-re-manager-agent.service
 systemctl --user status blueprint-re-frontend.service
+systemctl --user restart blueprint-re-nginx.service
 systemctl --user restart blueprint-re-backend.service
+journalctl --user -u blueprint-re-nginx.service -n 100 --no-pager
 journalctl --user -u blueprint-re-backend.service -n 100 --no-pager
 
 # Health checks
