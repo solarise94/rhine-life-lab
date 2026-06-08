@@ -566,6 +566,129 @@ class ProjectService:
         project = self._project_state_with_runtime_preferences(store)
         return project.data_directory
 
+    def detach_project_data_directory(self, project_id: str) -> DataDirectoryMount | None:
+        """Detach the mounted data directory from a project.
+
+        Removes only the mount record; the user data directory is left untouched.
+        Registered data_mount/... assets are marked as unavailable because their
+        source paths can no longer be resolved.
+        """
+        if not (self.project_path(project_id) / "project.json").exists():
+            raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+
+        with self.lock_for(project_id):
+            store = self.graph_store(project_id)
+            project = self._project_state_with_runtime_preferences(store)
+            mount = project.data_directory
+            if mount is None:
+                return None
+
+            # Mark data_mount/... assets as unavailable
+            graph = store.load_graph()
+            changed = False
+            for asset in graph.assets:
+                if asset.path.startswith("data_mount/") and asset.status not in {"missing", "archived"}:
+                    asset.status = "missing"
+                    changed = True
+            if changed:
+                store.save_assets(graph.assets)
+
+            project = project.model_copy(update={"data_directory": None, "updated_at": utc_now()})
+            store.save_project_state(project)
+
+        return mount
+
+    def check_data_mount_assets_freshness(self, project_id: str) -> list[dict]:
+        """Check freshness of all data_mount/... assets and mark stale/missing ones.
+
+        Returns a list of issues found (asset_id, path, reason).
+        """
+        if not (self.project_path(project_id) / "project.json").exists():
+            raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+
+        mount = self.get_project_data_directory(project_id)
+        data_root = Path(mount.resolved_path) if mount else None
+
+        with self.lock_for(project_id):
+            store = self.graph_store(project_id)
+            graph = store.load_graph()
+            issues: list[dict] = []
+            changed = False
+
+            for asset in graph.assets:
+                if not asset.path.startswith("data_mount/"):
+                    continue
+                if asset.status in {"missing", "archived"}:
+                    continue
+
+                # If no mount record, mark missing immediately
+                if data_root is None or not data_root.exists():
+                    asset.status = "missing"
+                    issues.append({"asset_id": asset.asset_id, "path": asset.path, "reason": "mounted data directory is not available"})
+                    changed = True
+                    continue
+
+                relative = asset.metadata.get("mount_relative_path", asset.path.replace("data_mount/", "", 1))
+                try:
+                    target = resolve_within(data_root, relative) if relative else data_root
+                except ValueError:
+                    asset.status = "missing"
+                    issues.append({"asset_id": asset.asset_id, "path": asset.path, "reason": "path is outside mounted data directory"})
+                    changed = True
+                    continue
+
+                if not target.exists():
+                    asset.status = "missing"
+                    issues.append({"asset_id": asset.asset_id, "path": asset.path, "reason": "source file no longer exists"})
+                    changed = True
+                    continue
+
+                # Compare registered metadata with current file stat
+                stat = target.stat()
+                registered_size = asset.metadata.get("registered_size_bytes")
+                registered_mtime = asset.metadata.get("registered_mtime")
+                integrity_kind = asset.metadata.get("integrity_kind", "size_mtime")
+
+                size_changed = registered_size is not None and stat.st_size != registered_size
+                mtime_changed = False
+                if registered_mtime:
+                    try:
+                        registered_mtime_dt = datetime.fromisoformat(registered_mtime.replace("Z", "+00:00"))
+                        mtime_changed = abs(stat.st_mtime - registered_mtime_dt.timestamp()) > 1
+                    except (ValueError, OSError):
+                        mtime_changed = True
+
+                digest_mismatch = False
+                if integrity_kind == "sha256" and not size_changed and not mtime_changed:
+                    registered_sha256 = asset.metadata.get("sha256")
+                    if registered_sha256:
+                        try:
+                            current_digest = sha256_file(target)
+                            digest_mismatch = current_digest != registered_sha256
+                        except OSError:
+                            digest_mismatch = True
+
+                if size_changed or mtime_changed or digest_mismatch:
+                    asset.status = "stale"
+                    reason_parts: list[str] = []
+                    if size_changed:
+                        reason_parts.append("size changed")
+                    if mtime_changed:
+                        reason_parts.append("mtime changed")
+                    if digest_mismatch:
+                        reason_parts.append("sha256 mismatch")
+                    issues.append({
+                        "asset_id": asset.asset_id,
+                        "path": asset.path,
+                        "reason": "; ".join(reason_parts) if reason_parts else "integrity check failed",
+                    })
+                    changed = True
+
+            if changed:
+                store.save_assets(graph.assets)
+
+        return issues
+
     def _seed_demo(self, store: GraphStore, state: ProjectState) -> None:
         now = utc_now()
         modules = [

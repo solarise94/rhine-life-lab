@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { ChevronLeft, Database, Download, ExternalLink, FileCog, FileText, Folder, FolderUp, Link2, Loader2, Trash2 } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronLeft, Database, Download, ExternalLink, FileCog, FileText, Folder, FolderUp, Link2, Loader2, Trash2, Unlink } from "lucide-react";
 
 import { api } from "@/lib/api";
 import { Asset, DataDirectoryMount, ExecutionFileEntry, ProjectFiles, WorkspaceEntry } from "@/lib/types";
@@ -193,12 +193,14 @@ export function FilesPanel({
 }
 
 function DataDirectorySection({ projectId, onRefresh, readOnly = false }: { projectId: string; onRefresh: () => Promise<void>; readOnly?: boolean }) {
+  const queryClient = useQueryClient();
   const [entries, setEntries] = useState<WorkspaceEntry[]>([]);
   const [currentPath, setCurrentPath] = useState("");
   const [loading, setLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [registerError, setRegisterError] = useState<string | null>(null);
   const [registerSuccess, setRegisterSuccess] = useState<string | null>(null);
+  const [detachError, setDetachError] = useState<string | null>(null);
 
   const mountQuery = useQuery({
     queryKey: ["data-directory", projectId],
@@ -207,6 +209,18 @@ function DataDirectorySection({ projectId, onRefresh, readOnly = false }: { proj
 
   const mount: DataDirectoryMount | null = mountQuery.data?.data_directory ?? null;
   const isMounted = mount != null;
+
+  const detachMutation = useMutation({
+    mutationFn: () => api.deleteProjectDataDirectory(projectId),
+    onSuccess: async () => {
+      setDetachError(null);
+      await queryClient.invalidateQueries({ queryKey: ["data-directory", projectId] });
+      await onRefresh();
+    },
+    onError: (err: Error) => {
+      setDetachError(err.message);
+    },
+  });
 
   const registerMutation = useMutation({
     mutationFn: (path: string) => api.registerDataDirectoryAsset(projectId, { path }),
@@ -277,21 +291,45 @@ function DataDirectorySection({ projectId, onRefresh, readOnly = false }: { proj
 
   const pathParts = currentPath ? currentPath.split("/").filter(Boolean) : [];
   const mountLabel = mount.path || mount.resolved_path.split("/").slice(-1)[0] || "data";
+  const isAvailable = mountQuery.data?.available !== false;
 
   return (
     <section className="panel">
       <div className="panel-header">
         <h3>数据目录</h3>
-        <span>
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Database size={14} style={{ marginRight: 4 }} />
-          {mountLabel} — {entries.length} entries
+          {mountLabel} — {isAvailable ? `${entries.length} entries` : "不可用"}
+          <button
+            type="button"
+            className="btn danger"
+            style={{ padding: "2px 8px", fontSize: 12 }}
+            onClick={() => {
+              if (window.confirm("解除挂载将移除数据目录关联，但不会删除服务器上的目录。data_mount/ 资产将标记为不可用。确认解除挂载？")) {
+                detachMutation.mutate();
+              }
+            }}
+            disabled={readOnly || detachMutation.isPending}
+            title="解除数据目录挂载"
+          >
+            {detachMutation.isPending ? <Loader2 size={12} className="spinning" /> : <Unlink size={12} />}
+            解除挂载
+          </button>
         </span>
       </div>
       <div className="panel-body stack">
+        {!isAvailable ? (
+          <div className="notice-panel error">
+            数据目录不可用。目录可能已被删除或无法访问。请检查挂载路径或重新挂载数据目录。
+          </div>
+        ) : null}
         {listError ? <div className="notice-panel error">{listError}</div> : null}
+        {detachError ? <div className="notice-panel error">{detachError}</div> : null}
         {registerError ? <div className="notice-panel error">{registerError}</div> : null}
         {registerSuccess ? <div className="notice-panel success">{registerSuccess}</div> : null}
-        <div className="directory-browser-breadcrumb" style={{ padding: 0, border: 0 }}>
+        {isAvailable ? (
+          <>
+            <div className="directory-browser-breadcrumb" style={{ padding: 0, border: 0 }}>
           <button
             type="button"
             className="breadcrumb-root"
@@ -359,6 +397,8 @@ function DataDirectorySection({ projectId, onRefresh, readOnly = false }: { proj
             </div>
           ))}
         </div>
+          </>
+        ) : null}
       </div>
     </section>
   );

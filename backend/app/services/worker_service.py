@@ -1848,6 +1848,21 @@ class WorkerService:
                 )
             )
         input_assets = list(input_assets_by_id.values())
+
+        # Fail fast if any data_mount input assets are stale or missing
+        data_mount_input_assets = [a for a in input_assets if a.path.startswith("data_mount/")]
+        if data_mount_input_assets:
+            issues = self.project_service.check_data_mount_assets_freshness(project_id)
+            stale_ids = {i["asset_id"] for i in issues}
+            bad_assets = [a for a in data_mount_input_assets if a.asset_id in stale_ids]
+            if bad_assets:
+                details = ", ".join(f"{a.path} ({next(i['reason'] for i in issues if i['asset_id'] == a.asset_id)})" for a in bad_assets)
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Stale or missing mounted data assets cannot be used as inputs: {details}. "
+                    "Please re-register the assets from the data directory.",
+                )
+
         output_refs = list(card.outputs)
         if not output_refs:
             raise HTTPException(

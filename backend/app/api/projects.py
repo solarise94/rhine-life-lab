@@ -32,7 +32,16 @@ class UpdateProjectDataDirectoryRequest(BaseModel):
 
 @router.get("")
 def list_projects(project_service: ProjectService = Depends(get_project_service)) -> dict:
-    return {"items": project_service.list_projects()}
+    items = project_service.list_projects()
+    enriched = []
+    for item in items:
+        data = item.model_dump()
+        if item.data_directory is not None:
+            data["data_directory_available"] = Path(item.data_directory.resolved_path).exists()
+        else:
+            data["data_directory_available"] = None
+        enriched.append(data)
+    return {"items": enriched}
 
 
 @router.post("")
@@ -66,6 +75,11 @@ def get_project(
 ) -> dict:
     snapshot = project_service.get_project_snapshot_core(project_id)
     snapshot["manager_auto"] = manager_auto_service.get_state(project_id).model_dump()
+    mount = project_service.get_project_data_directory(project_id)
+    if mount is not None:
+        snapshot["data_directory_available"] = Path(mount.resolved_path).exists()
+    else:
+        snapshot["data_directory_available"] = None
     return snapshot
 
 
@@ -112,7 +126,22 @@ def update_project_data_directory(
 @router.get("/{project_id}/data-directory")
 def get_project_data_directory(project_id: str, project_service: ProjectService = Depends(get_project_service)) -> dict:
     mount = project_service.get_project_data_directory(project_id)
-    return {"data_directory": mount.model_dump() if mount else None}
+    available = None
+    if mount is not None:
+        available = Path(mount.resolved_path).exists()
+    return {"data_directory": mount.model_dump() if mount else None, "available": available}
+
+
+@router.delete("/{project_id}/data-directory")
+def detach_project_data_directory(
+    project_id: str,
+    project_service: ProjectService = Depends(get_project_service),
+    worker_service: WorkerService = Depends(get_worker_service),
+) -> dict:
+    if worker_service.has_active_runs(project_id):
+        raise HTTPException(status_code=409, detail=f"Project {project_id} has active runs and cannot detach data directory.")
+    mount = project_service.detach_project_data_directory(project_id)
+    return {"data_directory": mount.model_dump() if mount else None, "detached": mount is not None}
 
 
 @router.get("/{project_id}/skill-library")

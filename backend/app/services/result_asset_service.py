@@ -33,6 +33,15 @@ class ResultAssetService:
 
     def get_asset_detail(self, project_id: str, asset_id: str) -> dict:
         asset = self.get_asset(project_id, asset_id)
+
+        # For data_mount assets, check freshness before building preview
+        if asset.path.startswith("data_mount/") and asset.status not in {"missing", "archived"}:
+            issues = self.project_service.check_data_mount_assets_freshness(project_id)
+            for issue in issues:
+                if issue["asset_id"] == asset.asset_id:
+                    asset = self.get_asset(project_id, asset_id)
+                    break
+
         project_root = self.project_service.project_path(project_id)
         path = resolve_within(project_root, asset.path)
         exists = path.exists()

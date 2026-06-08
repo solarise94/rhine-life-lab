@@ -240,7 +240,7 @@ export const api = {
     return request<WorkspaceEntriesResponse>(`/workspace-roots/${encodeURIComponent(rootId)}/entries?${params.toString()}`);
   },
   getProjectDataDirectory(projectId: string) {
-    return request<{ data_directory: DataDirectoryMount | null }>(`/projects/${encodeURIComponent(projectId)}/data-directory`);
+    return request<{ data_directory: DataDirectoryMount | null; available: boolean | null }>(`/projects/${encodeURIComponent(projectId)}/data-directory`);
   },
   updateProjectDataDirectory(projectId: string, payload: { root_id: string; path: string }) {
     return request<{ data_directory: DataDirectoryMount }>(`/projects/${encodeURIComponent(projectId)}/data-directory`, {
@@ -259,6 +259,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     });
+  },
+  deleteProjectDataDirectory(projectId: string) {
+    return request<{ data_directory: DataDirectoryMount | null; detached: boolean }>(
+      `/projects/${encodeURIComponent(projectId)}/data-directory`,
+      { method: "DELETE" },
+    );
   },
   exportAssetToDataDirectory(projectId: string, assetId: string, payload: { destination_path: string; overwrite?: boolean }) {
     return request<{ ok: boolean; asset_id: string; source_path: string; destination_path: string; exported_at: string }>(

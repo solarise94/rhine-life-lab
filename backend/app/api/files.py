@@ -614,6 +614,22 @@ def export_asset_to_data_directory(
                     pass
             raise
 
+    # Record export audit entry
+    with project_service.lock_for(project_id):
+        store = project_service.graph_store(project_id)
+        graph = store.load_graph()
+        export_entry = {
+            "asset_id": asset_id,
+            "source_path": asset.path,
+            "destination_path": str(dest_path.relative_to(data_root)),
+            "exported_at": utc_now(),
+            "actor": "user",
+        }
+        history = graph.metadata.get("export_history", [])
+        history.append(export_entry)
+        graph.metadata["export_history"] = history
+        store.save_graph(graph)
+
     return {
         "ok": True,
         "asset_id": asset_id,
