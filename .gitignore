@@ -20,6 +20,7 @@ workspace/
 !.env.example
 .claude/
 AGENTS.md
+CLAUDE.md
 *.pyc
 __pycache__/
 *.py[cod]

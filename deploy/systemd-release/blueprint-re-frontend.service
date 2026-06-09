@@ -1,0 +1,17 @@
+[Unit]
+Description=Blueprint RE Frontend
+After=network.target blueprint-re-backend.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/blueprint-re/frontend.env
+WorkingDirectory=__RELEASE_ROOT__/frontend-standalone/frontend
+ExecStart=/usr/bin/env HOSTNAME=${FRONTEND_HOST} PORT=${FRONTEND_PORT} __NODE_BIN__ server.js
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+KillMode=control-group
+SendSIGKILL=yes
+
+[Install]
+WantedBy=default.target

@@ -303,7 +303,7 @@ fi
 
 echo "Starting full deploy..."
 
-bash "${ROOT_DIR}/scripts/deploy_user_systemd.sh"
+bash "${ROOT_DIR}/scripts/deploy_user_systemd.sh" --allow-apt
 
 echo
 echo "Install complete."

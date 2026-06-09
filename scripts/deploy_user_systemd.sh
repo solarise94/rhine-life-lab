@@ -15,6 +15,20 @@ OPENCODE_BIN=""
 CLAUDE_BIN=""
 NGINX_BIN=""
 DEPLOY_WARNINGS=()
+ALLOW_APT=0
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+for arg in "$@"; do
+  case "${arg}" in
+    --allow-apt)
+      ALLOW_APT=1
+      ;;
+    *)
+      ;;
+  esac
+done
 
 version_gte() {
   local actual="$1"
@@ -64,6 +78,23 @@ find_node_bin() {
 find_optional_bin() {
   local name="$1"
   command -v "${name}" 2>/dev/null || true
+}
+
+# Resolve binary: explicit env var > command -v.
+resolve_bin() {
+  local env_var_name="$1"
+  local command_name="$2"
+  local explicit
+  explicit="${!env_var_name:-}"
+  if [[ -n "${explicit}" && -x "${explicit}" ]]; then
+    printf '%s\n' "${explicit}"
+    return 0
+  fi
+  if command -v "${command_name}" >/dev/null 2>&1; then
+    printf '%s\n' "$(command -v "${command_name}")"
+    return 0
+  fi
+  return 1
 }
 
 find_nginx_bin() {
@@ -237,6 +268,11 @@ install_runtime_dependencies() {
   if [[ "${missing_runtime}" -eq 0 ]]; then
     return
   fi
+  if [[ "${ALLOW_APT}" -eq 0 ]]; then
+    echo "Missing runtime dependencies. Install them manually or rerun with --allow-apt." >&2
+    echo "See deploy/runtime-dependencies.yml for the required packages." >&2
+    exit 1
+  fi
   if command -v apt-get >/dev/null 2>&1; then
     if [[ "$(id -u)" -eq 0 ]]; then
       apt-get update
@@ -258,21 +294,23 @@ install_runtime_dependencies() {
 }
 
 check_runtime_dependencies() {
-  for command_name in bwrap npm git systemctl; do
+  local bwrap_bin
+  bwrap_bin="$(resolve_bin BLUEPRINT_BWRAP_BIN bwrap)" || { echo "Missing required runtime command: bwrap. See deploy/runtime-dependencies.yml." >&2; exit 1; }
+  for command_name in npm git systemctl; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
       echo "Missing required runtime command: ${command_name}. See deploy/runtime-dependencies.yml." >&2
       exit 1
     fi
   done
-  if ! find_nginx_bin >/dev/null 2>&1; then
-    echo "Missing required runtime command: nginx. See deploy/runtime-dependencies.yml." >&2
+  NGINX_BIN="$(resolve_bin BLUEPRINT_NGINX_BIN nginx)" || { echo "Missing required runtime command: nginx. See deploy/runtime-dependencies.yml." >&2; exit 1; }
+  PYTHON_BIN="$(resolve_bin BLUEPRINT_PYTHON_BIN python3)" || { echo "Missing required Python ${REQUIRED_PYTHON_VERSION}+ runtime." >&2; exit 1; }
+  local python_version
+  python_version="$(python_version_of "${PYTHON_BIN}")"
+  if ! version_gte "${python_version}" "${REQUIRED_PYTHON_VERSION}"; then
+    echo "Python ${REQUIRED_PYTHON_VERSION}+ required. Found ${python_version} at ${PYTHON_BIN}" >&2
     exit 1
   fi
-  if ! find_python_bin >/dev/null 2>&1; then
-    echo "Missing required Python ${REQUIRED_PYTHON_VERSION}+ runtime." >&2
-    exit 1
-  fi
-  if ! bwrap \
+  if ! "${bwrap_bin}" \
     --die-with-parent \
     --ro-bind /usr /usr \
     --ro-bind /bin /bin \
@@ -290,20 +328,23 @@ check_runtime_dependencies() {
 check_language_versions() {
   local python_version
   local node_version
-  if ! PYTHON_BIN="$(find_python_bin)"; then
-    echo "Python ${REQUIRED_PYTHON_VERSION}+ is required for the backend. Current python3: $(python3 --version 2>/dev/null || echo missing)" >&2
+  PYTHON_BIN="$(resolve_bin BLUEPRINT_PYTHON_BIN python3)" || { echo "Python ${REQUIRED_PYTHON_VERSION}+ is required for the backend." >&2; exit 1; }
+  python_version="$(python_version_of "${PYTHON_BIN}")"
+  if ! version_gte "${python_version}" "${REQUIRED_PYTHON_VERSION}"; then
+    echo "Python ${REQUIRED_PYTHON_VERSION}+ required. Found ${python_version} at ${PYTHON_BIN}" >&2
     exit 1
   fi
-  python_version="$(python_version_of "${PYTHON_BIN}")"
-  if ! NODE_BIN="$(find_node_bin)"; then
-    echo "Node.js ${REQUIRED_NODE_VERSION}+ is required. Current node: $(node -v 2>/dev/null || echo missing)" >&2
+  NODE_BIN="$(resolve_bin BLUEPRINT_NODE_BIN node)" || { echo "Node.js ${REQUIRED_NODE_VERSION}+ is required." >&2; exit 1; }
+  node_version="$(node_version_of "${NODE_BIN}")"
+  if ! version_gte "${node_version}" "${REQUIRED_NODE_VERSION}"; then
+    echo "Node.js ${REQUIRED_NODE_VERSION}+ required. Found ${node_version} at ${NODE_BIN}" >&2
     exit 1
   fi
   node_version="$(node_version_of "${NODE_BIN}")"
   PI_BIN="$(find_optional_bin pi)"
   OPENCODE_BIN="$(find_optional_bin opencode)"
   CLAUDE_BIN="$(find_optional_bin claude)"
-  if ! NGINX_BIN="$(find_nginx_bin)"; then
+  if ! NGINX_BIN="$(resolve_bin BLUEPRINT_NGINX_BIN nginx)"; then
     echo "nginx not found. Install nginx for the upload gateway." >&2
     exit 1
   fi

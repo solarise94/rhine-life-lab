@@ -1,0 +1,17 @@
+[Unit]
+Description=Blueprint RE Backend
+After=network.target blueprint-re-manager-agent.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/blueprint-re/backend.env
+WorkingDirectory=__RELEASE_ROOT__
+ExecStart=__ENV__/bin/uvicorn app.main:app --host ${BACKEND_HOST} --port ${BACKEND_PORT}
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+KillMode=control-group
+SendSIGKILL=yes
+
+[Install]
+WantedBy=default.target
