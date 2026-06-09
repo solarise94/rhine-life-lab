@@ -2,6 +2,10 @@
 
 `docs/` 里既有产品蓝图，也有实现契约、问题复盘和发布记录。这里不展开细分，只给几个常用入口。
 
+当前对外产品名以 `莱茵数据实验室（RhineDataLab）` 为准；文档中保留的
+`blueprint-re` 目录名、systemd unit 名和历史 installer 产物名，主要是兼容现有
+运行时布局与迁移阶段约定。
+
 ## 推荐先看
 
 - [00_overview_blueprint.md](./00_overview_blueprint.md)
@@ -11,10 +15,18 @@
 
 ## 安装与部署
 
-用户安装优先使用 release 自解压安装器，而不是源码 checkout 部署：
+用户安装优先使用 release 固定入口 `install.sh`。它会自动解析并下载对应版本的自解压安装器，校验 checksum，然后执行：
 
 ```bash
-bash blueprint-re-<version>-linux-x86_64.sh
+curl -fsSL \
+  https://github.com/solarise94/RhineDataLab/releases/latest/download/install.sh | \
+  bash
+```
+
+也可以先手动下载版本化自解压安装器再执行：
+
+```bash
+bash rhinedatalab-<version>-linux-x86_64.sh
 ```
 
 当前用户版安装模型：
@@ -49,6 +61,7 @@ curl -I http://127.0.0.1:13001
 - [for_agent_install.md](./for_agent_install.md) — agent/开发者安装操作手册
 - [51_user_mode_release_bundle_and_installer_plan.md](./51_user_mode_release_bundle_and_installer_plan.md) — user-mode release bundle 与 installer 设计
 - [51-1_release_installer_credential_gate_followup.md](./51-1_release_installer_credential_gate_followup.md) — provider credential gate 后续策略
+- [53_latest_installer_entry_and_release_automation_plan.md](./53_latest_installer_entry_and_release_automation_plan.md) — latest installer 固定入口与 release 自动化方案
 
 ## 最近重点链路
 

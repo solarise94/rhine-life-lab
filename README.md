@@ -1,6 +1,6 @@
-# 莱茵生命实验室
+# 莱茵数据实验室（RhineDataLab）
 
-`莱茵生命实验室` 是一个面向科研分析项目的本地工作台，以流程蓝图的方式管理生物信息分析流程，方便对每个步骤进行微调得出准确无误的科学结果。
+`莱茵数据实验室（RhineDataLab）` 是一个面向科研分析项目的本地工作台，以流程蓝图的方式管理生物信息分析流程，方便对每个步骤进行微调得出准确无误的科学结果。
 相比于线性分析的生物信息分析agent，本项目支持用户在分析的过程中：新开分支、修改图片排版、重复单步计算等等微调工作。
 
 
@@ -48,25 +48,39 @@ bwrap --die-with-parent --ro-bind / / --dev /dev --proc /proc -- /bin/true
 把下面这段 prompt 发给它：
 
 ```text
-请阅读 https://github.com/solarise94/rhine-life-lab 的 README 和 docs/for_agent_install.md，优先使用 release 自解压安装器完成用户目录安装；不要把 Python、Node.js、nginx、git 或 bubblewrap 的宿主预装作为 release installer 的前置条件。安装后验证 backend /healthz 与 nginx gateway，缺少 provider key 时 manager-agent 可记录为 degraded。
+请阅读 https://github.com/solarise94/RhineDataLab 的 README 和 docs/for_agent_install.md，优先使用 release 自解压安装器完成用户目录安装；不要把 Python、Node.js、nginx、git 或 bubblewrap 的宿主预装作为 release installer 的前置条件。安装后验证 backend /healthz 与 nginx gateway，缺少 provider key 时 manager-agent 可记录为 degraded。
 ```
 
 它会完成安装器获取、依赖能力检查、用户目录 runtime env 引导、前后端与 `manager-agent` 部署、`systemd --user` 启动和烟雾测试。
 
-### 方式二：一键安装 release 包
+### 方式二：下载 release 安装器
 
-打开 [GitHub Releases](https://github.com/solarise94/rhine-life-lab/releases) 可以查看可用版本。
+打开 [GitHub Releases](https://github.com/solarise94/RhineDataLab/releases) 可以查看可用版本。
 
-普通用户直接用 downloader 入口即可，不需要先手动下载自解压安装器。把下面的 `0.4.1` 替换成 Releases 页面显示的版本号：
+对普通用户，推荐使用固定入口 `install.sh`。它会自动解析并下载对应版本的自解压安装器、校验 checksum，然后执行：
+
+```bash
+curl -fsSL \
+  https://github.com/solarise94/RhineDataLab/releases/latest/download/install.sh | \
+  bash
+```
+
+如果需要安装或回退到指定版本，可以显式传 `VERSION`：
 
 ```bash
 VERSION=0.4.1
 curl -fsSL \
-  https://raw.githubusercontent.com/solarise94/rhine-life-lab/main/scripts/install_downloader.sh | \
-  bash -s -- \
-  --version "${VERSION}" \
-  --installer-url "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh" \
-  --checksum-url "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh.sha256"
+  "https://github.com/solarise94/RhineDataLab/releases/download/v${VERSION}/install.sh" | \
+  bash
+```
+
+高级用户也可以先手动下载版本化自解压安装器再执行：
+
+```bash
+VERSION=0.4.1
+curl -fL -o "rhinedatalab-${VERSION}-linux-x86_64.sh" \
+  "https://github.com/solarise94/RhineDataLab/releases/download/v${VERSION}/rhinedatalab-${VERSION}-linux-x86_64.sh"
+bash "rhinedatalab-${VERSION}-linux-x86_64.sh"
 ```
 
 安装器会把 release、runtime env、data 和 logs 放到用户目录：
@@ -80,8 +94,8 @@ curl -fsSL \
 开发者源码 checkout 部署仅作为 fallback，不是普通用户安装路径：
 
 ```bash
-git clone https://github.com/solarise94/rhine-life-lab.git
-cd rhine-life-lab
+git clone https://github.com/solarise94/RhineDataLab.git
+cd RhineDataLab
 bash scripts/install_blueprint_re.sh --interactive
 ```
 
@@ -203,36 +217,34 @@ BLUEPRINT_MANAGER_BACKEND=pi
 
 ## 升级
 
-升级时，重新运行同一个 downloader 命令即可，只需要把版本号换成新版本。安装器会自动检测已有安装、停止 user services、部署新 release、切换 `current` symlink，并保留 `~/.local/share/blueprint-re/data/` 中的项目数据。
+升级时，重新运行固定的 `install.sh` 入口即可。安装器会自动检测已有安装、停止 user services、部署新 release、切换 `current` symlink，并保留 `~/.local/share/blueprint-re/data/` 中的项目数据。
 
-例如升级到 `0.4.2`：
+```bash
+curl -fsSL \
+  https://github.com/solarise94/RhineDataLab/releases/latest/download/install.sh | \
+  bash
+```
+
+如果需要升级到或回退到指定版本：
 
 ```bash
 VERSION=0.4.2
 curl -fsSL \
-  https://raw.githubusercontent.com/solarise94/rhine-life-lab/main/scripts/install_downloader.sh | \
-  bash -s -- \
-  --version "${VERSION}" \
-  --installer-url "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh" \
-  --checksum-url "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh.sha256"
+  "https://github.com/solarise94/RhineDataLab/releases/download/v${VERSION}/install.sh" | \
+  bash
 ```
 
-如果新版本有问题，可以用同一个 downloader 入口回滚到本机仍保留的旧版本：
+如果新版本有问题，可以用同一个入口触发回滚，切回本机仍保留的旧版本：
 
 ```bash
-VERSION=0.4.2
 curl -fsSL \
-  https://raw.githubusercontent.com/solarise94/rhine-life-lab/main/scripts/install_downloader.sh | \
-  bash -s -- \
-  --version "${VERSION}" \
-  --installer-url "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh" \
-  --checksum-url "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh.sha256" \
-  --rollback <previous-version>
+  https://github.com/solarise94/RhineDataLab/releases/latest/download/install.sh | \
+  bash -s -- --rollback <previous-version>
 ```
 
-rollback 可以使用任意版本的安装器，只要目标版本目录仍在本机 `~/.local/share/blueprint-re/releases/` 下。
+rollback 可以使用任意版本的安装器入口，只要目标版本目录仍在本机 `~/.local/share/blueprint-re/releases/` 下。
 
-`<previous-version>` 是本机 `~/.local/share/blueprint-re/releases/` 下仍存在的旧版本目录名。安装器默认只保留最近 2 个版本，更早版本可能已被清理。
+`<previous-version>` 是本机 `~/.local/share/blueprint-re/releases/` 下仍存在的旧版本目录名。安装器默认只保留最近 2 个版本，更早版本可能已被清理。全新机器、手动清理过 `releases/` 目录、或目标版本已被回收时，rollback 会直接失败。
 
 ## 卸载
 

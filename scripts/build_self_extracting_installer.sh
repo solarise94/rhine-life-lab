@@ -5,14 +5,19 @@ set -euo pipefail
 # Consumes a release payload tarball and produces a self-extracting shell installer.
 #
 # Usage:
-#   bash scripts/build_self_extracting_installer.sh [tarball-path]
+#   bash scripts/build_self_extracting_installer.sh [OPTIONS] [tarball-path]
+#
+# Options:
+#   --artifact-prefix PREFIX  Output filename prefix (default: rhinedatalab)
+#   --output-dir DIR          Write installer to DIR (default: ./dist)
 #
 # If no tarball is provided, looks in ./dist/ for the most recent tarball.
-# Outputs: dist/blueprint-re-<version>-linux-x86_64.sh
+# Outputs: dist/<prefix>-<version>-linux-x86_64.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_DIR="${REPO_ROOT}/dist"
+ARTIFACT_PREFIX="rhinedatalab"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -24,14 +29,46 @@ die() {
 }
 
 # ---------------------------------------------------------------------------
-# Locate tarball
+# Argument parsing
 # ---------------------------------------------------------------------------
 
 TARBALL=""
-if [[ $# -ge 1 ]]; then
-  TARBALL="$1"
-else
-  # Find the newest tarball in dist/
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --artifact-prefix)
+      [[ -n "${2:-}" ]] || die "--artifact-prefix requires a value"
+      ARTIFACT_PREFIX="$2"
+      shift 2
+      ;;
+    --output-dir)
+      [[ -n "${2:-}" ]] || die "--output-dir requires a value"
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    --help|-h)
+      sed -n '1,/^# Outputs:/s/^# //p' "${BASH_SOURCE[0]}"
+      exit 0
+      ;;
+    -*)
+      die "Unknown option: $1"
+      ;;
+    *)
+      if [[ -z "${TARBALL}" ]]; then
+        TARBALL="$1"
+      else
+        die "Unexpected positional argument: $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Locate tarball
+# ---------------------------------------------------------------------------
+
+if [[ -z "${TARBALL}" ]]; then
+  # Find the newest tarball in dist/ that matches the default payload name.
   TARBALL="$(ls -t "${OUTPUT_DIR}"/*.tar.gz 2>/dev/null | head -n1 || true)"
 fi
 
@@ -42,11 +79,26 @@ fi
 TARBALL="$(cd "$(dirname "${TARBALL}")" && pwd)/$(basename "${TARBALL}")"
 TARBALL_BASENAME="$(basename "${TARBALL}" .tar.gz)"
 
-# Extract version from tarball name: blueprint-re-<version>-linux-x86_64
-VERSION="${TARBALL_BASENAME#blueprint-re-}"
-VERSION="${VERSION%-linux-x86_64}"
+# Extract version from tarball name: expects <prefix>-<version>-linux-<arch>.
+# Public release tarballs now use the rhinedatalab prefix. Keep accepting the
+# legacy blueprint-re prefix so locally cached artifacts remain buildable.
+if [[ "${TARBALL_BASENAME}" =~ -linux-([^-]+)$ ]]; then
+  ARCH="${BASH_REMATCH[1]}"
+  # Remove the -linux-<arch> suffix to get <prefix>-<version>.
+  REMAINING="${TARBALL_BASENAME%-linux-${ARCH}}"
+  if [[ "${REMAINING}" == rhinedatalab-* ]]; then
+    TARBALL_PREFIX="rhinedatalab"
+  elif [[ "${REMAINING}" == blueprint-re-* ]]; then
+    TARBALL_PREFIX="blueprint-re"
+  else
+    die "Could not determine artifact prefix from tarball name: ${TARBALL_BASENAME}"
+  fi
+  VERSION="${REMAINING#${TARBALL_PREFIX}-}"
+else
+  die "Could not parse version/arch from tarball name: ${TARBALL_BASENAME}"
+fi
 
-INSTALLER_NAME="blueprint-re-${VERSION}-linux-x86_64.sh"
+INSTALLER_NAME="${ARTIFACT_PREFIX}-${VERSION}-linux-${ARCH}.sh"
 INSTALLER_PATH="${OUTPUT_DIR}/${INSTALLER_NAME}"
 
 # ---------------------------------------------------------------------------

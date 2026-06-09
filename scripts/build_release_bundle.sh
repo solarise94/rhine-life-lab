@@ -23,6 +23,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_DIR="${REPO_ROOT}/dist"
 BUILD_OFFLINE_CACHE=0
 PAYLOAD_NAME="blueprint-re"
+PUBLIC_ARTIFACT_PREFIX="rhinedatalab"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -112,7 +113,7 @@ if [[ "${BACKEND_VERSION}" != "${MANAGER_VERSION}" ]]; then
 fi
 
 VERSION="${BACKEND_VERSION}"
-echo "Building release bundle for Blueprint RE ${VERSION}"
+echo "Building release bundle for RhineDataLab ${VERSION}"
 
 # ---------------------------------------------------------------------------
 # Prepare staging area
@@ -406,7 +407,7 @@ echo "Release manifest written."
 # ---------------------------------------------------------------------------
 
 mkdir -p "${OUTPUT_DIR}"
-TARBALL="${OUTPUT_DIR}/blueprint-re-${VERSION}-linux-x86_64.tar.gz"
+TARBALL="${OUTPUT_DIR}/${PUBLIC_ARTIFACT_PREFIX}-${VERSION}-linux-x86_64.tar.gz"
 
 echo "Creating tarball: ${TARBALL}"
 tar -czf "${TARBALL}" -C "${STAGING_DIR}" "${PAYLOAD_NAME}"
