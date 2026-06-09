@@ -536,6 +536,7 @@ MANAGER_ENV_BACKUP=""
 _cleanup_env_backups() {
   [[ -n "${BACKEND_ENV_BACKUP}" ]] && rm -f "${BACKEND_ENV_BACKUP}"
   [[ -n "${MANAGER_ENV_BACKUP}" ]] && rm -f "${MANAGER_ENV_BACKUP}"
+  return 0
 }
 trap '_cleanup_env_backups' EXIT
 
@@ -852,3 +853,4 @@ fi
 
 echo ""
 echo "Deploy complete."
+exit 0

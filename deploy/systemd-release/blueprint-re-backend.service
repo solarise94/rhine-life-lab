@@ -1,7 +1,6 @@
 [Unit]
 Description=Blueprint RE Backend
 After=network.target blueprint-re-manager-agent.service
-Requires=blueprint-re-manager-agent.service
 
 [Service]
 Type=simple

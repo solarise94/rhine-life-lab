@@ -19,6 +19,7 @@ set -euo pipefail
 # Options:
 #   --installer PATH          Self-extracting installer to test.
 #   --image-tag TAG           Temporary Podman image tag.
+#   --cache-dir PATH          Host directory used for reusable micromamba/conda package cache.
 #   --rebuild-image           Rebuild the smoke image even if the tag exists.
 #   --keep-container          Keep the container after the run.
 #   --keep-image              Keep the image after the run.
@@ -30,6 +31,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 INSTALLER_PATH=""
 IMAGE_TAG="blueprint-re-smoke-systemd"
+DEFAULT_CACHE_DIR="${REPO_ROOT}/.tmp/podman-micromamba-cache"
+CACHE_DIR="${DEFAULT_CACHE_DIR}"
 REBUILD_IMAGE=0
 KEEP_CONTAINER=0
 KEEP_IMAGE=0
@@ -106,6 +109,7 @@ EOF
 }
 
 start_container() {
+  mkdir -p "${CACHE_DIR}"
   info "Starting Podman container ${CONTAINER_NAME}"
   podman run -d --rm \
     --name "${CONTAINER_NAME}" \
@@ -113,6 +117,7 @@ start_container() {
     --systemd=always \
     -v "${REPO_ROOT}:/repo:ro" \
     -v "$(dirname "${INSTALLER_PATH}"):/dist:ro" \
+    -v "${CACHE_DIR}:/podman-cache" \
     "${IMAGE_TAG}" \
     /sbin/init >/dev/null
 }
@@ -144,7 +149,8 @@ run_installer() {
   installer_name="$(basename "${INSTALLER_PATH}")"
   info "Running installer ${installer_name}"
   set +e
-  podman_exec "su - ${TEST_USER} -c 'set -euo pipefail; export HOME=${TEST_HOME}; export XDG_RUNTIME_DIR=${TEST_RUNTIME_DIR}; export DBUS_SESSION_BUS_ADDRESS=unix:path=${TEST_RUNTIME_DIR}/bus; bash /dist/${installer_name} > ${LOG_PATH} 2>&1'"
+  podman_exec "mkdir -p /podman-cache/pkgs /podman-cache/root && chown -R ${TEST_USER}:${TEST_USER} /podman-cache"
+  podman_exec "su - ${TEST_USER} -c 'set -euo pipefail; export HOME=${TEST_HOME}; export XDG_RUNTIME_DIR=${TEST_RUNTIME_DIR}; export DBUS_SESSION_BUS_ADDRESS=unix:path=${TEST_RUNTIME_DIR}/bus; export CONDA_PKGS_DIRS=/podman-cache/pkgs; export MAMBA_ROOT_PREFIX=/podman-cache/root; bash /dist/${installer_name} > ${LOG_PATH} 2>&1'"
   INSTALL_EXIT_CODE=$?
   set -e
 }
@@ -190,6 +196,11 @@ while [[ $# -gt 0 ]]; do
     --image-tag)
       [[ -n "${2:-}" ]] || die "--image-tag requires a tag"
       IMAGE_TAG="$2"
+      shift 2
+      ;;
+    --cache-dir)
+      [[ -n "${2:-}" ]] || die "--cache-dir requires a path"
+      CACHE_DIR="$2"
       shift 2
       ;;
     --rebuild-image)

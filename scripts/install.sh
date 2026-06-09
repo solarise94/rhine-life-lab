@@ -216,9 +216,9 @@ wait_for_health() {
       fi
     fi
     if [[ ${nginx_ok} -eq 0 ]]; then
-      if [[ "${http_check}" == "curl" ]] && curl -I http://127.0.0.1:13001 >/dev/null 2>&1; then
+      if [[ "${http_check}" == "curl" ]] && curl -sS -o /dev/null -I http://127.0.0.1:13001 >/dev/null 2>&1; then
         nginx_ok=1
-      elif [[ "${http_check}" == "python" ]] && "${ENV_PYTHON}" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:13001', timeout=2)" >/dev/null 2>&1; then
+      elif [[ "${http_check}" == "python" ]] && "${ENV_PYTHON}" -c "import urllib.request; opener=urllib.request.build_opener(urllib.request.HTTPRedirectHandler); opener.open('http://127.0.0.1:13001', timeout=2)" >/dev/null 2>&1; then
         nginx_ok=1
       fi
     fi

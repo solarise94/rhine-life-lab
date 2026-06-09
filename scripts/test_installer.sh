@@ -512,7 +512,8 @@ assert "backend has KillMode" "grep -q 'KillMode=control-group' ${template}"
 assert "backend has SendSIGKILL" "grep -q 'SendSIGKILL=yes' ${template}"
 
 # Check service dependencies
-assert "backend requires manager-agent" "grep -q 'Requires=blueprint-re-manager-agent.service' ${REPO_ROOT}/deploy/systemd-release/blueprint-re-backend.service"
+assert "backend starts after manager-agent when available" "grep -q 'After=.*blueprint-re-manager-agent.service' ${REPO_ROOT}/deploy/systemd-release/blueprint-re-backend.service"
+assert_fail "backend does not require manager-agent (degraded no-key install)" "grep -q 'Requires=blueprint-re-manager-agent.service' ${REPO_ROOT}/deploy/systemd-release/blueprint-re-backend.service"
 assert "frontend requires backend" "grep -q 'Requires=blueprint-re-backend.service' ${REPO_ROOT}/deploy/systemd-release/blueprint-re-frontend.service"
 assert "nginx requires frontend" "grep -q 'Requires=blueprint-re-frontend.service' ${REPO_ROOT}/deploy/systemd-release/blueprint-re-nginx.service"
 
