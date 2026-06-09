@@ -222,7 +222,7 @@ Checked but not silently fixed:
 - missing network access when the artifact does not include offline caches
 - occupied local ports
 - unsupported OS or CPU architecture
-- missing required application secrets such as `BLUEPRINT_DEEPSEEK_API_KEY`
+- missing optional runtime provider credentials such as `BLUEPRINT_DEEPSEEK_API_KEY`
 
 For these cases the installer should print a targeted diagnostic and next step.
 It should not attempt a privileged package-manager repair by default.

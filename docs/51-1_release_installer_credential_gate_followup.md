@@ -2,15 +2,19 @@
 
 ## Background
 
-The current user-mode release installer path has progressed far enough in
-Podman smoke testing to reach managed deploy. At that point, deployment is
-blocked by a hard requirement in `scripts/deploy_release.sh`:
+The user-mode release installer path reached managed deploy during Podman
+smoke testing. At that point, deployment was blocked by a hard requirement in
+`scripts/deploy_release.sh`:
 
 - `BLUEPRINT_DEEPSEEK_API_KEY` must be present
 
 This gate made sense in the earlier model where the installer was expected to
 materialize all runtime credentials into generated env files. That assumption
 is no longer universally true.
+
+Implementation status: this hard install-time gate has since been removed.
+Provider credentials are now runtime requirements for provider-backed features,
+not release/user-mode install prerequisites.
 
 The current product direction allows two different credential sources:
 
@@ -22,10 +26,10 @@ not passed through the installer invocation.
 
 ## Problem Statement
 
-`deploy_release.sh` currently treats `BLUEPRINT_DEEPSEEK_API_KEY` as a hard
-deployment prerequisite and exits before service generation if the variable is
-absent. The current hard stop is the explicit `die` at
-`scripts/deploy_release.sh:491-492`.
+`deploy_release.sh` previously treated `BLUEPRINT_DEEPSEEK_API_KEY` as a hard
+deployment prerequisite and exited before service generation if the variable
+was absent. The hard stop was the explicit `die` at the historical
+`scripts/deploy_release.sh:491-492` location.
 
 This is too strict for the current architecture because:
 
@@ -33,7 +37,7 @@ This is too strict for the current architecture because:
 - executor credentials may also come from external configuration
 - generated env files are not the only valid credential source anymore
 
-As a result, install/deploy currently conflates:
+As a result, the old install/deploy behavior conflated:
 
 - "the installer was not given a key"
 - "the runtime will definitely have no credential available"
@@ -56,9 +60,9 @@ the older "installer owns all secrets" model.
 
 ## Current Hard Gates Identified
 
-Based on the current installer/deploy design and recent smoke-test results,
-these are the credential-related gates in the install path that need to be
-distinguished:
+Based on the installer/deploy design and smoke-test results at the time of
+this follow-up, these were the credential-related gates in the install path
+that needed to be distinguished:
 
 ### 1. Release Installer Path: Actual Blocking Point
 
@@ -71,13 +75,13 @@ Files:
 
 Current behavior:
 
-- the self-extracting installer itself does not fail early on a missing provider
+- the self-extracting installer itself did not fail early on a missing provider
   key
-- `scripts/install.sh` reaches Phase 10 and then invokes release deploy via
+- `scripts/install.sh` reached Phase 10 and then invoked release deploy via
   `run_deploy` at `scripts/install.sh:754`
-- the actual install-time hard failure happens inside
+- the actual install-time hard failure happened inside
   `scripts/deploy_release.sh:491-492`
-- after that, both generated env files assume the key is always present because
+- after that, both generated env files assumed the key was always present because
   it is unconditionally written to:
   - `backend.env` at `scripts/deploy_release.sh:527`
   - `manager-agent.env` at `scripts/deploy_release.sh:589`
