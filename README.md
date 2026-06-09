@@ -53,17 +53,20 @@ bwrap --die-with-parent --ro-bind / / --dev /dev --proc /proc -- /bin/true
 
 它会完成安装器获取、依赖能力检查、用户目录 runtime env 引导、前后端与 `manager-agent` 部署、`systemd --user` 启动和烟雾测试。
 
-### 方式二：手动安装 release 包
+### 方式二：一键安装 release 包
 
-打开 [GitHub Releases](https://github.com/solarise94/rhine-life-lab/releases)，下载对应版本的 `blueprint-re-<version>-linux-x86_64.sh` 自解压安装器。
+打开 [GitHub Releases](https://github.com/solarise94/rhine-life-lab/releases) 可以查看可用版本。
 
-也可以用命令下载。把下面的 `0.4.1` 替换成 Releases 页面显示的版本号：
+普通用户直接用 downloader 入口即可，不需要先手动下载自解压安装器。把下面的 `0.4.1` 替换成 Releases 页面显示的版本号：
 
 ```bash
 VERSION=0.4.1
-curl -fL -o "blueprint-re-${VERSION}-linux-x86_64.sh" \
-  "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh"
-bash "blueprint-re-${VERSION}-linux-x86_64.sh"
+curl -fsSL \
+  https://raw.githubusercontent.com/solarise94/rhine-life-lab/main/scripts/install_downloader.sh | \
+  bash -s -- \
+  --version "${VERSION}" \
+  --installer-url "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh" \
+  --checksum-url "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh.sha256"
 ```
 
 安装器会把 release、runtime env、data 和 logs 放到用户目录：
@@ -200,19 +203,31 @@ BLUEPRINT_MANAGER_BACKEND=pi
 
 ## 升级
 
-重新下载新版自解压安装器并执行即可。安装器会检测已有安装、停止 user services、部署新 release、切换 `current` symlink，并保留 `~/.local/share/blueprint-re/data/` 中的项目数据。
+重新执行 downloader 并指定新版 release 即可。安装器会检测已有安装、停止 user services、部署新 release、切换 `current` symlink，并保留 `~/.local/share/blueprint-re/data/` 中的项目数据。
+
+如果需要升级到指定版本：
 
 ```bash
 VERSION=0.4.2
-curl -fL -o "blueprint-re-${VERSION}-linux-x86_64.sh" \
-  "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh"
-bash "blueprint-re-${VERSION}-linux-x86_64.sh"
+curl -fsSL \
+  https://raw.githubusercontent.com/solarise94/rhine-life-lab/main/scripts/install_downloader.sh | \
+  bash -s -- \
+  --version "${VERSION}" \
+  --installer-url "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh" \
+  --checksum-url "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh.sha256"
 ```
 
 回滚到已保留的旧版本：
 
 ```bash
-bash "blueprint-re-${VERSION}-linux-x86_64.sh" --rollback <previous-version>
+VERSION=0.4.2
+curl -fsSL \
+  https://raw.githubusercontent.com/solarise94/rhine-life-lab/main/scripts/install_downloader.sh | \
+  bash -s -- \
+  --version "${VERSION}" \
+  --installer-url "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh" \
+  --checksum-url "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh.sha256" \
+  --rollback <previous-version>
 ```
 
 rollback 可以使用任意版本的安装器，只要目标版本目录仍在本机 `~/.local/share/blueprint-re/releases/` 下。
