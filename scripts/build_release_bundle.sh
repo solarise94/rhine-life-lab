@@ -134,16 +134,36 @@ mkdir -p "${BUNDLE_ROOT}/runtime"
 # ---------------------------------------------------------------------------
 
 echo "Building backend wheel..."
-python3 -m pip install --quiet build wheel
-python3 -m build "${REPO_ROOT}/backend" --wheel --outdir "${BUNDLE_ROOT}/wheels"
-WHEEL_FILE="$(ls "${BUNDLE_ROOT}/wheels/"*.whl | head -n1)"
-[[ -f "${WHEEL_FILE}" ]] || die "Wheel build failed: no .whl produced"
+# Use a temporary venv for build tools to avoid externally-managed-environment issues.
+BUILD_VENV="$(mktemp -d)"
+python3 -m venv "${BUILD_VENV}"
+"${BUILD_VENV}/bin/pip" install --quiet build wheel
+"${BUILD_VENV}/bin/python" -m build "${REPO_ROOT}/backend" --wheel --outdir "${BUNDLE_ROOT}/wheels"
+rm -rf "${BUILD_VENV}"
+
+# Identify the blueprint-re-backend wheel specifically (not dependency wheels).
+WHEEL_FILE=""
+for candidate in "${BUNDLE_ROOT}/wheels/"blueprint_re_backend-*.whl; do
+  if [[ -f "${candidate}" ]]; then
+    WHEEL_FILE="${candidate}"
+    break
+  fi
+done
+[[ -f "${WHEEL_FILE}" ]] || die "Wheel build failed: no blueprint_re_backend-*.whl produced"
 echo "Wheel: $(basename "${WHEEL_FILE}")"
 
 # Download all Python dependencies into wheels/ so the installer can work
 # fully offline with --no-index --find-links.
 echo "Downloading Python dependencies into wheels/..."
 python3 -m pip download --quiet -d "${BUNDLE_ROOT}/wheels" "${WHEEL_FILE}"
+# Reject any non-wheel artifacts. The installer contract requires a full wheel
+# closure so that pip --no-index --find-links works without a build toolchain.
+NON_WHEEL_COUNT="$(find "${BUNDLE_ROOT}/wheels" -maxdepth 1 -type f ! -name '*.whl' | wc -l)"
+if [[ "${NON_WHEEL_COUNT}" -gt 0 ]]; then
+  echo "ERROR: The following non-wheel artifacts were downloaded (sdist/build-required):"
+  find "${BUNDLE_ROOT}/wheels" -maxdepth 1 -type f ! -name '*.whl'
+  die "Dependency closure contains non-wheel artifacts. Build a clean wheel-only closure or add build deps."
+fi
 echo "Python dependencies staged."
 
 # ---------------------------------------------------------------------------
@@ -188,7 +208,19 @@ if [[ -d "${PUBLIC_SRC}" ]]; then
 fi
 
 popd >/dev/null
+
+# Verify frontend standalone server.js exists.
+if [[ ! -f "${BUNDLE_ROOT}/frontend-standalone/frontend/server.js" ]]; then
+  die "Frontend standalone is incomplete: server.js not found."
+fi
 echo "Frontend standalone staged."
+
+# Quick sanity: verify the standalone server.js is syntactically valid Node.
+echo "Verifying frontend standalone server.js syntax..."
+if ! node --check "${BUNDLE_ROOT}/frontend-standalone/frontend/server.js"; then
+  die "Frontend standalone server.js syntax check failed."
+fi
+echo "Frontend standalone syntax OK."
 
 # ---------------------------------------------------------------------------
 # Gather manager-agent
@@ -200,11 +232,23 @@ cp "${REPO_ROOT}/manager-agent/package.json" "${BUNDLE_ROOT}/manager-agent/"
 if [[ -f "${REPO_ROOT}/manager-agent/package-lock.json" ]]; then
   cp "${REPO_ROOT}/manager-agent/package-lock.json" "${BUNDLE_ROOT}/manager-agent/"
 fi
-# Bundle node_modules so deploy_release.sh can skip npm ci when offline.
-if [[ -d "${REPO_ROOT}/manager-agent/node_modules" ]]; then
-  echo "Bundling manager-agent node_modules..."
-  cp -a "${REPO_ROOT}/manager-agent/node_modules" "${BUNDLE_ROOT}/manager-agent/"
+
+# For tagged releases, install production dependencies so deploy can skip npm ci.
+if [[ -f "${BUNDLE_ROOT}/manager-agent/package-lock.json" ]]; then
+  echo "Installing manager-agent production dependencies..."
+  pushd "${BUNDLE_ROOT}/manager-agent" >/dev/null
+  npm ci --omit=dev
+  popd >/dev/null
+else
+  warn "No package-lock.json for manager-agent; cannot create deterministic production node_modules."
 fi
+
+# Verify manager-agent passes syntax check.
+echo "Verifying manager-agent syntax..."
+if ! node --check "${BUNDLE_ROOT}/manager-agent/src/server.js"; then
+  die "Manager-agent syntax check failed."
+fi
+echo "Manager-agent syntax OK."
 
 # ---------------------------------------------------------------------------
 # Gather deploy templates
@@ -279,13 +323,16 @@ WHEEL_CHECKSUM="$(sha256_file "${WHEEL_FILE}")"
 
 # Build checksum map and shell-verifiable manifest with Python to avoid
 # quoting/escaping issues from hand-rolled JSON.
-python3 - <<PY
+python3 - "${BUNDLE_ROOT}" "${VERSION}" "wheels/${WHEEL_BASENAME}" "${WHEEL_CHECKSUM}" <<'PY'
 import json
 import hashlib
-import os
+import sys
 from pathlib import Path
 
-bundle_root = Path("${BUNDLE_ROOT}")
+bundle_root = Path(sys.argv[1])
+version = sys.argv[2]
+wheel_path = sys.argv[3]
+wheel_checksum = sys.argv[4]
 
 # First pass: compute checksums for all existing payload files.
 checksums = {}
@@ -299,11 +346,11 @@ for f in sorted(bundle_root.rglob("*")):
 
 # Write release.json so it is also covered by the payload manifest.
 data = {
-    "version": "${VERSION}",
-    "state_schema_version": "${VERSION}",
+    "version": version,
+    "state_schema_version": version,
     "platform": "linux",
     "arch": "x86_64",
-    "build_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "build_time": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "migrations": {
         "preflight": None,
         "apply": None,
@@ -311,8 +358,8 @@ data = {
     },
     "artifacts": {
         "backend_wheel": {
-            "path": f"wheels/{WHEEL_BASENAME}",
-            "checksum_sha256": WHEEL_CHECKSUM,
+            "path": wheel_path,
+            "checksum_sha256": wheel_checksum,
         },
         "frontend_standalone": {
             "path": "frontend-standalone",

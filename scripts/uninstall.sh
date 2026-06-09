@@ -4,16 +4,18 @@ set -euo pipefail
 # Blueprint RE Uninstaller
 #
 # Stops and disables user services, removes release files, and optionally
-# preserves or removes configuration.
+# preserves or removes configuration and persistent project data.
 #
 # Usage:
-#   bash uninstall.sh [--purge-config] [--yes]
+#   bash uninstall.sh [--purge-config] [--purge-data] [--yes]
 
 RELEASE_BASE="${HOME}/.local/share/blueprint-re"
 APP_ENV_DIR="${HOME}/.config/blueprint-re"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
+DATA_DIR="${RELEASE_BASE}/data"
 
 PURGE_CONFIG=0
+PURGE_DATA=0
 ASSUME_YES=0
 
 # ---------------------------------------------------------------------------
@@ -25,6 +27,9 @@ for arg in "$@"; do
     --purge-config)
       PURGE_CONFIG=1
       ;;
+    --purge-data)
+      PURGE_DATA=1
+      ;;
     --yes)
       ASSUME_YES=1
       ;;
@@ -34,6 +39,8 @@ Usage: bash uninstall.sh [OPTIONS]
 
 Options:
   --purge-config  Also remove ~/.config/blueprint-re/
+  --purge-data    Also remove ~/.local/share/blueprint-re/data/
+                  (contains persistent project state!)
   --yes           Do not prompt for confirmation
   --help          Show this message
 EOF
@@ -59,7 +66,19 @@ if [[ "${ASSUME_YES}" -eq 0 ]]; then
   else
     echo "  - Configuration:         ${APP_ENV_DIR} (preserved, use --purge-config to remove)"
   fi
+  if [[ "${PURGE_DATA}" -eq 1 ]]; then
+    echo "  - Project data:          ${DATA_DIR}  <<< PERSISTENT PROJECT STATE WILL BE DELETED"
+  else
+    echo "  - Project data:          ${DATA_DIR} (preserved by default, use --purge-data to remove)"
+  fi
   echo ""
+  if [[ "${PURGE_DATA}" -eq 1 ]]; then
+    echo "WARNING: --purge-data will permanently delete all project data including:"
+    echo "  - project registry"
+    echo "  - project graphs and cards"
+    echo "  - run history and results"
+    echo ""
+  fi
   echo -n "Are you sure? [y/N] "
   read -r response
   if [[ "${response}" != "y" && "${response}" != "Y" ]]; then
@@ -95,6 +114,18 @@ for svc in blueprint-re-nginx.service blueprint-re-frontend.service blueprint-re
     rm -f "${unit_file}"
   fi
 done
+
+# ---------------------------------------------------------------------------
+# Handle data directory before removing release tree
+# ---------------------------------------------------------------------------
+
+if [[ "${PURGE_DATA}" -eq 0 && -d "${DATA_DIR}" ]]; then
+  # Move data out of the release base so it survives release directory removal.
+  DATA_BACKUP="${HOME}/.local/share/blueprint-re-data-backup-$(date +%s)"
+  mv "${DATA_DIR}" "${DATA_BACKUP}"
+  echo "Project data preserved at: ${DATA_BACKUP}"
+  echo "  (Move it back to ${DATA_DIR} before reinstalling if you want to keep projects.)"
+fi
 
 # ---------------------------------------------------------------------------
 # Remove release directory

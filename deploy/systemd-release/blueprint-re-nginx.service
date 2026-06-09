@@ -1,9 +1,11 @@
 [Unit]
 Description=Blueprint RE nginx Gateway
 After=network.target blueprint-re-frontend.service
+Requires=blueprint-re-frontend.service
 
 [Service]
 Type=simple
+ExecStartPre=/bin/sh -c 'mkdir -p __APP_ENV_DIR__/nginx-tmp/body __APP_ENV_DIR__/nginx-tmp/proxy __APP_ENV_DIR__/nginx-tmp/fastcgi __APP_ENV_DIR__/nginx-tmp/uwsgi __APP_ENV_DIR__/nginx-tmp/scgi'
 ExecStartPre=__NGINX_BIN__ -t -c __APP_ENV_DIR__/nginx.conf
 ExecStart=__NGINX_BIN__ -c __APP_ENV_DIR__/nginx.conf
 ExecReload=__NGINX_BIN__ -c __APP_ENV_DIR__/nginx.conf -s reload
@@ -11,6 +13,10 @@ PIDFile=__APP_ENV_DIR__/nginx.pid
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=10
+KillMode=control-group
+SendSIGKILL=yes
+NoNewPrivileges=yes
+PrivateTmp=no
 
 [Install]
 WantedBy=default.target

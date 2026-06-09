@@ -39,6 +39,9 @@ IS_UPGRADE=0
 ALLOW_APT=0
 DEPLOY_WARNINGS=()
 
+# Restrict permissions for generated files.
+umask 077
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -346,9 +349,19 @@ fi
 # Verify backend wheel is importable (do not reinstall; install.sh owns that)
 # ---------------------------------------------------------------------------
 
-WHEEL_FILE="$(ls "${RELEASE_ROOT}/wheels/"*.whl 2>/dev/null | head -n1)"
-if [[ -z "${WHEEL_FILE}" ]]; then
-  die "No backend wheel found in ${RELEASE_ROOT}/wheels/"
+WHEEL_PATH_IN_RELEASE="$("${PYTHON_BIN}" -c "
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+print(manifest.get('artifacts', {}).get('backend_wheel', {}).get('path', ''))
+" "${RELEASE_ROOT}/release.json")"
+
+if [[ -z "${WHEEL_PATH_IN_RELEASE}" ]]; then
+  die "Backend wheel path not found in release.json"
+fi
+
+WHEEL_FILE="${RELEASE_ROOT}/${WHEEL_PATH_IN_RELEASE}"
+if [[ ! -f "${WHEEL_FILE}" ]]; then
+  die "Backend wheel not found at release path: ${WHEEL_PATH_IN_RELEASE}"
 fi
 
 if ! "${PYTHON_BIN}" -c "import app.main" >/dev/null 2>&1; then
@@ -397,9 +410,13 @@ check_unknown_blueprint_env_keys() {
   local env_file="$(pwd)/.env"
   [[ -f "${env_file}" ]] || return 0
   local known_keys=(
+    BLUEPRINT_ANTHROPIC_API_BASE_URL
+    BLUEPRINT_ANTHROPIC_API_KEY
     BLUEPRINT_BACKEND_API_BASE_URL
     BLUEPRINT_CLAUDE_CODE_COMMAND_JSON
     BLUEPRINT_CODEX_COMMAND_JSON
+    BLUEPRINT_DATA_DIRECTORY_ROOTS
+    BLUEPRINT_DATA_MOUNT_HASH_LIMIT_BYTES
     BLUEPRINT_DATA_ROOT
     BLUEPRINT_DEEPSEEK_API_BASE_URL
     BLUEPRINT_DEEPSEEK_API_KEY
@@ -414,22 +431,37 @@ check_unknown_blueprint_env_keys() {
     BLUEPRINT_EXECUTOR_SANDBOX_MODE
     BLUEPRINT_INTERNAL_TOOL_TOKEN
     BLUEPRINT_LIBRARY_SUMMARIZER_MODEL
+    BLUEPRINT_MANAGER_API_BASE_URL
+    BLUEPRINT_MANAGER_API_KEY
     BLUEPRINT_MANAGER_BACKEND
     BLUEPRINT_MANAGER_MAX_TOKENS
     BLUEPRINT_MANAGER_MODEL
     BLUEPRINT_MANAGER_TEMPERATURE
     BLUEPRINT_MANAGER_TIMEOUT_SECONDS
+    BLUEPRINT_MANIFEST_REPAIR_TIMEOUT_SECONDS
+    BLUEPRINT_OPENAI_API_BASE_URL
+    BLUEPRINT_OPENAI_API_KEY
+    BLUEPRINT_OPENCODE_API_BASE_URL
+    BLUEPRINT_OPENCODE_API_KEY
+    BLUEPRINT_OPENCODE_API_PROTOCOL
     BLUEPRINT_OPENCODE_COMMAND_JSON
+    BLUEPRINT_OPENCODE_EXECUTOR_MODEL
+    BLUEPRINT_PI_ANTHROPIC_BASE_URL
+    BLUEPRINT_PI_API_KEY
     BLUEPRINT_PI_COMMAND_JSON
     BLUEPRINT_PI_DEEPSEEK_BASE_URL
+    BLUEPRINT_PI_EXECUTOR_MODEL
     BLUEPRINT_PI_MANAGER_URL
     BLUEPRINT_PROJECT_ROOTS
+    BLUEPRINT_REVIEWER_API_BASE_URL
+    BLUEPRINT_REVIEWER_API_KEY
     BLUEPRINT_REVIEWER_MAX_TOKENS
     BLUEPRINT_REVIEWER_MAX_TURNS
     BLUEPRINT_REVIEWER_MODEL
     BLUEPRINT_RUNTIME_DEPENDENCY_CACHE_TTL_SECONDS
     BLUEPRINT_RUNTIME_DEPENDENCY_FALLBACK_POLICY
     BLUEPRINT_RUNTIME_DEPENDENCY_PROBE_TIMEOUT_SECONDS
+    BLUEPRINT_WORKER_TIMEOUT_SECONDS
   )
   local -A known_set=()
   local known_key
@@ -513,11 +545,40 @@ write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_PI_COMMAND_JSON "${BLUEPRI
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENCODE_COMMAND_JSON "${BLUEPRINT_OPENCODE_COMMAND_JSON:-${DEFAULT_OPENCODE_COMMAND_JSON}}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_CLAUDE_CODE_COMMAND_JSON "${BLUEPRINT_CLAUDE_CODE_COMMAND_JSON:-${DEFAULT_CLAUDE_CODE_COMMAND_JSON}}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_PROJECT_ROOTS "${BLUEPRINT_PROJECT_ROOTS:-}"
+write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_DATA_DIRECTORY_ROOTS "${BLUEPRINT_DATA_DIRECTORY_ROOTS:-}"
+write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_DATA_MOUNT_HASH_LIMIT_BYTES "${BLUEPRINT_DATA_MOUNT_HASH_LIMIT_BYTES:-104857600}"
+write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_WORKER_TIMEOUT_SECONDS "${BLUEPRINT_WORKER_TIMEOUT_SECONDS:-1800}"
+write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_MANIFEST_REPAIR_TIMEOUT_SECONDS "${BLUEPRINT_MANIFEST_REPAIR_TIMEOUT_SECONDS:-180}"
+
+# Optional API keys and URLs: forward only if set so the backend uses its defaults.
+if [[ -n "${BLUEPRINT_ANTHROPIC_API_KEY:-}" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_ANTHROPIC_API_KEY "${BLUEPRINT_ANTHROPIC_API_KEY}"
+fi
+if [[ -n "${BLUEPRINT_ANTHROPIC_API_BASE_URL:-}" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_ANTHROPIC_API_BASE_URL "${BLUEPRINT_ANTHROPIC_API_BASE_URL}"
+fi
+if [[ -n "${BLUEPRINT_OPENAI_API_KEY:-}" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENAI_API_KEY "${BLUEPRINT_OPENAI_API_KEY}"
+fi
+if [[ -n "${BLUEPRINT_OPENAI_API_BASE_URL:-}" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENAI_API_BASE_URL "${BLUEPRINT_OPENAI_API_BASE_URL}"
+fi
+if [[ -n "${BLUEPRINT_OPENCODE_API_KEY:-}" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENCODE_API_KEY "${BLUEPRINT_OPENCODE_API_KEY}"
+fi
+if [[ -n "${BLUEPRINT_OPENCODE_API_BASE_URL:-}" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENCODE_API_BASE_URL "${BLUEPRINT_OPENCODE_API_BASE_URL}"
+fi
+if [[ -n "${BLUEPRINT_OPENCODE_API_PROTOCOL:-}" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENCODE_API_PROTOCOL "${BLUEPRINT_OPENCODE_API_PROTOCOL}"
+fi
 
 # Codex is manual-only: forward if present.
 if [[ -n "${BLUEPRINT_CODEX_COMMAND_JSON:-}" ]]; then
   write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_CODEX_COMMAND_JSON "${BLUEPRINT_CODEX_COMMAND_JSON}"
 fi
+
+chmod 600 "${APP_ENV_DIR}/backend.env"
 
 : > "${APP_ENV_DIR}/manager-agent.env"
 write_env_line "${APP_ENV_DIR}/manager-agent.env" MANAGER_AGENT_HOST "127.0.0.1"
@@ -535,12 +596,16 @@ write_env_line "${APP_ENV_DIR}/manager-agent.env" MANAGER_COMPACTION_ENABLED "${
 write_env_line "${APP_ENV_DIR}/manager-agent.env" MANAGER_COMPACTION_KEEP_RECENT_TOKENS "${MANAGER_COMPACTION_KEEP_RECENT_TOKENS:-120000}"
 write_env_line "${APP_ENV_DIR}/manager-agent.env" MANAGER_COMPACTION_RESERVE_TOKENS "${MANAGER_COMPACTION_RESERVE_TOKENS:-16000}"
 
+chmod 600 "${APP_ENV_DIR}/manager-agent.env"
+
 : > "${APP_ENV_DIR}/frontend.env"
 write_env_line "${APP_ENV_DIR}/frontend.env" FRONTEND_HOST "127.0.0.1"
 write_env_line "${APP_ENV_DIR}/frontend.env" FRONTEND_PORT "13002"
 write_env_line "${APP_ENV_DIR}/frontend.env" NEXT_PUBLIC_API_BASE_URL "/api"
 write_env_line "${APP_ENV_DIR}/frontend.env" NEXT_PUBLIC_UPLOAD_API_BASE_URL "/upload-api"
 write_env_line "${APP_ENV_DIR}/frontend.env" BACKEND_PROXY_TARGET "http://127.0.0.1:18001"
+
+chmod 600 "${APP_ENV_DIR}/frontend.env"
 
 # ---------------------------------------------------------------------------
 # Service unit generation
@@ -627,12 +692,23 @@ sleep 3
 
 HEALTH_OK=1
 
-if ! curl -fsS http://127.0.0.1:18001/healthz >/dev/null 2>&1; then
+_http_check() {
+  local url="$1"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS "${url}" >/dev/null 2>&1
+  elif "${PYTHON_BIN}" -c "import urllib.request" >/dev/null 2>&1; then
+    "${PYTHON_BIN}" -c "import urllib.request; urllib.request.urlopen('${url}', timeout=2)" >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
+if ! _http_check http://127.0.0.1:18001/healthz; then
   warn_deploy "Backend health check failed (http://127.0.0.1:18001/healthz)"
   HEALTH_OK=0
 fi
 
-if ! curl -I http://127.0.0.1:13001 >/dev/null 2>&1; then
+if ! _http_check http://127.0.0.1:13001; then
   warn_deploy "nginx gateway check failed (http://127.0.0.1:13001)"
   HEALTH_OK=0
 fi

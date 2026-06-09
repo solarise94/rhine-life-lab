@@ -1,6 +1,7 @@
 [Unit]
 Description=Blueprint RE Backend
 After=network.target blueprint-re-manager-agent.service
+Requires=blueprint-re-manager-agent.service
 
 [Service]
 Type=simple
@@ -12,6 +13,12 @@ RestartSec=2
 TimeoutStopSec=10
 KillMode=control-group
 SendSIGKILL=yes
+# NoNewPrivileges is intentionally omitted for the backend service because it
+# spawns executor sandbox processes via bubblewrap, which may need setuid or
+# unprivileged userns privileges that NoNewPrivileges would block. The bwrap
+# compatibility check is run at install time; if the host requires a setuid
+# bwrap, backend service hardening must not prevent it from functioning.
+PrivateTmp=yes
 
 [Install]
 WantedBy=default.target

@@ -9,6 +9,11 @@ WorkingDirectory=__RELEASE_ROOT__/manager-agent
 ExecStart=__NODE_BIN__ src/server.js
 Restart=on-failure
 RestartSec=2
+TimeoutStopSec=10
+KillMode=control-group
+SendSIGKILL=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
 
 [Install]
 WantedBy=default.target

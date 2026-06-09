@@ -26,6 +26,10 @@ PAYLOAD_OFFSET="$((10#${PAYLOAD_OFFSET}))"
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+umask 077
+
+INSTALL_USER="${USER:-$(id -un)}"
+
 RELEASE_BASE="${HOME}/.local/share/blueprint-re"
 RELEASES_DIR="${RELEASE_BASE}/releases"
 CURRENT_LINK="${RELEASE_BASE}/current"
@@ -109,6 +113,38 @@ require_cmd() {
   fi
 }
 
+# Run bwrap with classified diagnostics. Exits on failure.
+bwrap_smoke_test() {
+  local bwrap_bin="$1"
+  local test_label="$2"
+  shift 2
+  local exit_code=0
+  if "${bwrap_bin}" "$@" -- /bin/true 2>/dev/null; then
+    return 0
+  fi
+  exit_code=$?
+  # Classification attempt
+  echo ""
+  echo "=== bubblewrap diagnostic ===" >&2
+  echo "Smoke test failed: ${test_label}" >&2
+  if ! "${bwrap_bin}" --version >/dev/null 2>&1; then
+    echo "  -> bwrap binary is not executable or not found" >&2
+    die "bubblewrap binary missing or unusable: ${bwrap_bin}"
+  fi
+  # Try progressively simpler invocations to classify the failure
+  if ! "${bwrap_bin}" --dev /dev -- /bin/true 2>/dev/null; then
+    echo "  -> unprivileged user namespace may be disabled" >&2
+    echo "     (check /proc/sys/kernel/unprivileged_userns_clone or seccomp policy)" >&2
+    die "bubblewrap namespace creation blocked. Host policy prevents unprivileged user namespaces."
+  fi
+  if ! "${bwrap_bin}" --tmpfs /tmp -- /bin/true 2>/dev/null; then
+    echo "  -> mount namespace may be blocked" >&2
+    die "bubblewrap mount namespace blocked. Check container/seccomp policy."
+  fi
+  echo "  -> generic sandbox failure (exit code ${exit_code})" >&2
+  die "bubblewrap smoke test failed. Sandbox cannot operate on this host."
+}
+
 version_gte() {
   local actual="$1"
   local required="$2"
@@ -158,16 +194,31 @@ run_deploy_for_release() {
 }
 
 # Wait for backend/nginx health endpoints to come up.
+# Prefers curl but falls back to Python urllib if curl is unavailable.
 wait_for_health() {
   local timeout_secs=30
   local deadline=$(( $(date +%s) + timeout_secs ))
   local backend_ok=0 nginx_ok=0
+  local http_check=""
+  if command -v curl >/dev/null 2>&1; then
+    http_check="curl"
+  elif "${ENV_PYTHON}" -c "import urllib.request" >/dev/null 2>&1; then
+    http_check="python"
+  fi
   while [[ $(date +%s) -lt ${deadline} ]]; do
-    if [[ ${backend_ok} -eq 0 ]] && curl -fsS http://127.0.0.1:18001/healthz >/dev/null 2>&1; then
-      backend_ok=1
+    if [[ ${backend_ok} -eq 0 ]]; then
+      if [[ "${http_check}" == "curl" ]] && curl -fsS http://127.0.0.1:18001/healthz >/dev/null 2>&1; then
+        backend_ok=1
+      elif [[ "${http_check}" == "python" ]] && "${ENV_PYTHON}" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18001/healthz', timeout=2)" >/dev/null 2>&1; then
+        backend_ok=1
+      fi
     fi
-    if [[ ${nginx_ok} -eq 0 ]] && curl -I http://127.0.0.1:13001 >/dev/null 2>&1; then
-      nginx_ok=1
+    if [[ ${nginx_ok} -eq 0 ]]; then
+      if [[ "${http_check}" == "curl" ]] && curl -I http://127.0.0.1:13001 >/dev/null 2>&1; then
+        nginx_ok=1
+      elif [[ "${http_check}" == "python" ]] && "${ENV_PYTHON}" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:13001', timeout=2)" >/dev/null 2>&1; then
+        nginx_ok=1
+      fi
     fi
     if [[ ${backend_ok} -eq 1 && ${nginx_ok} -eq 1 ]]; then
       return 0
@@ -199,9 +250,37 @@ if ! systemctl --user show-environment >/dev/null 2>&1; then
   die "systemd --user is not available. Log into a full user session."
 fi
 
-require_cmd curl
 require_cmd tar
 require_cmd sha256sum
+require_cmd mktemp
+require_cmd sed
+require_cmd grep
+
+# Check local port availability
+PORTS_TO_CHECK=(13001 13002 18001 18002)
+PORT_CONFLICTS=()
+for port in "${PORTS_TO_CHECK[@]}"; do
+  if ss -tln 2>/dev/null | grep -qE ":${port}[[:space:]]"; then
+    PORT_CONFLICTS+=("${port}")
+  elif netstat -tln 2>/dev/null | grep -qE ":${port}[[:space:]]"; then
+    PORT_CONFLICTS+=("${port}")
+  fi
+done
+if [[ "${#PORT_CONFLICTS[@]}" -gt 0 ]]; then
+  warn "The following ports are already in use: ${PORT_CONFLICTS[*]}"
+  warn "If these are from a previous Blueprint RE install, the deploy will reuse them."
+  warn "If another service is using them, supply custom ports via BLUEPRINT_*_PORT env vars before running deploy."
+fi
+
+# Linger detection
+LINGER_STATUS=""
+if command -v loginctl >/dev/null 2>&1; then
+  LINGER_STATUS="$(loginctl show-user "${INSTALL_USER}" -p Linger 2>/dev/null || true)"
+fi
+if [[ "${LINGER_STATUS}" == "Linger=no" ]]; then
+  warn "User linger is disabled. systemd --user services may stop after you log out."
+  warn "To enable linger (if your system policy allows): loginctl enable-linger ${INSTALL_USER}"
+fi
 
 # ---------------------------------------------------------------------------
 # Rollback mode
@@ -365,13 +444,27 @@ fi
 # 3. Download micromamba if allowed
 if [[ -z "${MAMBA_EXE}" && -z "${CONDA_EXE}" && "${OFFLINE_MODE}" -eq 0 ]]; then
   info "Downloading micromamba bootstrap..."
-  MICROMAMBA_URL="https://micro.mamba.pm/api/micromamba/linux-64/latest"
-  curl -fsSL "${MICROMAMBA_URL}" | tar -xj -C "${EXTRACT_DIR}" bin/micromamba
+  # Pin to a specific release for verifiable integrity.
+  MICROMAMBA_VERSION="2.1.0-0"
+  MICROMAMBA_URL="https://github.com/mamba-org/micromamba-releases/releases/download/${MICROMAMBA_VERSION}/micromamba-linux-64.tar.bz2"
+  EXPECTED_MICROMAMBA_SHA256="bec27dc583c8faede774bdf0f0a11c5c4d80b7c877c0f17f5aa477a2d48e42d2"
+  MICROMAMBA_ARCHIVE="${EXTRACT_DIR}/micromamba.tar.bz2"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o "${MICROMAMBA_ARCHIVE}" "${MICROMAMBA_URL}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "${MICROMAMBA_ARCHIVE}" "${MICROMAMBA_URL}"
+  else
+    die "No curl or wget available. Cannot download micromamba bootstrap."
+  fi
+  info "Verifying micromamba archive integrity..."
+  echo "${EXPECTED_MICROMAMBA_SHA256}  ${MICROMAMBA_ARCHIVE}" | sha256sum -c -
+  tar -xjf "${MICROMAMBA_ARCHIVE}" -C "${EXTRACT_DIR}" bin/micromamba
   MAMBA_EXE="${EXTRACT_DIR}/bin/micromamba"
   if [[ ! -x "${MAMBA_EXE}" ]]; then
-    die "micromamba download failed."
+    die "micromamba download failed: binary not found after extraction."
   fi
-  info "Downloaded micromamba."
+  info "Downloaded micromamba ${MICROMAMBA_VERSION}."
 fi
 
 if [[ -z "${MAMBA_EXE}" && -z "${CONDA_EXE}" ]]; then
@@ -431,18 +524,48 @@ info "nginx:   ${ENV_NGINX}"
 info "bwrap:   ${ENV_BWRAP}"
 
 # ---------------------------------------------------------------------------
+# Phase 6b: bwrap host compatibility diagnostics
+# ---------------------------------------------------------------------------
+
+info "Phase 6b: Running bubblewrap smoke test"
+
+bwrap_smoke_test "${ENV_BWRAP}" "full sandbox" \
+  --die-with-parent \
+  --ro-bind /usr /usr \
+  --ro-bind /bin /bin \
+  --ro-bind-try /lib /lib \
+  --ro-bind-try /lib64 /lib64 \
+  --proc /proc \
+  --dev /dev \
+  --tmpfs /tmp
+
+info "bubblewrap smoke test passed."
+
+# ---------------------------------------------------------------------------
 # Phase 7: Install backend wheel into the environment
 # ---------------------------------------------------------------------------
 
 info "Phase 7: Installing backend wheel"
 
-WHEEL_FILE="$(ls "${PAYLOAD_DIR}/wheels/"*.whl 2>/dev/null | head -n1)"
-if [[ -z "${WHEEL_FILE}" ]]; then
-  die "No backend wheel found in payload."
+# Select the backend wheel path from the release manifest (P0 requirement).
+WHEEL_PATH_IN_PAYLOAD="$(${ENV_PYTHON} -c "
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+print(manifest.get('artifacts', {}).get('backend_wheel', {}).get('path', ''))
+" "${PAYLOAD_DIR}/release.json")"
+
+if [[ -z "${WHEEL_PATH_IN_PAYLOAD}" ]]; then
+  die "Backend wheel path not found in release.json artifacts.backend_wheel.path"
 fi
 
-# Verify wheel hash against release manifest before installing.
+WHEEL_FILE="${PAYLOAD_DIR}/${WHEEL_PATH_IN_PAYLOAD}"
+if [[ ! -f "${WHEEL_FILE}" ]]; then
+  die "Backend wheel not found at payload path: ${WHEEL_PATH_IN_PAYLOAD}"
+fi
+
 WHEEL_BASENAME="$(basename "${WHEEL_FILE}")"
+
+# Verify wheel hash against release manifest before installing.
 EXPECTED_WHEEL_HASH="$(${ENV_PYTHON} -c "
 import json, sys
 manifest = json.load(open(sys.argv[1]))

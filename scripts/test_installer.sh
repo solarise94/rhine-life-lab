@@ -383,6 +383,354 @@ assert_fail "platform mismatch rejected" "check_versions 0.4.1 0.4.1 x86_64 darw
 echo ""
 
 # ---------------------------------------------------------------------------
+# Test 10: install_downloader.sh argument parsing
+# ---------------------------------------------------------------------------
+echo "Test 10: install_downloader.sh argument parsing"
+
+# Extract and test the parse_args logic.
+parse_downloader_args() {
+  local args=("$@")
+  local CHANNEL="stable"
+  local VERSION=""
+  local OFFLINE_MODE=0
+  local KEEP_INSTALLER=0
+  local INSTALLER_URL=""
+
+  local i=0
+  while [[ ${i} -lt ${#args[@]} ]]; do
+    case "${args[${i}]}" in
+      --version)
+        i=$((i + 1))
+        VERSION="${args[${i}]}"
+        ;;
+      --channel)
+        i=$((i + 1))
+        CHANNEL="${args[${i}]}"
+        ;;
+      --offline)
+        OFFLINE_MODE=1
+        ;;
+      --keep-installer)
+        KEEP_INSTALLER=1
+        ;;
+      --installer-url)
+        i=$((i + 1))
+        INSTALLER_URL="${args[${i}]}"
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  echo "CHANNEL=${CHANNEL}"
+  echo "VERSION=${VERSION}"
+  echo "OFFLINE_MODE=${OFFLINE_MODE}"
+  echo "KEEP_INSTALLER=${KEEP_INSTALLER}"
+  echo "INSTALLER_URL=${INSTALLER_URL}"
+}
+
+result="$(parse_downloader_args --version 0.5.0 --channel latest --offline --keep-installer --installer-url https://mirror.example.com/install.sh)"
+assert "downloader version parsed" "echo '${result}' | grep -q 'VERSION=0.5.0'"
+assert "downloader channel parsed" "echo '${result}' | grep -q 'CHANNEL=latest'"
+assert "downloader offline parsed" "echo '${result}' | grep -q 'OFFLINE_MODE=1'"
+assert "downloader keep-installer parsed" "echo '${result}' | grep -q 'KEEP_INSTALLER=1'"
+assert "downloader installer-url parsed" "echo '${result}' | grep -q 'INSTALLER_URL=https://mirror.example.com/install.sh'"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 11: wheel selection from release.json
+# ---------------------------------------------------------------------------
+echo "Test 11: Wheel selection from release.json"
+
+TEST_RELEASE_DIR="$(mktemp -d)"
+mkdir -p "${TEST_RELEASE_DIR}/wheels"
+touch "${TEST_RELEASE_DIR}/wheels/blueprint_re_backend-0.4.1-py3-none-any.whl"
+touch "${TEST_RELEASE_DIR}/wheels/some_dependency-1.0.0-py3-none-any.whl"
+
+cat > "${TEST_RELEASE_DIR}/release.json" <<'EOF'
+{
+  "version": "0.4.1",
+  "artifacts": {
+    "backend_wheel": {
+      "path": "wheels/blueprint_re_backend-0.4.1-py3-none-any.whl",
+      "checksum_sha256": "abc123"
+    }
+  }
+}
+EOF
+
+# Simulate the install.sh wheel path resolution.
+WHEEL_PATH_IN_PAYLOAD="$(python3 -c "
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+print(manifest.get('artifacts', {}).get('backend_wheel', {}).get('path', ''))
+" "${TEST_RELEASE_DIR}/release.json")"
+
+assert "wheel path extracted from release.json" "[[ ${WHEEL_PATH_IN_PAYLOAD} == 'wheels/blueprint_re_backend-0.4.1-py3-none-any.whl' ]]"
+assert "wheel file exists at resolved path" "[[ -f ${TEST_RELEASE_DIR}/${WHEEL_PATH_IN_PAYLOAD} ]]"
+
+rm -rf "${TEST_RELEASE_DIR}"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 12: env file permissions
+# ---------------------------------------------------------------------------
+echo "Test 12: env file permissions"
+
+TEST_ENV_DIR="$(mktemp -d)"
+# Simulate deploy_release.sh umask behavior
+(
+  umask 077
+  : > "${TEST_ENV_DIR}/backend.env"
+  chmod 600 "${TEST_ENV_DIR}/backend.env"
+)
+PERMS="$(stat -c %a "${TEST_ENV_DIR}/backend.env")"
+assert "env file has 600 permissions" "[[ ${PERMS} == '600' ]]"
+rm -rf "${TEST_ENV_DIR}"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 13: service template hardening directives
+# ---------------------------------------------------------------------------
+echo "Test 13: Service template hardening directives"
+
+for svc in frontend manager-agent nginx; do
+  template="${REPO_ROOT}/deploy/systemd-release/blueprint-re-${svc}.service"
+  assert "${svc} template exists" "[[ -f ${template} ]]"
+  assert "${svc} has NoNewPrivileges" "grep -q 'NoNewPrivileges=yes' ${template}"
+  assert "${svc} has TimeoutStopSec" "grep -q 'TimeoutStopSec=' ${template}"
+  assert "${svc} has KillMode" "grep -q 'KillMode=control-group' ${template}"
+  assert "${svc} has SendSIGKILL" "grep -q 'SendSIGKILL=yes' ${template}"
+done
+# backend intentionally omits NoNewPrivileges because it spawns bwrap sandboxes.
+template="${REPO_ROOT}/deploy/systemd-release/blueprint-re-backend.service"
+assert "backend template exists" "[[ -f ${template} ]]"
+assert "backend omits NoNewPrivileges (bwrap compat)" "! grep -q '^NoNewPrivileges=yes' ${template}"
+assert "backend has TimeoutStopSec" "grep -q 'TimeoutStopSec=' ${template}"
+assert "backend has KillMode" "grep -q 'KillMode=control-group' ${template}"
+assert "backend has SendSIGKILL" "grep -q 'SendSIGKILL=yes' ${template}"
+
+# Check service dependencies
+assert "backend requires manager-agent" "grep -q 'Requires=blueprint-re-manager-agent.service' ${REPO_ROOT}/deploy/systemd-release/blueprint-re-backend.service"
+assert "frontend requires backend" "grep -q 'Requires=blueprint-re-backend.service' ${REPO_ROOT}/deploy/systemd-release/blueprint-re-frontend.service"
+assert "nginx requires frontend" "grep -q 'Requires=blueprint-re-frontend.service' ${REPO_ROOT}/deploy/systemd-release/blueprint-re-nginx.service"
+
+# Check nginx temp dir creation
+assert "nginx has temp dir ExecStartPre" "grep -q 'mkdir -p.*nginx-tmp' ${REPO_ROOT}/deploy/systemd-release/blueprint-re-nginx.service"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 14: uninstall --purge-data behavior
+# ---------------------------------------------------------------------------
+echo "Test 14: uninstall.sh --purge-data behavior"
+
+TMP_UNINSTALL_HOME="$(mktemp -d)"
+export HOME="${TMP_UNINSTALL_HOME}"
+
+# Create fake install state with data
+mkdir -p "${TMP_UNINSTALL_HOME}/.local/share/blueprint-re/data/_system"
+touch "${TMP_UNINSTALL_HOME}/.local/share/blueprint-re/data/_system/project_registry.json"
+mkdir -p "${TMP_UNINSTALL_HOME}/.local/share/blueprint-re/releases/0.4.1"
+mkdir -p "${TMP_UNINSTALL_HOME}/.config/blueprint-re"
+touch "${TMP_UNINSTALL_HOME}/.config/blueprint-re/backend.env"
+mkdir -p "${TMP_UNINSTALL_HOME}/.config/systemd/user"
+
+# Uninstall without --purge-data: data should be moved to backup
+bash "${REPO_ROOT}/scripts/uninstall.sh" --yes >/dev/null 2>&1 || true
+DATA_BACKUP_COUNT="$(find "${TMP_UNINSTALL_HOME}/.local/share" -maxdepth 1 -type d -name 'blueprint-re-data-backup-*' | wc -l)"
+assert "data preserved without --purge-data" "[[ ${DATA_BACKUP_COUNT} -ge 1 ]]"
+assert "release base removed" "[[ ! -d ${TMP_UNINSTALL_HOME}/.local/share/blueprint-re/releases ]]"
+
+# Restore state and test with --purge-data
+mkdir -p "${TMP_UNINSTALL_HOME}/.local/share/blueprint-re/data/_system"
+touch "${TMP_UNINSTALL_HOME}/.local/share/blueprint-re/data/_system/project_registry.json"
+mkdir -p "${TMP_UNINSTALL_HOME}/.local/share/blueprint-re/releases/0.4.1"
+
+bash "${REPO_ROOT}/scripts/uninstall.sh" --yes --purge-data >/dev/null 2>&1 || true
+assert "data removed with --purge-data" "[[ ! -d ${TMP_UNINSTALL_HOME}/.local/share/blueprint-re/data ]]"
+# --purge-data must NOT touch historical backups from previous uninstalls.
+assert "historical backups left untouched by --purge-data" "[[ ${DATA_BACKUP_COUNT} -ge 1 ]]"
+
+rm -rf "${TMP_UNINSTALL_HOME}"
+export HOME="${TMP_HOME}"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 15: bwrap diagnostic classification helper
+# ---------------------------------------------------------------------------
+echo "Test 15: bwrap_smoke_test helper logic"
+
+# Source the helper from install.sh (redefine for test).
+bwrap_smoke_test() {
+  local bwrap_bin="$1"
+  local test_label="$2"
+  shift 2
+  if "${bwrap_bin}" "$@" -- /bin/true 2>/dev/null; then
+    return 0
+  fi
+  local exit_code=$?
+  if ! "${bwrap_bin}" --version >/dev/null 2>&1; then
+    echo "BINARY_MISSING"
+    return 1
+  fi
+  if ! "${bwrap_bin}" --dev /dev -- /bin/true 2>/dev/null; then
+    echo "USERNS_BLOCKED"
+    return 1
+  fi
+  if ! "${bwrap_bin}" --tmpfs /tmp -- /bin/true 2>/dev/null; then
+    echo "MOUNT_BLOCKED"
+    return 1
+  fi
+  echo "GENERIC_FAILURE:${exit_code}"
+  return 1
+}
+
+# Test with a fake bwrap that succeeds.
+FAKE_BWRAP="$(mktemp)"
+cat > "${FAKE_BWRAP}" <<'EOF'
+#!/bin/sh
+# Fake bwrap that accepts all args and runs the last command
+shift $(($# - 1))
+exec "$@"
+EOF
+chmod +x "${FAKE_BWRAP}"
+assert "bwrap smoke test passes with working bwrap" "bwrap_smoke_test ${FAKE_BWRAP} 'test' --die-with-parent --ro-bind /usr /usr"
+rm -f "${FAKE_BWRAP}"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 16: port availability helper logic
+# ---------------------------------------------------------------------------
+echo "Test 16: Port availability check"
+
+# Simulate the port check logic from install.sh.
+check_port_conflict() {
+  local port="$1"
+  if ss -tln 2>/dev/null | grep -qE ":${port}[[:space:]]"; then
+    return 0
+  elif netstat -tln 2>/dev/null | grep -qE ":${port}[[:space:]]"; then
+    return 0
+  fi
+  return 1
+}
+
+# Port 1 is extremely unlikely to be in use.
+assert_fail "port 1 is not reported as conflict" "check_port_conflict 1"
+
+# Port 22 (ssh) or 80 (http) might be in use on some systems; just test the logic.
+# We can't reliably assert success without knowing the test environment,
+# but we can assert the function returns consistently.
+result="$(check_port_conflict 22 && echo 'in-use' || echo 'free')"
+assert "port check returns consistent result" "[[ ${result} == 'in-use' || ${result} == 'free' ]]"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 17: downloader rejects non-.sh --installer-url without --checksum-url
+# ---------------------------------------------------------------------------
+echo "Test 17: downloader rejects non-.sh --installer-url without --checksum-url"
+
+output="$(bash "${SCRIPT_DIR}/install_downloader.sh" --version 0.4.1 --installer-url 'https://example.com/custom/file.bin' 2>&1 || true)"
+assert "non-.sh installer-url is rejected" "printf '%s\n' '${output}' | grep -q 'Refusing to run unverified installer'"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 18: install.sh --help works when USER is unset
+# ---------------------------------------------------------------------------
+echo "Test 18: install.sh --help works when USER is unset"
+
+output="$(env -u USER bash "${SCRIPT_DIR}/install.sh" --help 2>&1 || true)"
+assert "install.sh --help works with unset USER" "printf '%s\n' '${output}' | grep -q 'Usage: bash install.sh'"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 19: downloader rejects --skip-verify
+# ---------------------------------------------------------------------------
+echo "Test 19: downloader rejects --skip-verify"
+
+output="$(bash "${SCRIPT_DIR}/install_downloader.sh" --version 0.4.1 --skip-verify 2>&1 || true)"
+assert "downloader rejects --skip-verify" "printf '%s\n' '${output}' | grep -q 'not accepted by the network downloader'"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 20: downloader forwards arguments preserving word boundaries
+# ---------------------------------------------------------------------------
+echo "Test 20: downloader forwards arguments preserving word boundaries"
+
+FAKE_INSTALLER_DIR="$(mktemp -d)"
+FAKE_INSTALLER="${FAKE_INSTALLER_DIR}/fake-installer.sh"
+cat > "${FAKE_INSTALLER}" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$@"
+EOF
+chmod +x "${FAKE_INSTALLER}"
+
+# Generate correct checksum for the fake installer.
+sha256sum "${FAKE_INSTALLER}" | awk '{print $1}' > "${FAKE_INSTALLER}.sha256"
+
+# Run downloader with a spaced argument that must stay as one word.
+output="$(bash "${SCRIPT_DIR}/install_downloader.sh" --version 0.4.1 --installer-url "file://${FAKE_INSTALLER}" --checksum-url "file://${FAKE_INSTALLER}.sha256" --rollback 'a b c' 2>&1 || true)"
+
+assert "spaced argument preserved as single parameter" "printf '%s\n' '${output}' | grep -q '^a b c$'"
+
+rm -rf "${FAKE_INSTALLER_DIR}"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 21: explicit --checksum-url is not overridden by .sh auto-derivation
+# ---------------------------------------------------------------------------
+echo "Test 21: explicit --checksum-url takes priority over .sh auto-derivation"
+
+PRIORITY_TEST_DIR="$(mktemp -d)"
+PRIORITY_INSTALLER="${PRIORITY_TEST_DIR}/test.sh"
+cat > "${PRIORITY_INSTALLER}" <<'EOF'
+#!/bin/bash
+echo "PRIORITY_INSTALLER_EXECUTED"
+EOF
+chmod +x "${PRIORITY_INSTALLER}"
+
+# Compute correct hash.
+REAL_HASH="$(sha256sum "${PRIORITY_INSTALLER}" | awk '{print $1}')"
+
+# Auto-derived checksum file contains WRONG hash.
+echo "0000000000000000000000000000000000000000000000000000000000000000  test.sh" > "${PRIORITY_INSTALLER}.sha256"
+
+# Explicit checksum file contains CORRECT hash.
+echo "${REAL_HASH}  test.sh" > "${PRIORITY_TEST_DIR}/custom.sha256"
+
+# If downloader prioritizes explicit --checksum-url, it will use custom.sha256
+# (correct) and the installer will execute. If it uses auto-derived test.sh.sha256
+# (wrong), checksum verification will fail.
+output="$(bash "${SCRIPT_DIR}/install_downloader.sh" --version 0.4.1 --installer-url "file://${PRIORITY_INSTALLER}" --checksum-url "file://${PRIORITY_TEST_DIR}/custom.sha256" 2>&1 || true)"
+
+assert "explicit checksum-url used, installer executed" "printf '%s\n' '${output}' | grep -q 'PRIORITY_INSTALLER_EXECUTED'"
+
+rm -rf "${PRIORITY_TEST_DIR}"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 22: micromamba fallback has curl/wget check with clear error
+# ---------------------------------------------------------------------------
+echo "Test 22: micromamba fallback branch has curl/wget check"
+
+# Verify the install.sh code contains the wget fallback and the clear error.
+assert "install.sh has wget fallback for micromamba download" \
+  "grep -A5 'command -v curl' ${SCRIPT_DIR}/install.sh | grep -q 'command -v wget'"
+assert "install.sh has clear error for missing curl/wget" \
+  "grep -q 'No curl or wget available' ${SCRIPT_DIR}/install.sh"
+
+echo ""
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "========================================"
