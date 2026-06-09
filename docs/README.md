@@ -15,7 +15,15 @@
 
 ## 安装与部署
 
-用户安装优先使用 release 自解压安装器，而不是源码 checkout 部署：
+用户安装优先使用 release 固定入口 `install.sh`。它会自动解析并下载对应版本的自解压安装器，校验 checksum，然后执行：
+
+```bash
+curl -fsSL \
+  https://github.com/solarise94/RhineDataLab/releases/latest/download/install.sh | \
+  bash
+```
+
+也可以先手动下载版本化自解压安装器再执行：
 
 ```bash
 bash blueprint-re-<version>-linux-x86_64.sh

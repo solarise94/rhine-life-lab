@@ -40,13 +40,30 @@
 
 ## Preferred Path
 
-产品/用户安装优先使用 release 自解压安装器：
+产品/用户安装优先使用 release 固定入口 `install.sh`。它会自动下载并校验对应版本的自解压安装器，然后执行：
+
+```bash
+curl -fsSL \
+  https://github.com/solarise94/RhineDataLab/releases/latest/download/install.sh | \
+  bash
+```
+
+如果需要指定版本：
+
+```bash
+VERSION=0.4.2
+curl -fsSL \
+  "https://github.com/solarise94/RhineDataLab/releases/download/v${VERSION}/install.sh" | \
+  bash
+```
+
+也可以先手动下载版本化自解压安装器再执行：
 
 ```bash
 bash blueprint-re-<version>-linux-x86_64.sh
 ```
 
-如果需要网络引导安装器，使用 downloader：
+旧的 `scripts/install_downloader.sh` 仍可作为过渡方案使用，但不再是主要推荐入口：
 
 ```bash
 bash scripts/install_downloader.sh --channel stable

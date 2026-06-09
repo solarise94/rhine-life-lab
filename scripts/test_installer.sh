@@ -881,6 +881,180 @@ rm -rf "${CLEAR_TMP}"
 echo ""
 
 # ---------------------------------------------------------------------------
+# Test 28: render_release_downloader.sh produces valid install.sh
+# ---------------------------------------------------------------------------
+echo "Test 28: render_release_downloader.sh output"
+
+RENDER_TMP="$(mktemp -d)"
+RENDERED="${RENDER_TMP}/install.sh"
+
+bash "${REPO_ROOT}/scripts/render_release_downloader.sh" \
+  --version "0.4.2" \
+  --repo "solarise94/RhineDataLab" \
+  --artifact-prefix "blueprint-re" \
+  --arch "x86_64" \
+  --output "${RENDERED}" > /dev/null 2>&1
+
+assert "rendered install.sh exists" "[[ -f ${RENDERED} ]]"
+assert "rendered install.sh is executable" "[[ -x ${RENDERED} ]]"
+assert "install.sh contains hardcoded version" "grep -q 'RELEASE_VERSION=\"0.4.2\"' ${RENDERED}"
+assert "install.sh contains hardcoded repo" "grep -q 'RELEASE_REPO=\"solarise94/RhineDataLab\"' ${RENDERED}"
+assert "install.sh contains artifact URL" "grep -q 'https://github.com/solarise94/RhineDataLab/releases/download/v0.4.2/blueprint-re-0.4.2-linux-x86_64.sh' ${RENDERED}"
+assert "install.sh contains checksum URL" "grep -q 'https://github.com/solarise94/RhineDataLab/releases/download/v0.4.2/blueprint-re-0.4.2-linux-x86_64.sh.sha256' ${RENDERED}"
+
+rm -rf "${RENDER_TMP}"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 29: rendered install.sh --help works
+# ---------------------------------------------------------------------------
+echo "Test 29: rendered install.sh --help"
+
+RENDER_TMP2="$(mktemp -d)"
+RENDERED2="${RENDER_TMP2}/install.sh"
+
+bash "${REPO_ROOT}/scripts/render_release_downloader.sh" \
+  --version "0.4.2" \
+  --output "${RENDERED2}" > /dev/null 2>&1
+
+HELP_OUTPUT="$(bash "${RENDERED2}" --help 2>&1 || true)"
+assert "help mentions Forwarded flags" "echo '${HELP_OUTPUT}' | grep -q 'Forwarded flags'"
+assert "help mentions --keep-installer" "echo '${HELP_OUTPUT}' | grep -q 'keep-installer'"
+assert "help mentions --rollback" "echo '${HELP_OUTPUT}' | grep -q 'rollback'"
+
+rm -rf "${RENDER_TMP2}"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 30: build_self_extracting_installer.sh --artifact-prefix
+# ---------------------------------------------------------------------------
+echo "Test 30: build_self_extracting_installer.sh --artifact-prefix"
+
+PREFIX_TMP="$(mktemp -d)"
+mkdir -p "${PREFIX_TMP}/blueprint-re/wheels"
+echo "dummy" > "${PREFIX_TMP}/blueprint-re/wheels/dummy.whl"
+cat > "${PREFIX_TMP}/blueprint-re/release.json" <<'EOF'
+{
+  "version": "0.0.0-prefix",
+  "arch": "x86_64",
+  "platform": "linux"
+}
+EOF
+(
+  cd "${PREFIX_TMP}/blueprint-re" || exit 1
+  find . -type f | while IFS= read -r f; do
+    f="${f#./}"
+    [[ "$f" == "checksums.sha256" ]] && continue
+    sha256sum "$f"
+  done > checksums.sha256
+)
+(
+  cd "${PREFIX_TMP}" || exit 1
+  tar -czf blueprint-re-0.0.0-prefix-linux-x86_64.tar.gz blueprint-re
+)
+
+bash "${REPO_ROOT}/scripts/build_self_extracting_installer.sh" \
+  --artifact-prefix "rhinedatalab" \
+  --output-dir "${PREFIX_TMP}/dist" \
+  "${PREFIX_TMP}/blueprint-re-0.0.0-prefix-linux-x86_64.tar.gz" > /dev/null 2>&1
+
+PREFIX_INSTALLER="${PREFIX_TMP}/dist/rhinedatalab-0.0.0-prefix-linux-x86_64.sh"
+assert "custom prefix installer created" "[[ -f ${PREFIX_INSTALLER} ]]"
+assert "custom prefix checksum created" "[[ -f ${PREFIX_INSTALLER}.sha256 ]]"
+
+# Verify the payload is still extracted correctly (internal payload dir unchanged).
+EXTRACT_PREFIX="${PREFIX_TMP}/extracted"
+mkdir -p "${EXTRACT_PREFIX}"
+PAYLOAD_OFFSET_PREFIX=$(python3 -c "
+with open('${PREFIX_INSTALLER}', 'rb') as f:
+    data = f.read()
+marker = b'__PAYLOAD_START__\n'
+idx = data.find(marker)
+if idx < 0:
+    sys.exit(1)
+print(idx + len(marker) + 1)
+")
+(
+  cd "${EXTRACT_PREFIX}" || exit 1
+  tail -c +"${PAYLOAD_OFFSET_PREFIX}" "${PREFIX_INSTALLER}" | tar -xzf -
+)
+assert "custom prefix payload extracted" "[[ -d ${EXTRACT_PREFIX}/blueprint-re ]]"
+
+rm -rf "${PREFIX_TMP}"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 31: publish_release.sh --skip-upload asset preparation
+# ---------------------------------------------------------------------------
+echo "Test 31: publish_release.sh --skip-upload asset preparation"
+
+PUBLISH_TMP="$(mktemp -d)"
+
+# Create fake existing dist assets matching the current pyproject version.
+CURRENT_VERSION="$(python3 -c "
+import re
+text = open('${REPO_ROOT}/backend/pyproject.toml').read()
+m = re.search(r'^version\s*=\s*\"([^\"]+)\"', text, re.M)
+print(m.group(1) if m else '0.0.0')
+")"
+
+mkdir -p "${PUBLISH_TMP}/dist"
+# Build a minimal tarball and installer so --skip-build works with existing assets.
+mkdir -p "${PUBLISH_TMP}/stage/blueprint-re/wheels"
+echo "dummy" > "${PUBLISH_TMP}/stage/blueprint-re/wheels/dummy.whl"
+cat > "${PUBLISH_TMP}/stage/blueprint-re/release.json" <<EOF
+{
+  "version": "${CURRENT_VERSION}",
+  "arch": "x86_64",
+  "platform": "linux"
+}
+EOF
+(
+  cd "${PUBLISH_TMP}/stage/blueprint-re" || exit 1
+  find . -type f | while IFS= read -r f; do
+    f="${f#./}"
+    [[ "$f" == "checksums.sha256" ]] && continue
+    sha256sum "$f"
+  done > checksums.sha256
+)
+(
+  cd "${PUBLISH_TMP}/stage" || exit 1
+  tar -czf "blueprint-re-${CURRENT_VERSION}-linux-x86_64.tar.gz" blueprint-re
+)
+
+bash "${REPO_ROOT}/scripts/build_self_extracting_installer.sh" \
+  --artifact-prefix "blueprint-re" \
+  --output-dir "${PUBLISH_TMP}/dist" \
+  "${PUBLISH_TMP}/stage/blueprint-re-${CURRENT_VERSION}-linux-x86_64.tar.gz" > /dev/null 2>&1
+
+# The publish script also needs the tarball present in the asset directory.
+cp "${PUBLISH_TMP}/stage/blueprint-re-${CURRENT_VERSION}-linux-x86_64.tar.gz" \
+  "${PUBLISH_TMP}/dist/"
+
+# Run publish with --skip-upload.
+SKIP_UPLOAD_OUT="$(bash "${REPO_ROOT}/scripts/publish_release.sh" \
+  --version "${CURRENT_VERSION}" \
+  --repo "solarise94/RhineDataLab" \
+  --skip-build \
+  --skip-upload \
+  --output-dir "${PUBLISH_TMP}/dist" \
+  --notes-string "test release" 2>&1)"
+
+assert "skip-upload reports prepared assets" "echo '${SKIP_UPLOAD_OUT}' | grep -q 'skip-upload specified'"
+assert "install.sh generated" "[[ -f ${PUBLISH_TMP}/dist/install.sh ]]"
+assert "install.sh.sha256 generated" "[[ -f ${PUBLISH_TMP}/dist/install.sh.sha256 ]]"
+assert "versioned installer exists" "[[ -f ${PUBLISH_TMP}/dist/blueprint-re-${CURRENT_VERSION}-linux-x86_64.sh ]]"
+assert "versioned installer checksum exists" "[[ -f ${PUBLISH_TMP}/dist/blueprint-re-${CURRENT_VERSION}-linux-x86_64.sh.sha256 ]]"
+assert "tarball checksum exists" "[[ -f ${PUBLISH_TMP}/dist/blueprint-re-${CURRENT_VERSION}-linux-x86_64.tar.gz.sha256 ]]"
+
+rm -rf "${PUBLISH_TMP}"
+
+echo ""
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "========================================"

@@ -237,6 +237,10 @@ if [[ -z "${INSTALLER_PATH}" ]]; then
 fi
 [[ -f "${INSTALLER_PATH}" ]] || die "Installer not found: ${INSTALLER_PATH}"
 
+# Normalize to absolute path so podman volume mounts resolve correctly.
+INSTALLER_DIR="$(cd "$(dirname "${INSTALLER_PATH}")" && pwd)"
+INSTALLER_PATH="${INSTALLER_DIR}/$(basename "${INSTALLER_PATH}")"
+
 build_image_if_needed
 start_container
 wait_for_systemd
