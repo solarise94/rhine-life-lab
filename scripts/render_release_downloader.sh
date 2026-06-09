@@ -12,7 +12,7 @@ set -euo pipefail
 # Options:
 #   --version VERSION          Release version (required)
 #   --repo OWNER/NAME          GitHub repository path (default: solarise94/RhineDataLab)
-#   --artifact-prefix PREFIX   Installer filename prefix (default: blueprint-re)
+#   --artifact-prefix PREFIX   Installer filename prefix (default: rhinedatalab)
 #   --arch ARCH                Target architecture (default: x86_64)
 #   --output PATH              Output path (default: ./dist/install.sh)
 #   --template PATH            Template path (default: scripts/templates/install_downloader.template.sh)
@@ -23,7 +23,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 VERSION=""
 REPO="solarise94/RhineDataLab"
-ARTIFACT_PREFIX="blueprint-re"
+ARTIFACT_PREFIX="rhinedatalab"
 ARCH="x86_64"
 OUTPUT="${REPO_ROOT}/dist/install.sh"
 TEMPLATE="${REPO_ROOT}/scripts/templates/install_downloader.template.sh"

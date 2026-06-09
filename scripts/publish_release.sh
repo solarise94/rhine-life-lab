@@ -7,7 +7,6 @@ set -euo pipefail
 #   - validate version metadata
 #   - build release bundle tarball
 #   - build versioned self-extracting installer
-#   - optionally dual-publish RhineDataLab-branded installer
 #   - render public install.sh downloader
 #   - generate checksums
 #   - create or update GitHub Release
@@ -20,7 +19,6 @@ set -euo pipefail
 # Options:
 #   --version VERSION         Release version (required, e.g. 0.4.2)
 #   --repo OWNER/NAME         GitHub repository path (default: solarise94/RhineDataLab)
-#   --dual-brand              Also publish rhinedatalab-* named assets
 #   --skip-build              Skip bundle/installer build (use existing dist/)
 #   --skip-upload             Prepare assets locally but do not push to GitHub
 #   --draft                   Create release as draft
@@ -34,7 +32,6 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 VERSION=""
 REPO="solarise94/RhineDataLab"
-DUAL_BRAND=0
 SKIP_BUILD=0
 SKIP_UPLOAD=0
 DRAFT=""
@@ -106,10 +103,6 @@ while [[ $# -gt 0 ]]; do
       REPO="$2"
       shift 2
       ;;
-    --dual-brand)
-      DUAL_BRAND=1
-      shift
-      ;;
     --skip-build)
       SKIP_BUILD=1
       shift
@@ -179,9 +172,9 @@ if [[ "${SKIP_BUILD}" -eq 0 ]]; then
   info "Building release bundle..."
   bash "${REPO_ROOT}/scripts/build_release_bundle.sh" "${OUTPUT_DIR}"
 
-  info "Building self-extracting installer (blueprint-re)..."
+  info "Building self-extracting installer (rhinedatalab)..."
   bash "${REPO_ROOT}/scripts/build_self_extracting_installer.sh" \
-    --artifact-prefix "blueprint-re" \
+    --artifact-prefix "rhinedatalab" \
     --output-dir "${OUTPUT_DIR}"
 else
   info "Skipping build; using existing assets in ${OUTPUT_DIR}"
@@ -191,7 +184,7 @@ fi
 # Phase 2: Render public downloader
 # ---------------------------------------------------------------------------
 
-INSTALLER_NAME="blueprint-re-${VERSION}-linux-x86_64.sh"
+INSTALLER_NAME="rhinedatalab-${VERSION}-linux-x86_64.sh"
 INSTALLER_PATH="${OUTPUT_DIR}/${INSTALLER_NAME}"
 
 [[ -f "${INSTALLER_PATH}" ]] || die "Installer not found: ${INSTALLER_PATH}"
@@ -200,7 +193,7 @@ info "Rendering public downloader install.sh..."
 bash "${REPO_ROOT}/scripts/render_release_downloader.sh" \
   --version "${VERSION}" \
   --repo "${REPO}" \
-  --artifact-prefix "blueprint-re" \
+  --artifact-prefix "rhinedatalab" \
   --arch "x86_64" \
   --output "${OUTPUT_DIR}/install.sh"
 
@@ -208,31 +201,19 @@ DOWNLOADER_PATH="${OUTPUT_DIR}/install.sh"
 [[ -f "${DOWNLOADER_PATH}" ]] || die "Rendered downloader not found: ${DOWNLOADER_PATH}"
 
 # ---------------------------------------------------------------------------
-# Phase 3: Dual-brand copy if requested
-# ---------------------------------------------------------------------------
-
-if [[ "${DUAL_BRAND}" -eq 1 ]]; then
-  info "Creating RhineDataLab-branded installer copies..."
-  DUAL_NAME="rhinedatalab-${VERSION}-linux-x86_64.sh"
-  DUAL_PATH="${OUTPUT_DIR}/${DUAL_NAME}"
-  cp -a "${INSTALLER_PATH}" "${DUAL_PATH}"
-  write_checksum "${DUAL_PATH}"
-fi
-
-# ---------------------------------------------------------------------------
-# Phase 4: Generate checksums
+# Phase 3: Generate checksums
 # ---------------------------------------------------------------------------
 
 info "Generating checksums..."
 write_checksum "${INSTALLER_PATH}"
 write_checksum "${DOWNLOADER_PATH}"
 
-TARBALL_PATH="${OUTPUT_DIR}/blueprint-re-${VERSION}-linux-x86_64.tar.gz"
+TARBALL_PATH="${OUTPUT_DIR}/rhinedatalab-${VERSION}-linux-x86_64.tar.gz"
 [[ -f "${TARBALL_PATH}" ]] || die "Tarball not found: ${TARBALL_PATH}"
 write_checksum "${TARBALL_PATH}"
 
 # ---------------------------------------------------------------------------
-# Phase 5: Build asset list
+# Phase 4: Build asset list
 # ---------------------------------------------------------------------------
 
 ASSETS=(
@@ -243,13 +224,6 @@ ASSETS=(
   "${TARBALL_PATH}"
   "${TARBALL_PATH}.sha256"
 )
-
-if [[ "${DUAL_BRAND}" -eq 1 ]]; then
-  ASSETS+=(
-    "${DUAL_PATH}"
-    "${DUAL_PATH}.sha256"
-  )
-fi
 
 info "Release assets:"
 for a in "${ASSETS[@]}"; do
@@ -265,7 +239,7 @@ if [[ "${SKIP_UPLOAD}" -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Phase 6: Create or update GitHub Release
+# Phase 5: Create or update GitHub Release
 # ---------------------------------------------------------------------------
 
 require_cmd gh
@@ -300,7 +274,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Phase 7: Upload assets
+# Phase 6: Upload assets
 # ---------------------------------------------------------------------------
 
 info "Uploading assets..."
@@ -312,7 +286,7 @@ done
 info "Upload complete."
 
 # ---------------------------------------------------------------------------
-# Phase 8: Post-publish validation
+# Phase 7: Post-publish validation
 # ---------------------------------------------------------------------------
 
 info "Validating public URLs..."

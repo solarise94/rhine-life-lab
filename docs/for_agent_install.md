@@ -60,13 +60,7 @@ curl -fsSL \
 也可以先手动下载版本化自解压安装器再执行：
 
 ```bash
-bash blueprint-re-<version>-linux-x86_64.sh
-```
-
-旧的 `scripts/install_downloader.sh` 仍可作为过渡方案使用，但不再是主要推荐入口：
-
-```bash
-bash scripts/install_downloader.sh --channel stable
+bash rhinedatalab-<version>-linux-x86_64.sh
 ```
 
 release installer 的职责：

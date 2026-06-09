@@ -8,7 +8,7 @@ set -euo pipefail
 #   bash scripts/build_self_extracting_installer.sh [OPTIONS] [tarball-path]
 #
 # Options:
-#   --artifact-prefix PREFIX  Output filename prefix (default: blueprint-re)
+#   --artifact-prefix PREFIX  Output filename prefix (default: rhinedatalab)
 #   --output-dir DIR          Write installer to DIR (default: ./dist)
 #
 # If no tarball is provided, looks in ./dist/ for the most recent tarball.
@@ -17,7 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_DIR="${REPO_ROOT}/dist"
-ARTIFACT_PREFIX="blueprint-re"
+ARTIFACT_PREFIX="rhinedatalab"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -79,15 +79,20 @@ fi
 TARBALL="$(cd "$(dirname "${TARBALL}")" && pwd)/$(basename "${TARBALL}")"
 TARBALL_BASENAME="$(basename "${TARBALL}" .tar.gz)"
 
-# Extract version from tarball name: expects <prefix>-<version>-linux-<arch>
-# The payload tarball currently uses the blueprint-re prefix regardless of the
-# public installer filename.
+# Extract version from tarball name: expects <prefix>-<version>-linux-<arch>.
+# Public release tarballs now use the rhinedatalab prefix. Keep accepting the
+# legacy blueprint-re prefix so locally cached artifacts remain buildable.
 if [[ "${TARBALL_BASENAME}" =~ -linux-([^-]+)$ ]]; then
   ARCH="${BASH_REMATCH[1]}"
   # Remove the -linux-<arch> suffix to get <prefix>-<version>.
   REMAINING="${TARBALL_BASENAME%-linux-${ARCH}}"
-  # The tarball prefix is currently fixed to blueprint-re.
-  TARBALL_PREFIX="blueprint-re"
+  if [[ "${REMAINING}" == rhinedatalab-* ]]; then
+    TARBALL_PREFIX="rhinedatalab"
+  elif [[ "${REMAINING}" == blueprint-re-* ]]; then
+    TARBALL_PREFIX="blueprint-re"
+  else
+    die "Could not determine artifact prefix from tarball name: ${TARBALL_BASENAME}"
+  fi
   VERSION="${REMAINING#${TARBALL_PREFIX}-}"
 else
   die "Could not parse version/arch from tarball name: ${TARBALL_BASENAME}"

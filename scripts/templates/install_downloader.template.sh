@@ -77,6 +77,9 @@ while [[ $# -gt 0 ]]; do
         die "--rollback requires a version argument."
       fi
       ;;
+    --skip-verify)
+      die "--skip-verify is not accepted by the public downloader."
+      ;;
     --help|-h)
       sed -n '/^# RhineDataLab/,/^# Layer 2 installer./s/^# //p' "${BASH_SOURCE[0]}"
       exit 0

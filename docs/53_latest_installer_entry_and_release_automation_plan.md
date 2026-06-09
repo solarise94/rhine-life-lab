@@ -26,18 +26,11 @@ curl -fsSL \
 Target low-level artifact UX:
 
 ```bash
-bash blueprint-re-<version>-linux-x86_64.sh
+bash rhinedatalab-<version>-linux-x86_64.sh
 ```
 
 This document does not change the installer runtime model. It defines the
 release-distribution layer that makes the install path product-like.
-
-Important status note:
-
-- this document describes the target release protocol
-- the repository is still in the Phase 1 transition state
-- public docs should not claim `releases/latest/download/install.sh` as the
-  default product entrypoint until Phase 2/3 are actually implemented
 
 ## Why This Is Needed
 
@@ -46,11 +39,11 @@ The current user-mode installer plan already separates:
 - a small text-only downloader stub
 - a versioned self-extracting installer artifact
 
-That is the correct shape, but the public release interface is still not ideal
-for end users because it expects a versioned asset name such as:
+That is the correct shape, but the public release interface still needs a
+stable entrypoint and a clean public artifact name such as:
 
 ```text
-blueprint-re-0.4.1-linux-x86_64.sh
+rhinedatalab-0.4.1-linux-x86_64.sh
 ```
 
 This creates three problems:
@@ -75,8 +68,10 @@ Recommended public assets per release:
 ```text
 install.sh
 install.sh.sha256
-blueprint-re-<version>-linux-x86_64.sh
-blueprint-re-<version>-linux-x86_64.sh.sha256
+rhinedatalab-<version>-linux-x86_64.sh
+rhinedatalab-<version>-linux-x86_64.sh.sha256
+rhinedatalab-<version>-linux-x86_64.tar.gz
+rhinedatalab-<version>-linux-x86_64.tar.gz.sha256
 ```
 
 Optional future assets:
@@ -88,15 +83,14 @@ latest.json
 release-manifest.json
 ```
 
-The fixed-name `install.sh` asset is the end-user entrypoint. The
-versioned `blueprint-re-<version>-linux-x86_64.sh` artifact remains the real
+The fixed-name `install.sh` asset is the end-user entrypoint. The versioned
+`rhinedatalab-<version>-linux-x86_64.sh` artifact remains the real
 self-extracting installer bundle.
 
 ## Branding And Naming Transition
 
 The repository has moved to `RhineDataLab`. Future release conventions should
-align the public product surface with `莱茵数据实验室（RhineDataLab）` instead
-of keeping `blueprint-re` as the long-term user-facing brand.
+align the public product surface with `莱茵数据实验室（RhineDataLab）`.
 
 Branding targets for future tagged releases:
 
@@ -105,8 +99,7 @@ Branding targets for future tagged releases:
   `莱茵数据实验室（RhineDataLab）`
 - the web UI logo and visible product name should read
   `莱茵数据实验室（RhineDataLab）`
-- installer-facing artifact naming should gradually move away from
-  `blueprint-re-*`
+- installer-facing artifact naming should use `rhinedatalab-*`
 
 Recommended naming end state:
 
@@ -117,31 +110,9 @@ rhinedatalab-<version>-linux-x86_64.sh
 rhinedatalab-<version>-linux-x86_64.sh.sha256
 ```
 
-The fixed-name `install.sh` entrypoint remains stable across the rename. The
-main migration is the authoritative versioned installer filename and the
-visible product branding.
-
-### Compatibility Policy
-
-The rename should be treated as a release-contract migration, not a one-shot
-flag day.
-
-Recommended compatibility window:
-
-- keep `install.sh` stable throughout the rename
-- for one or two tagged releases, publish both:
-  - `blueprint-re-<version>-linux-x86_64.sh`
-  - `rhinedatalab-<version>-linux-x86_64.sh`
-- during that window, the two installer files should be byte-identical copies
-  of the same release artifact
-- each published filename should have its own matching `.sha256` file
-- the generated `install.sh` should prefer the `rhinedatalab-*` filename once
-  that name exists in the release
-- update README and release notes to prefer `RhineDataLab` naming
-- after the compatibility window, remove the old `blueprint-re-*` asset names
-
-This keeps rollback, mirrors, and existing scripts from breaking while the
-public product identity shifts to `莱茵数据实验室（RhineDataLab）`.
+The fixed-name `install.sh` entrypoint remains stable. The authoritative
+versioned installer filename and visible product branding should now both use
+`RhineDataLab`.
 
 ### Scope Of Rename
 
@@ -177,7 +148,7 @@ that should ever be piped into Bash.
 
 ### Layer 2: Versioned Installer Artifact
 
-`blueprint-re-<version>-linux-x86_64.sh` should remain the authoritative
+`rhinedatalab-<version>-linux-x86_64.sh` should remain the authoritative
 self-extracting installer.
 
 Responsibilities:
@@ -214,7 +185,7 @@ has to teach the user to interpolate:
 
 ```bash
 VERSION=0.4.1
-.../releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh
+.../releases/download/v${VERSION}/rhinedatalab-${VERSION}-linux-x86_64.sh
 ```
 
 That is acceptable for operators and CI. It is not ideal as the primary
@@ -235,8 +206,10 @@ For Linux x86_64, each tagged GitHub Release should contain:
 ```text
 install.sh
 install.sh.sha256
-blueprint-re-<version>-linux-x86_64.sh
-blueprint-re-<version>-linux-x86_64.sh.sha256
+rhinedatalab-<version>-linux-x86_64.sh
+rhinedatalab-<version>-linux-x86_64.sh.sha256
+rhinedatalab-<version>-linux-x86_64.tar.gz
+rhinedatalab-<version>-linux-x86_64.tar.gz.sha256
 ```
 
 Behavior contract:
@@ -244,7 +217,7 @@ Behavior contract:
 - `install.sh` is always text-only
 - `install.sh` always downloads a matching versioned installer from the same release
 - `install.sh.sha256` verifies only the downloader asset itself
-- `blueprint-re-<version>-linux-x86_64.sh.sha256` verifies the self-extracting installer
+- `rhinedatalab-<version>-linux-x86_64.sh.sha256` verifies the self-extracting installer
 - the downloader must fail closed when checksum verification fails
 - if `--keep-installer` is passed, the downloader should preserve the downloaded
   versioned installer locally for reuse, audit, or rollback workflows
@@ -395,12 +368,8 @@ Continue to produce the versioned payload tarball.
 Continue to produce:
 
 ```text
-blueprint-re-<version>-linux-x86_64.sh
+rhinedatalab-<version>-linux-x86_64.sh
 ```
-
-During the branding transition this script should support dual output or a
-configurable artifact prefix so release automation can publish both legacy and
-`RhineDataLab`-branded installer names during the compatibility window.
 
 ### `scripts/render_release_downloader.sh`
 
@@ -422,11 +391,10 @@ Responsibilities:
 - create GitHub Release assets
 - upload `install.sh`
 - upload `install.sh.sha256`
-- upload `blueprint-re-<version>-linux-x86_64.sh`
-- upload `blueprint-re-<version>-linux-x86_64.sh.sha256`
-- when dual-publishing is enabled, also upload:
-  - `rhinedatalab-<version>-linux-x86_64.sh`
-  - `rhinedatalab-<version>-linux-x86_64.sh.sha256`
+- upload `rhinedatalab-<version>-linux-x86_64.sh`
+- upload `rhinedatalab-<version>-linux-x86_64.sh.sha256`
+- upload `rhinedatalab-<version>-linux-x86_64.tar.gz`
+- upload `rhinedatalab-<version>-linux-x86_64.tar.gz.sha256`
 - validate uploaded assets
 
 ## Downloader Template Contract
@@ -456,9 +424,8 @@ Minimum checks:
 - `curl -fsSL https://github.com/.../releases/latest/download/install.sh` returns a script
 - `bash install.sh --help` succeeds
 - `install.sh.sha256` matches the uploaded `install.sh`
-- `blueprint-re-<version>-linux-x86_64.sh.sha256` matches the uploaded installer
-- if dual-publishing is enabled, `rhinedatalab-<version>-linux-x86_64.sh.sha256`
-  also matches the uploaded installer
+- `rhinedatalab-<version>-linux-x86_64.sh.sha256` matches the uploaded installer
+- `rhinedatalab-<version>-linux-x86_64.tar.gz.sha256` matches the uploaded tarball
 
 Recommended smoke checks:
 
@@ -511,10 +478,10 @@ local release cache, typically:
 ```
 
 If the target version is not already present locally, rollback must fail
-explicitly. During the transition period, the preferred operator guidance is to
-use any already downloaded installer or an explicit versioned installer URL to
-trigger rollback, rather than implying that a fresh machine can "roll back" to
-a version it has never installed.
+explicitly. The recommended operator guidance is to use any already downloaded
+installer or an explicit versioned installer URL to trigger rollback, rather
+than implying that a fresh machine can "roll back" to a version it has never
+installed.
 
 This keeps one user-facing mental model:
 
@@ -522,28 +489,15 @@ This keeps one user-facing mental model:
 - upgrade: run the installer entrypoint again
 - rollback: run the installer entrypoint with `--rollback`
 
-## Phased Rollout
+## Rollout
 
-### Phase 1
-
-- keep current versioned installer flow
-- document the target fixed-entrypoint model
-- do not promise `latest/download/install.sh` yet
-- README should continue to recommend the versioned self-extracting installer
-  as the stable product path
-- if `scripts/install_downloader.sh` is documented, it should be labeled as a
-  transitional convenience path rather than the final product entrypoint
-
-### Phase 2
-
-- add downloader rendering script
-- add release automation that uploads fixed-name assets
-- validate GitHub Release latest entrypoint
-
-### Phase 3
-
-- switch `README.md` to fixed latest entrypoint
-- demote versioned install commands to advanced usage
+- publish a new tagged release that includes `install.sh` and
+  `install.sh.sha256`
+- make that tagged release the first public release that documents
+  `latest/download/install.sh | bash`
+- stop publishing `blueprint-re-*` public installer assets
+- keep internal runtime paths and systemd unit names unchanged until a
+  separate migration is justified
 
 ## Open Questions
 

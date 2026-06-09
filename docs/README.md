@@ -26,7 +26,7 @@ curl -fsSL \
 也可以先手动下载版本化自解压安装器再执行：
 
 ```bash
-bash blueprint-re-<version>-linux-x86_64.sh
+bash rhinedatalab-<version>-linux-x86_64.sh
 ```
 
 当前用户版安装模型：

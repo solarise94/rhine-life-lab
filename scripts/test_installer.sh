@@ -219,11 +219,11 @@ EOF
 
 (
   cd "${TEST_BUILD_DIR}" || exit 1
-  tar -czf blueprint-re-0.0.0-test-linux-x86_64.tar.gz blueprint-re
+  tar -czf rhinedatalab-0.0.0-test-linux-x86_64.tar.gz blueprint-re
 )
-bash "${REPO_ROOT}/scripts/build_self_extracting_installer.sh" "${TEST_BUILD_DIR}/blueprint-re-0.0.0-test-linux-x86_64.tar.gz" > /dev/null 2>&1
+bash "${REPO_ROOT}/scripts/build_self_extracting_installer.sh" "${TEST_BUILD_DIR}/rhinedatalab-0.0.0-test-linux-x86_64.tar.gz" > /dev/null 2>&1
 
-INSTALLER_PATH="${REPO_ROOT}/dist/blueprint-re-0.0.0-test-linux-x86_64.sh"
+INSTALLER_PATH="${REPO_ROOT}/dist/rhinedatalab-0.0.0-test-linux-x86_64.sh"
 assert "installer artifact created" "[[ -f ${INSTALLER_PATH} ]]"
 assert "installer checksum file created" "[[ -f ${INSTALLER_PATH}.sha256 ]]"
 
@@ -891,7 +891,7 @@ RENDERED="${RENDER_TMP}/install.sh"
 bash "${REPO_ROOT}/scripts/render_release_downloader.sh" \
   --version "0.4.2" \
   --repo "solarise94/RhineDataLab" \
-  --artifact-prefix "blueprint-re" \
+  --artifact-prefix "rhinedatalab" \
   --arch "x86_64" \
   --output "${RENDERED}" > /dev/null 2>&1
 
@@ -899,8 +899,8 @@ assert "rendered install.sh exists" "[[ -f ${RENDERED} ]]"
 assert "rendered install.sh is executable" "[[ -x ${RENDERED} ]]"
 assert "install.sh contains hardcoded version" "grep -q 'RELEASE_VERSION=\"0.4.2\"' ${RENDERED}"
 assert "install.sh contains hardcoded repo" "grep -q 'RELEASE_REPO=\"solarise94/RhineDataLab\"' ${RENDERED}"
-assert "install.sh contains artifact URL" "grep -q 'https://github.com/solarise94/RhineDataLab/releases/download/v0.4.2/blueprint-re-0.4.2-linux-x86_64.sh' ${RENDERED}"
-assert "install.sh contains checksum URL" "grep -q 'https://github.com/solarise94/RhineDataLab/releases/download/v0.4.2/blueprint-re-0.4.2-linux-x86_64.sh.sha256' ${RENDERED}"
+assert "install.sh contains artifact URL" "grep -q 'https://github.com/solarise94/RhineDataLab/releases/download/v0.4.2/rhinedatalab-0.4.2-linux-x86_64.sh' ${RENDERED}"
+assert "install.sh contains checksum URL" "grep -q 'https://github.com/solarise94/RhineDataLab/releases/download/v0.4.2/rhinedatalab-0.4.2-linux-x86_64.sh.sha256' ${RENDERED}"
 
 rm -rf "${RENDER_TMP}"
 
@@ -922,6 +922,7 @@ HELP_OUTPUT="$(bash "${RENDERED2}" --help 2>&1 || true)"
 assert "help mentions Forwarded flags" "echo '${HELP_OUTPUT}' | grep -q 'Forwarded flags'"
 assert "help mentions --keep-installer" "echo '${HELP_OUTPUT}' | grep -q 'keep-installer'"
 assert "help mentions --rollback" "echo '${HELP_OUTPUT}' | grep -q 'rollback'"
+assert "public downloader rejects --skip-verify" "(bash '${RENDERED2}' --skip-verify 2>&1 || true) | grep -q 'not accepted by the public downloader'"
 
 rm -rf "${RENDER_TMP2}"
 
@@ -1022,16 +1023,16 @@ EOF
 )
 (
   cd "${PUBLISH_TMP}/stage" || exit 1
-  tar -czf "blueprint-re-${CURRENT_VERSION}-linux-x86_64.tar.gz" blueprint-re
+  tar -czf "rhinedatalab-${CURRENT_VERSION}-linux-x86_64.tar.gz" blueprint-re
 )
 
 bash "${REPO_ROOT}/scripts/build_self_extracting_installer.sh" \
-  --artifact-prefix "blueprint-re" \
+  --artifact-prefix "rhinedatalab" \
   --output-dir "${PUBLISH_TMP}/dist" \
-  "${PUBLISH_TMP}/stage/blueprint-re-${CURRENT_VERSION}-linux-x86_64.tar.gz" > /dev/null 2>&1
+  "${PUBLISH_TMP}/stage/rhinedatalab-${CURRENT_VERSION}-linux-x86_64.tar.gz" > /dev/null 2>&1
 
 # The publish script also needs the tarball present in the asset directory.
-cp "${PUBLISH_TMP}/stage/blueprint-re-${CURRENT_VERSION}-linux-x86_64.tar.gz" \
+cp "${PUBLISH_TMP}/stage/rhinedatalab-${CURRENT_VERSION}-linux-x86_64.tar.gz" \
   "${PUBLISH_TMP}/dist/"
 
 # Run publish with --skip-upload.
@@ -1046,9 +1047,9 @@ SKIP_UPLOAD_OUT="$(bash "${REPO_ROOT}/scripts/publish_release.sh" \
 assert "skip-upload reports prepared assets" "echo '${SKIP_UPLOAD_OUT}' | grep -q 'skip-upload specified'"
 assert "install.sh generated" "[[ -f ${PUBLISH_TMP}/dist/install.sh ]]"
 assert "install.sh.sha256 generated" "[[ -f ${PUBLISH_TMP}/dist/install.sh.sha256 ]]"
-assert "versioned installer exists" "[[ -f ${PUBLISH_TMP}/dist/blueprint-re-${CURRENT_VERSION}-linux-x86_64.sh ]]"
-assert "versioned installer checksum exists" "[[ -f ${PUBLISH_TMP}/dist/blueprint-re-${CURRENT_VERSION}-linux-x86_64.sh.sha256 ]]"
-assert "tarball checksum exists" "[[ -f ${PUBLISH_TMP}/dist/blueprint-re-${CURRENT_VERSION}-linux-x86_64.tar.gz.sha256 ]]"
+assert "versioned installer exists" "[[ -f ${PUBLISH_TMP}/dist/rhinedatalab-${CURRENT_VERSION}-linux-x86_64.sh ]]"
+assert "versioned installer checksum exists" "[[ -f ${PUBLISH_TMP}/dist/rhinedatalab-${CURRENT_VERSION}-linux-x86_64.sh.sha256 ]]"
+assert "tarball checksum exists" "[[ -f ${PUBLISH_TMP}/dist/rhinedatalab-${CURRENT_VERSION}-linux-x86_64.tar.gz.sha256 ]]"
 
 rm -rf "${PUBLISH_TMP}"
 

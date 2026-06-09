@@ -78,9 +78,9 @@ curl -fsSL \
 
 ```bash
 VERSION=0.4.1
-curl -fL -o "blueprint-re-${VERSION}-linux-x86_64.sh" \
-  "https://github.com/solarise94/RhineDataLab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh"
-bash "blueprint-re-${VERSION}-linux-x86_64.sh"
+curl -fL -o "rhinedatalab-${VERSION}-linux-x86_64.sh" \
+  "https://github.com/solarise94/RhineDataLab/releases/download/v${VERSION}/rhinedatalab-${VERSION}-linux-x86_64.sh"
+bash "rhinedatalab-${VERSION}-linux-x86_64.sh"
 ```
 
 安装器会把 release、runtime env、data 和 logs 放到用户目录：
