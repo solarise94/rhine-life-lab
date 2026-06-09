@@ -169,6 +169,7 @@ export_runtime_bin_env() {
   export BLUEPRINT_NPM_BIN="${ENV_NPM}"
   export BLUEPRINT_NGINX_BIN="${ENV_NGINX}"
   export BLUEPRINT_BWRAP_BIN="${ENV_BWRAP}"
+  export BLUEPRINT_GIT_BIN="${ENV_GIT}"
 }
 
 # Run deploy_release.sh with the current runtime binary env and optional flags.
@@ -190,6 +191,7 @@ run_deploy_for_release() {
   export BLUEPRINT_NPM_BIN="${ENV_DIR}/bin/npm"
   export BLUEPRINT_NGINX_BIN="${ENV_DIR}/bin/nginx"
   export BLUEPRINT_BWRAP_BIN="${ENV_DIR}/bin/bwrap"
+  export BLUEPRINT_GIT_BIN="${ENV_DIR}/bin/git"
   bash "${release_dir}/scripts/deploy_release.sh" "$@"
 }
 
@@ -477,7 +479,15 @@ fi
 
 info "Phase 5: Creating runtime environment at ${ENV_DIR}"
 
-mkdir -p "${ENV_DIR}"
+# Ensure the parent directory exists, but let micromamba/conda create the
+# prefix itself. Pre-creating the prefix as a plain directory causes
+# "Non-conda folder exists at prefix" in recent micromamba versions.
+mkdir -p "$(dirname "${ENV_DIR}")"
+
+# Guard against a stale non-conda directory at the target prefix.
+if [[ -d "${ENV_DIR}" && ! -d "${ENV_DIR}/conda-meta" ]]; then
+  die "Runtime prefix exists but is not a conda environment: ${ENV_DIR}. Remove it and retry."
+fi
 
 if [[ "${HAS_OFFLINE_CACHE}" -eq 1 ]]; then
   info "Creating environment from offline package cache..."
@@ -510,8 +520,9 @@ ENV_NODE="${ENV_DIR}/bin/node"
 ENV_NPM="${ENV_DIR}/bin/npm"
 ENV_NGINX="${ENV_DIR}/bin/nginx"
 ENV_BWRAP="${ENV_DIR}/bin/bwrap"
+ENV_GIT="${ENV_DIR}/bin/git"
 
-for bin_path in "${ENV_PYTHON}" "${ENV_NODE}" "${ENV_NPM}" "${ENV_NGINX}" "${ENV_BWRAP}"; do
+for bin_path in "${ENV_PYTHON}" "${ENV_NODE}" "${ENV_NPM}" "${ENV_NGINX}" "${ENV_BWRAP}" "${ENV_GIT}"; do
   if [[ ! -x "${bin_path}" ]]; then
     die "Expected binary missing after environment creation: ${bin_path}"
   fi
@@ -522,6 +533,7 @@ info "Node:    ${ENV_NODE} ($("${ENV_NODE}" -v))"
 info "npm:     ${ENV_NPM}"
 info "nginx:   ${ENV_NGINX}"
 info "bwrap:   ${ENV_BWRAP}"
+info "git:     ${ENV_GIT}"
 
 # ---------------------------------------------------------------------------
 # Phase 6b: bwrap host compatibility diagnostics

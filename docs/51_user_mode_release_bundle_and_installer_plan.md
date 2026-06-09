@@ -1212,7 +1212,10 @@ The installer must preserve these repository rules:
 - `BLUEPRINT_EXECUTOR_SANDBOX_MODE=bwrap` remains required
 - no silent fallback to unsandboxed execution
 - secrets stay out of logs
-- managed deploy still requires `BLUEPRINT_DEEPSEEK_API_KEY`
+- provider credentials are runtime requirements for provider-backed features,
+  not hard deploy gates; deploy should warn on absence and runtime should fail
+  only when no credential source is available at first provider use (see
+  `docs/51-1_release_installer_credential_gate_followup.md`)
 - `codex` remains manual-only in deploy defaults
 
 ### Security Hardening Backlog
@@ -1224,7 +1227,7 @@ productization, not as optional polish.
 | --- | --- | --- |
 | P0 | Generated env files contain secrets | Write `backend.env`, `manager-agent.env`, and other service env files with restrictive permissions; use `umask 077` and/or `chmod 600` after generation. |
 | P0 | Online micromamba bootstrap integrity | Do not use unauthenticated `curl | tar` for micromamba. Prefer a bundled micromamba binary covered by payload checksums, or download a pinned artifact and verify SHA-256/signature before execution. |
-| P1 | Uninstall data loss risk | `uninstall.sh` must clearly warn that `~/.local/share/blueprint-re/data/` contains persistent project state and should preserve data by default or require an explicit destructive flag. |
+| RESOLVED | Uninstall data loss risk | Already decided above in [Uninstall Model](docs/51_user_mode_release_bundle_and_installer_plan.md#uninstall-model): preserve `~/.local/share/blueprint-re/data/` by default, warn clearly, and require an explicit destructive flag such as `--purge-data` for deletion. |
 | P1 | Basic systemd service hardening | Add safe hardening directives where compatible, starting with `NoNewPrivileges=yes` and private temp/runtime isolation that does not break nginx, frontend, backend, or manager-agent. |
 | P1 | Migration hooks execute code | Migration hooks are release code and are protected by artifact checksums, but they still run with user privileges. Prefer a constrained migration contract; until then, log execution, pass explicit roots, and consider running hooks through the same `bwrap` productized sandbox. |
 | P2 | Legacy deploy secret rendering | Developer/source deploy scripts should be marked developer-only and gradually moved to the same env escaping and permission model as `deploy_release.sh`. |

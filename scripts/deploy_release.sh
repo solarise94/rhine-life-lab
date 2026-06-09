@@ -21,7 +21,7 @@ set -euo pipefail
 #   BLUEPRINT_NGINX_BIN       explicit nginx path (default: search PATH)
 #   BLUEPRINT_BWRAP_BIN       explicit bwrap path (default: search PATH)
 #   BLUEPRINT_EXECUTOR_CONDA_BASE  default: auto-detected
-#   BLUEPRINT_DEEPSEEK_API_KEY     required
+#   BLUEPRINT_DEEPSEEK_API_KEY     optional (runtime credential source)
 #
 # Usage:
 #   bash scripts/deploy_release.sh [--upgrade] [--allow-apt]
@@ -487,9 +487,10 @@ check_unknown_blueprint_env_keys
 
 mkdir -p "${APP_ENV_DIR}" "${SYSTEMD_USER_DIR}" "${DATA_ROOT}"
 
-# Fail fast if critical manager key is missing
+# Warn if critical manager key is missing; do not block deploy.
+# Runtime credential sources (user env, secrets manager, etc.) may provide it.
 if [[ -z "${BLUEPRINT_DEEPSEEK_API_KEY:-}" ]]; then
-  die "BLUEPRINT_DEEPSEEK_API_KEY is required for production deployment."
+  warn_deploy "BLUEPRINT_DEEPSEEK_API_KEY not set. Manager-agent will require runtime credentials to function."
 fi
 
 DEFAULT_EXTRA_RO_BINDS="${HOME}/.nvm,${HOME}/.local"
@@ -511,6 +512,44 @@ if [[ "${BLUEPRINT_EXECUTOR_SANDBOX_MODE:-bwrap}" != "bwrap" ]]; then
   warn_deploy "Overriding BLUEPRINT_EXECUTOR_SANDBOX_MODE=${BLUEPRINT_EXECUTOR_SANDBOX_MODE:-} to bwrap for release deployment"
 fi
 
+# ---------------------------------------------------------------------------
+# Upgrade credential retention
+# ---------------------------------------------------------------------------
+# During upgrade, preserve existing credential lines in generated env files
+# when the caller does not provide replacement values. This prevents an
+# upgrade launched without env vars from silently stripping working credentials.
+_preserve_credentials_from_backup() {
+  local new_file="$1"
+  local backup_file="$2"
+  shift 2
+  local key
+  for key in "$@"; do
+    if ! grep -q "^${key}=" "${new_file}" 2>/dev/null; then
+      grep "^${key}=" "${backup_file}" 2>/dev/null >> "${new_file}" || true
+    fi
+  done
+}
+
+BACKEND_ENV_BACKUP=""
+MANAGER_ENV_BACKUP=""
+
+_cleanup_env_backups() {
+  [[ -n "${BACKEND_ENV_BACKUP}" ]] && rm -f "${BACKEND_ENV_BACKUP}"
+  [[ -n "${MANAGER_ENV_BACKUP}" ]] && rm -f "${MANAGER_ENV_BACKUP}"
+}
+trap '_cleanup_env_backups' EXIT
+
+if [[ "${IS_UPGRADE}" -eq 1 ]]; then
+  if [[ -f "${APP_ENV_DIR}/backend.env" ]]; then
+    BACKEND_ENV_BACKUP="$(mktemp)"
+    cp "${APP_ENV_DIR}/backend.env" "${BACKEND_ENV_BACKUP}"
+  fi
+  if [[ -f "${APP_ENV_DIR}/manager-agent.env" ]]; then
+    MANAGER_ENV_BACKUP="$(mktemp)"
+    cp "${APP_ENV_DIR}/manager-agent.env" "${MANAGER_ENV_BACKUP}"
+  fi
+fi
+
 : > "${APP_ENV_DIR}/backend.env"
 write_env_line "${APP_ENV_DIR}/backend.env" PATH "${BUILD_PATH}"
 write_env_line "${APP_ENV_DIR}/backend.env" BACKEND_HOST "127.0.0.1"
@@ -524,7 +563,13 @@ write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_DATA_ROOT "${DATA_ROOT}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_DEFAULT_PYTHON_RUNTIME "${BLUEPRINT_DEFAULT_PYTHON_RUNTIME:-${DEFAULT_PYTHON_RUNTIME}}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_DEFAULT_R_RUNTIME "${BLUEPRINT_DEFAULT_R_RUNTIME:-${DEFAULT_R_RUNTIME}}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_EXECUTOR_CONDA_BASE "${BLUEPRINT_EXECUTOR_CONDA_BASE:-${CONDA_BASE}}"
-write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_DEEPSEEK_API_KEY "${BLUEPRINT_DEEPSEEK_API_KEY}"
+# Only write provider credentials when explicitly provided.
+# Setting to an empty string explicitly clears the old value on upgrade.
+if [[ -n "${BLUEPRINT_DEEPSEEK_API_KEY:-}" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_DEEPSEEK_API_KEY "${BLUEPRINT_DEEPSEEK_API_KEY}"
+elif [[ "${BLUEPRINT_DEEPSEEK_API_KEY+set}" == "set" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_DEEPSEEK_API_KEY ""
+fi
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_DEEPSEEK_API_BASE_URL "${BLUEPRINT_DEEPSEEK_API_BASE_URL:-https://api.deepseek.com/anthropic}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_PI_DEEPSEEK_BASE_URL "${BLUEPRINT_PI_DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_MANAGER_MODEL "${BLUEPRINT_MANAGER_MODEL:-deepseek-v4-pro}"
@@ -551,34 +596,64 @@ write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_WORKER_TIMEOUT_SECONDS "${
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_MANIFEST_REPAIR_TIMEOUT_SECONDS "${BLUEPRINT_MANIFEST_REPAIR_TIMEOUT_SECONDS:-180}"
 
 # Optional API keys and URLs: forward only if set so the backend uses its defaults.
+# Setting to an empty string explicitly clears the old value on upgrade.
 if [[ -n "${BLUEPRINT_ANTHROPIC_API_KEY:-}" ]]; then
   write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_ANTHROPIC_API_KEY "${BLUEPRINT_ANTHROPIC_API_KEY}"
+elif [[ "${BLUEPRINT_ANTHROPIC_API_KEY+set}" == "set" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_ANTHROPIC_API_KEY ""
 fi
 if [[ -n "${BLUEPRINT_ANTHROPIC_API_BASE_URL:-}" ]]; then
   write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_ANTHROPIC_API_BASE_URL "${BLUEPRINT_ANTHROPIC_API_BASE_URL}"
+elif [[ "${BLUEPRINT_ANTHROPIC_API_BASE_URL+set}" == "set" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_ANTHROPIC_API_BASE_URL ""
 fi
 if [[ -n "${BLUEPRINT_OPENAI_API_KEY:-}" ]]; then
   write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENAI_API_KEY "${BLUEPRINT_OPENAI_API_KEY}"
+elif [[ "${BLUEPRINT_OPENAI_API_KEY+set}" == "set" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENAI_API_KEY ""
 fi
 if [[ -n "${BLUEPRINT_OPENAI_API_BASE_URL:-}" ]]; then
   write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENAI_API_BASE_URL "${BLUEPRINT_OPENAI_API_BASE_URL}"
+elif [[ "${BLUEPRINT_OPENAI_API_BASE_URL+set}" == "set" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENAI_API_BASE_URL ""
 fi
 if [[ -n "${BLUEPRINT_OPENCODE_API_KEY:-}" ]]; then
   write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENCODE_API_KEY "${BLUEPRINT_OPENCODE_API_KEY}"
+elif [[ "${BLUEPRINT_OPENCODE_API_KEY+set}" == "set" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENCODE_API_KEY ""
 fi
 if [[ -n "${BLUEPRINT_OPENCODE_API_BASE_URL:-}" ]]; then
   write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENCODE_API_BASE_URL "${BLUEPRINT_OPENCODE_API_BASE_URL}"
+elif [[ "${BLUEPRINT_OPENCODE_API_BASE_URL+set}" == "set" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENCODE_API_BASE_URL ""
 fi
 if [[ -n "${BLUEPRINT_OPENCODE_API_PROTOCOL:-}" ]]; then
   write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENCODE_API_PROTOCOL "${BLUEPRINT_OPENCODE_API_PROTOCOL}"
+elif [[ "${BLUEPRINT_OPENCODE_API_PROTOCOL+set}" == "set" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_OPENCODE_API_PROTOCOL ""
 fi
 
 # Codex is manual-only: forward if present.
 if [[ -n "${BLUEPRINT_CODEX_COMMAND_JSON:-}" ]]; then
   write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_CODEX_COMMAND_JSON "${BLUEPRINT_CODEX_COMMAND_JSON}"
+elif [[ "${BLUEPRINT_CODEX_COMMAND_JSON+set}" == "set" ]]; then
+  write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_CODEX_COMMAND_JSON ""
 fi
 
 chmod 600 "${APP_ENV_DIR}/backend.env"
+
+# Restore credentials missing from the new file during upgrade.
+if [[ -n "${BACKEND_ENV_BACKUP}" ]]; then
+  _preserve_credentials_from_backup "${APP_ENV_DIR}/backend.env" "${BACKEND_ENV_BACKUP}" \
+    BLUEPRINT_DEEPSEEK_API_KEY \
+    BLUEPRINT_ANTHROPIC_API_KEY \
+    BLUEPRINT_OPENAI_API_KEY \
+    BLUEPRINT_OPENCODE_API_KEY \
+    BLUEPRINT_OPENCODE_API_BASE_URL \
+    BLUEPRINT_OPENCODE_API_PROTOCOL \
+    BLUEPRINT_CODEX_COMMAND_JSON
+  rm -f "${BACKEND_ENV_BACKUP}"
+fi
 
 : > "${APP_ENV_DIR}/manager-agent.env"
 write_env_line "${APP_ENV_DIR}/manager-agent.env" MANAGER_AGENT_HOST "127.0.0.1"
@@ -586,10 +661,20 @@ write_env_line "${APP_ENV_DIR}/manager-agent.env" MANAGER_AGENT_PORT "18002"
 write_env_line "${APP_ENV_DIR}/manager-agent.env" MANAGER_AGENT_PROVIDER "deepseek"
 write_env_line "${APP_ENV_DIR}/manager-agent.env" MANAGER_AGENT_MODEL "${BLUEPRINT_MANAGER_MODEL:-deepseek-v4-pro}"
 write_env_line "${APP_ENV_DIR}/manager-agent.env" MANAGER_AGENT_TIMEOUT_MS "600000"
-write_env_line "${APP_ENV_DIR}/manager-agent.env" BLUEPRINT_DEEPSEEK_API_KEY "${BLUEPRINT_DEEPSEEK_API_KEY}"
+# Only write provider credentials when explicitly provided.
+# Setting to an empty string explicitly clears the old value on upgrade.
+if [[ -n "${BLUEPRINT_DEEPSEEK_API_KEY:-}" ]]; then
+  write_env_line "${APP_ENV_DIR}/manager-agent.env" BLUEPRINT_DEEPSEEK_API_KEY "${BLUEPRINT_DEEPSEEK_API_KEY}"
+elif [[ "${BLUEPRINT_DEEPSEEK_API_KEY+set}" == "set" ]]; then
+  write_env_line "${APP_ENV_DIR}/manager-agent.env" BLUEPRINT_DEEPSEEK_API_KEY ""
+fi
 write_env_line "${APP_ENV_DIR}/manager-agent.env" BLUEPRINT_INTERNAL_TOOL_TOKEN "${INTERNAL_TOOL_TOKEN}"
 write_env_line "${APP_ENV_DIR}/manager-agent.env" MANAGER_WEBSEARCH_ENABLED "${MANAGER_WEBSEARCH_ENABLED:-}"
-write_env_line "${APP_ENV_DIR}/manager-agent.env" TAVILY_API_KEY "${TAVILY_API_KEY:-}"
+if [[ -n "${TAVILY_API_KEY:-}" ]]; then
+  write_env_line "${APP_ENV_DIR}/manager-agent.env" TAVILY_API_KEY "${TAVILY_API_KEY}"
+elif [[ "${TAVILY_API_KEY+set}" == "set" ]]; then
+  write_env_line "${APP_ENV_DIR}/manager-agent.env" TAVILY_API_KEY ""
+fi
 write_env_line "${APP_ENV_DIR}/manager-agent.env" TAVILY_BASE_URL "${TAVILY_BASE_URL:-https://api.tavily.com}"
 write_env_line "${APP_ENV_DIR}/manager-agent.env" MANAGER_CONTEXT_WINDOW_TOKENS "${MANAGER_CONTEXT_WINDOW_TOKENS:-1000000}"
 write_env_line "${APP_ENV_DIR}/manager-agent.env" MANAGER_COMPACTION_ENABLED "${MANAGER_COMPACTION_ENABLED:-true}"
@@ -597,6 +682,14 @@ write_env_line "${APP_ENV_DIR}/manager-agent.env" MANAGER_COMPACTION_KEEP_RECENT
 write_env_line "${APP_ENV_DIR}/manager-agent.env" MANAGER_COMPACTION_RESERVE_TOKENS "${MANAGER_COMPACTION_RESERVE_TOKENS:-16000}"
 
 chmod 600 "${APP_ENV_DIR}/manager-agent.env"
+
+# Restore credentials missing from the new file during upgrade.
+if [[ -n "${MANAGER_ENV_BACKUP}" ]]; then
+  _preserve_credentials_from_backup "${APP_ENV_DIR}/manager-agent.env" "${MANAGER_ENV_BACKUP}" \
+    BLUEPRINT_DEEPSEEK_API_KEY \
+    TAVILY_API_KEY
+  rm -f "${MANAGER_ENV_BACKUP}"
+fi
 
 : > "${APP_ENV_DIR}/frontend.env"
 write_env_line "${APP_ENV_DIR}/frontend.env" FRONTEND_HOST "127.0.0.1"

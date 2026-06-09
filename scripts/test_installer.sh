@@ -731,6 +731,155 @@ assert "install.sh has clear error for missing curl/wget" \
 echo ""
 
 # ---------------------------------------------------------------------------
+# Test 23: Phase 5 does not pre-create the conda prefix as a plain directory
+# ---------------------------------------------------------------------------
+echo "Test 23: Phase 5 env prefix creation logic"
+
+# The installer must not run 'mkdir -p "${ENV_DIR}"' before micromamba create,
+# because recent micromamba rejects a plain directory at the prefix.
+assert_fail "install.sh does not pre-create ENV_DIR directly" \
+  "grep -E 'mkdir -p[[:space:]]+\"\\\${ENV_DIR}\"' ${SCRIPT_DIR}/install.sh"
+assert "install.sh creates only the parent directory" \
+  "grep -q 'mkdir -p.*dirname.*ENV_DIR' ${SCRIPT_DIR}/install.sh"
+assert "install.sh guards against stale non-conda prefix" \
+  "grep -q 'conda-meta' ${SCRIPT_DIR}/install.sh"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 24: deploy_release.sh warns instead of dying on missing key
+# ---------------------------------------------------------------------------
+echo "Test 24: deploy_release.sh credential gate behavior"
+
+assert_fail "deploy_release.sh no longer has hard die on missing key" \
+  "grep -q 'BLUEPRINT_DEEPSEEK_API_KEY is required for production deployment' ${SCRIPT_DIR}/deploy_release.sh"
+assert "deploy_release.sh warns on missing key" \
+  "grep -q 'BLUEPRINT_DEEPSEEK_API_KEY not set' ${SCRIPT_DIR}/deploy_release.sh"
+assert "deploy_release.sh warns on missing key (warn_deploy)" \
+  "grep -q 'warn_deploy.*BLUEPRINT_DEEPSEEK_API_KEY not set' ${SCRIPT_DIR}/deploy_release.sh"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 25: conditional credential write in deploy_release.sh
+# ---------------------------------------------------------------------------
+echo "Test 25: conditional credential write in env files"
+
+assert "backend.env DEEPSEEK key is conditionally written" \
+  "grep -A2 'Only write provider credentials when explicitly provided' ${SCRIPT_DIR}/deploy_release.sh | grep -q 'BLUEPRINT_DEEPSEEK_API_KEY'"
+assert "manager-agent.env DEEPSEEK key is conditionally written" \
+  "grep -B2 -A2 'manager-agent.env.*BLUEPRINT_DEEPSEEK_API_KEY' ${SCRIPT_DIR}/deploy_release.sh | grep -q 'if.*-n.*BLUEPRINT_DEEPSEEK_API_KEY'"
+assert "manager-agent.env TAVILY key is conditionally written" \
+  "grep -B2 -A2 'TAVILY_API_KEY' ${SCRIPT_DIR}/deploy_release.sh | grep -q 'if.*-n.*TAVILY_API_KEY'"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 26: upgrade credential retention
+# ---------------------------------------------------------------------------
+echo "Test 26: upgrade credential retention"
+
+_preserve_credentials_from_backup() {
+  local new_file="$1"
+  local backup_file="$2"
+  shift 2
+  local key
+  for key in "$@"; do
+    if ! grep -q "^${key}=" "${new_file}" 2>/dev/null; then
+      grep "^${key}=" "${backup_file}" 2>/dev/null >> "${new_file}" || true
+    fi
+  done
+}
+
+RETENTION_TMP="$(mktemp -d)"
+NEW_FILE="${RETENTION_TMP}/new.env"
+BACKUP_FILE="${RETENTION_TMP}/old.env"
+
+cat > "${BACKUP_FILE}" <<'EOF'
+PATH=/some/path
+BLUEPRINT_DEEPSEEK_API_KEY=sk-old-key
+BLUEPRINT_ANTHROPIC_API_KEY=sk-old-anthropic
+EOF
+
+# New file has PATH but is missing credentials.
+cat > "${NEW_FILE}" <<'EOF'
+PATH=/new/path
+EOF
+
+_preserve_credentials_from_backup "${NEW_FILE}" "${BACKUP_FILE}" \
+  BLUEPRINT_DEEPSEEK_API_KEY \
+  BLUEPRINT_ANTHROPIC_API_KEY
+
+assert "retention preserves missing DEEPSEEK key" \
+  "grep -q 'BLUEPRINT_DEEPSEEK_API_KEY=sk-old-key' ${NEW_FILE}"
+assert "retention preserves missing ANTHROPIC key" \
+  "grep -q 'BLUEPRINT_ANTHROPIC_API_KEY=sk-old-anthropic' ${NEW_FILE}"
+assert "retention does not duplicate existing PATH" \
+  "[[ $(grep -c '^PATH=' ${NEW_FILE}) -eq 1 ]]"
+
+# If new file already has the key, old value should NOT be restored.
+NEW_FILE2="${RETENTION_TMP}/new2.env"
+cat > "${NEW_FILE2}" <<'EOF'
+PATH=/new/path
+BLUEPRINT_DEEPSEEK_API_KEY=sk-new-key
+EOF
+
+_preserve_credentials_from_backup "${NEW_FILE2}" "${BACKUP_FILE}" \
+  BLUEPRINT_DEEPSEEK_API_KEY
+
+assert "retention does not overwrite existing key" \
+  "grep -q 'BLUEPRINT_DEEPSEEK_API_KEY=sk-new-key' ${NEW_FILE2}"
+assert_fail "retention does not add old key when new key exists" \
+  "grep -q 'sk-old-key' ${NEW_FILE2}"
+
+rm -rf "${RETENTION_TMP}"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 27: explicit clear semantics (set-to-empty clears old value)
+# ---------------------------------------------------------------------------
+echo "Test 27: explicit clear semantics"
+
+# Simulate the credential write pattern used in deploy_release.sh:
+#   if [[ -n "${VAR:-}" ]]; then write value
+#   elif [[ "${VAR+set}" == "set" ]]; then write empty
+#   fi
+# When VAR is explicitly set to empty, the key is written as empty,
+# so _preserve_credentials_from_backup sees it as present and skips.
+
+CLEAR_TMP="$(mktemp -d)"
+NEW_CLEAR="${CLEAR_TMP}/new.env"
+OLD_CLEAR="${CLEAR_TMP}/old.env"
+
+cat > "${OLD_CLEAR}" <<'EOF'
+BLUEPRINT_DEEPSEEK_API_KEY=sk-old-key
+TAVILY_API_KEY=sk-old-tavily
+EOF
+
+# Simulate: variable is explicitly set to empty string.
+# In bash, [[ -n "" ]] is false, but [[ ""${VAR}+set"" == "set" ]] is true.
+# Write the empty key to the new file.
+cat > "${NEW_CLEAR}" <<'EOF'
+BLUEPRINT_DEEPSEEK_API_KEY=
+EOF
+
+_preserve_credentials_from_backup "${NEW_CLEAR}" "${OLD_CLEAR}" \
+  BLUEPRINT_DEEPSEEK_API_KEY \
+  TAVILY_API_KEY
+
+assert "explicit clear keeps empty value, does not restore old" \
+  "grep -q 'BLUEPRINT_DEEPSEEK_API_KEY=$' ${NEW_CLEAR}"
+assert_fail "explicit clear does not restore old DEEPSEEK value" \
+  "grep -q 'sk-old-key' ${NEW_CLEAR}"
+assert "explicit clear restores missing TAVILY key" \
+  "grep -q 'TAVILY_API_KEY=sk-old-tavily' ${NEW_CLEAR}"
+
+rm -rf "${CLEAR_TMP}"
+
+echo ""
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "========================================"

@@ -154,8 +154,19 @@ echo "Wheel: $(basename "${WHEEL_FILE}")"
 
 # Download all Python dependencies into wheels/ so the installer can work
 # fully offline with --no-index --find-links.
+# Lock to cp313 / manylinux x86_64 so the wheel closure is ABI-compatible
+# with the runtime environment (python =3.13 in environment.yml), regardless
+# of the build host's Python version.
 echo "Downloading Python dependencies into wheels/..."
-python3 -m pip download --quiet -d "${BUNDLE_ROOT}/wheels" "${WHEEL_FILE}"
+python3 -m pip download --quiet \
+  --python-version 3.13 \
+  --implementation cp \
+  --abi cp313 \
+  --platform manylinux_2_17_x86_64 \
+  --platform manylinux2014_x86_64 \
+  --platform linux_x86_64 \
+  --only-binary :all: \
+  -d "${BUNDLE_ROOT}/wheels" "${WHEEL_FILE}"
 # Reject any non-wheel artifacts. The installer contract requires a full wheel
 # closure so that pip --no-index --find-links works without a build toolchain.
 NON_WHEEL_COUNT="$(find "${BUNDLE_ROOT}/wheels" -maxdepth 1 -type f ! -name '*.whl' | wc -l)"
@@ -282,7 +293,7 @@ name: blueprint-re-env
 channels:
   - conda-forge
 dependencies:
-  - python >=3.13
+  - python =3.13
   - nodejs >=22.19
   - nginx
   - bubblewrap
