@@ -251,9 +251,17 @@ fi
 
 TAG="v${VERSION}"
 RELEASE_EXISTS=0
+RELEASE_IMMUTABLE=0
 if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
   RELEASE_EXISTS=1
-  info "Release ${TAG} already exists. Will upload/overwrite assets."
+  if gh release view "${TAG}" --repo "${REPO}" --json isImmutable | grep -q '"isImmutable":true'; then
+    RELEASE_IMMUTABLE=1
+  fi
+  if [[ "${RELEASE_IMMUTABLE}" -eq 1 ]]; then
+    info "Release ${TAG} already exists and is immutable."
+  else
+    info "Release ${TAG} already exists. Will upload/overwrite assets."
+  fi
 else
   info "Creating GitHub Release ${TAG}..."
   NOTES_ARGS=()
@@ -266,6 +274,7 @@ else
   fi
   # shellcheck disable=SC2086
   gh release create "${TAG}" \
+    "${ASSETS[@]}" \
     --repo "${REPO}" \
     --title "${TAG}" \
     ${DRAFT} \
@@ -277,13 +286,19 @@ fi
 # Phase 6: Upload assets
 # ---------------------------------------------------------------------------
 
-info "Uploading assets..."
-for asset in "${ASSETS[@]}"; do
-  info "  -> $(basename "${asset}")"
-  gh release upload "${TAG}" "${asset}" --repo "${REPO}" --clobber
-done
+if [[ "${RELEASE_EXISTS}" -eq 1 ]]; then
+  if [[ "${RELEASE_IMMUTABLE}" -eq 1 ]]; then
+    die "Release ${TAG} is immutable and cannot accept new assets. Delete and recreate it, or publish a new version."
+  fi
 
-info "Upload complete."
+  info "Uploading assets..."
+  for asset in "${ASSETS[@]}"; do
+    info "  -> $(basename "${asset}")"
+    gh release upload "${TAG}" "${asset}" --repo "${REPO}" --clobber
+  done
+
+  info "Upload complete."
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 7: Post-publish validation
