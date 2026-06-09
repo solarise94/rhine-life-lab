@@ -203,9 +203,9 @@ BLUEPRINT_MANAGER_BACKEND=pi
 
 ## 升级
 
-重新执行 downloader 并指定新版 release 即可。安装器会检测已有安装、停止 user services、部署新 release、切换 `current` symlink，并保留 `~/.local/share/blueprint-re/data/` 中的项目数据。
+升级时，重新运行同一个 downloader 命令即可，只需要把版本号换成新版本。安装器会自动检测已有安装、停止 user services、部署新 release、切换 `current` symlink，并保留 `~/.local/share/blueprint-re/data/` 中的项目数据。
 
-如果需要升级到指定版本：
+例如升级到 `0.4.2`：
 
 ```bash
 VERSION=0.4.2
@@ -217,7 +217,7 @@ curl -fsSL \
   --checksum-url "https://github.com/solarise94/rhine-life-lab/releases/download/v${VERSION}/blueprint-re-${VERSION}-linux-x86_64.sh.sha256"
 ```
 
-回滚到已保留的旧版本：
+如果新版本有问题，可以用同一个 downloader 入口回滚到本机仍保留的旧版本：
 
 ```bash
 VERSION=0.4.2
