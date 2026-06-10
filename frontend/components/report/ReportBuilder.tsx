@@ -25,7 +25,7 @@ export function ReportBuilder({
       <div className="panel-header">
         <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <FileText size={16} style={{ color: "var(--green)" }} />
-          报告
+          报告导出
         </h3>
         <div className="proposal-actions">
           <span style={{ color: "var(--muted)", fontSize: 12 }}>{sections.length} 个章节</span>

@@ -1559,6 +1559,7 @@ button {
   align-items: center;
   gap: 12px;
   background: var(--panel-solid);
+  flex-wrap: wrap;
 }
 
 .panel-header h3 {
@@ -1567,11 +1568,17 @@ button {
   font-weight: 600;
   letter-spacing: -0.1px;
   color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .panel-header span {
   color: var(--muted);
   font-size: 12px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .panel-body {
@@ -4491,4 +4498,37 @@ button {
   white-space: normal;
   overflow-wrap: anywhere;
   text-align: center;
+}
+
+/* ─── Artifact management tabs ─── */
+.artifact-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 20px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.artifact-tab {
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  text-decoration: none;
+  transition: all 0.15s ease;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+}
+
+.artifact-tab:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.artifact-tab.active {
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
 }

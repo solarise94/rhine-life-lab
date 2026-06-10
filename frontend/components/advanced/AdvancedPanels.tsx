@@ -2,28 +2,19 @@
 
 import { GitCommit, ShieldAlert } from "lucide-react";
 import Editor from "@monaco-editor/react";
-import { PythonRuntime, RRuntime } from "@/lib/types";
 
 export function AdvancedPanels({
   graph,
   gitItems,
   readOnly = false,
-  pythonRuntimes = [],
-  rRuntimes = [],
   globalPythonRuntime,
   globalRRuntime,
-  onSelectGlobalPythonRuntime,
-  onSelectGlobalRRuntime,
 }: {
   graph: Record<string, unknown> | null;
   gitItems: Array<{ hash: string; date: string; subject: string }>;
   readOnly?: boolean;
-  pythonRuntimes?: PythonRuntime[];
-  rRuntimes?: RRuntime[];
   globalPythonRuntime?: string;
   globalRRuntime?: string;
-  onSelectGlobalPythonRuntime?: (runtime: string) => void;
-  onSelectGlobalRRuntime?: (runtime: string) => void;
 }) {
   const runtimeLabel = globalPythonRuntime && globalPythonRuntime !== "__system__" ? globalPythonRuntime : "系统默认";
   const rRuntimeLabel = globalRRuntime && globalRRuntime !== "__system__" ? globalRRuntime : "系统默认";
@@ -40,52 +31,11 @@ export function AdvancedPanels({
         <div className="meta-block">
           <h4>执行器运行时</h4>
           <div className="kv">
-            <label style={{ display: "grid", gap: 6 }}>
-              <span style={{ fontSize: 12, color: "var(--muted)" }}>全局 Python 运行时</span>
-              <select
-                value={globalPythonRuntime ?? "__system__"}
-                onChange={(event) => onSelectGlobalPythonRuntime?.(event.target.value)}
-                disabled={readOnly}
-                style={{
-                  fontSize: 13,
-                  padding: "8px 10px",
-                  borderRadius: 8,
-                  border: "1px solid var(--line)",
-                  background: "var(--panel)",
-                  color: "var(--text)",
-                }}
-              >
-                {pythonRuntimes.map((item) => (
-                  <option key={`${item.manager}:${item.name}`} value={item.name}>
-                    {item.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label style={{ display: "grid", gap: 6 }}>
-              <span style={{ fontSize: 12, color: "var(--muted)" }}>全局 R 运行时</span>
-              <select
-                value={globalRRuntime ?? "__system__"}
-                onChange={(event) => onSelectGlobalRRuntime?.(event.target.value)}
-                disabled={readOnly}
-                style={{
-                  fontSize: 13,
-                  padding: "8px 10px",
-                  borderRadius: 8,
-                  border: "1px solid var(--line)",
-                  background: "var(--panel)",
-                  color: "var(--text)",
-                }}
-              >
-                {rRuntimes.map((item) => (
-                  <option key={`${item.manager}:${item.name}`} value={item.name}>
-                    {item.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div className="meta-text">
+              当前项目运行时：Python {runtimeLabel} / R {rRuntimeLabel}
+            </div>
             <div className="muted" style={{ fontSize: 12 }}>
-              当前默认：Python {runtimeLabel} / R {rRuntimeLabel}。单张 card 仍可在执行前覆盖。
+              {readOnly ? "（只读模式）" : "修改请前往工作台设置。"}单张 card 仍可在执行前覆盖。
             </div>
           </div>
         </div>

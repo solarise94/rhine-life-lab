@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { AppProviders } from "@/components/providers/AppProviders";
 
 export const metadata: Metadata = {
-  title: "Blueprint RE v3",
+  title: "RhineDataLab",
   description: "Git-native bioinformatics analysis manager",
 };
 
