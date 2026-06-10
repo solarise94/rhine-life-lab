@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import dynamic from "next/dynamic";
+import Link from "next/link";
 
 import { ApiError, api, apiUrl } from "@/lib/api";
 import {
@@ -70,6 +71,14 @@ const SettingsPanels = dynamic(
 type View = "tasks" | "results" | "files" | "report" | "advanced" | "settings";
 const EMPTY_CARD_INTERACTION_ORDER: string[] = [];
 
+const PAGE_INTRO: Record<Exclude<View, "tasks">, string> = {
+  results: "查看和管理项目文件：数据资产、执行结果和报告导出。",
+  files: "查看和管理项目文件：数据资产、执行结果和报告导出。",
+  report: "查看和管理项目文件：数据资产、执行结果和报告导出。",
+  settings: "配置项目运行时偏好、API 供应商、角色绑定和诊断选项。",
+  advanced: "查看项目图结构、Git 历史、运行时诊断和卡片详情。",
+};
+
 function useMediaQuery(query: string) {
   const [matches, setMatches] = useState(() =>
     typeof window === "undefined" ? false : window.matchMedia(query).matches,
@@ -88,7 +97,7 @@ function useMediaQuery(query: string) {
 }
 
 function formatRuntime(runtime?: string) {
-  if (!runtime || runtime === "__system__") return "system";
+  if (!runtime || runtime === "__system__") return "系统默认";
   return runtime;
 }
 
@@ -787,17 +796,38 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           <ProjectHeader
             summary={snapshot.summary}
             title={
-              view === "results"
-                ? "Accepted and candidate results"
-                : view === "files"
-              ? "Uploads, data assets, and execution files"
-              : view === "report"
-              ? "Report assembly"
-              : view === "settings"
-              ? "Runtime, libraries, and API settings"
-                : "Graph and Git history"
+              view === "results" || view === "files" || view === "report"
+                ? "文件管理"
+                : view === "settings"
+                ? "工作台设置"
+                : "技术详情"
             }
           />
+        ) : null}
+        {view !== "tasks" ? (
+          <div className="page-intro">{PAGE_INTRO[view]}</div>
+        ) : null}
+        {view === "results" || view === "files" || view === "report" ? (
+          <div className="artifact-tabs">
+            <Link
+              href={`/projects/${projectId}/results`}
+              className={`artifact-tab ${view === "results" ? "active" : ""}`}
+            >
+              结果库
+            </Link>
+            <Link
+              href={`/projects/${projectId}/files`}
+              className={`artifact-tab ${view === "files" ? "active" : ""}`}
+            >
+              文件管理
+            </Link>
+            <Link
+              href={`/projects/${projectId}/report`}
+              className={`artifact-tab ${view === "report" ? "active" : ""}`}
+            >
+              报告导出
+            </Link>
+          </div>
         ) : null}
         {notice ? <div className="notice-panel notice-toast">{notice}</div> : null}
         {isMobileWorkspace ? <DependencyJobChip projectId={projectId} className="floating" /> : null}
@@ -813,21 +843,21 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 other={resultsQuery.data?.other ?? []}
               />
               <ResultsGrid
-                title="Accepted Results"
+                title="已接受结果"
                 items={resultsQuery.data?.accepted ?? []}
                 selectedAssetId={selectedAsset?.asset_id}
                 onSelect={(asset) => setSelectedAsset(projectId, asset.asset_id)}
                 onPreview={(asset) => handleOpenAssetPreview(asset.asset_id, "results")}
               />
               <ResultsGrid
-                title="Candidate Results"
+                title="候选结果"
                 items={resultsQuery.data?.candidate ?? []}
                 selectedAssetId={selectedAsset?.asset_id}
                 onSelect={(asset) => setSelectedAsset(projectId, asset.asset_id)}
                 onPreview={(asset) => handleOpenAssetPreview(asset.asset_id, "results")}
               />
               <ResultsGrid
-                title="Other Results"
+                title="其他结果"
                 items={resultsQuery.data?.other ?? []}
                 selectedAssetId={selectedAsset?.asset_id}
                 onSelect={(asset) => setSelectedAsset(projectId, asset.asset_id)}
@@ -868,20 +898,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 graph={advancedGraphQuery.data?.graph ?? null}
                 gitItems={advancedGitQuery.data?.items ?? []}
                 readOnly={autoLocked}
-                pythonRuntimes={environmentQuery.data?.python_runtimes ?? []}
-                rRuntimes={environmentQuery.data?.r_runtimes ?? []}
                 globalPythonRuntime={effectiveGlobalPythonRuntime}
                 globalRRuntime={effectiveGlobalRRuntime}
-                onSelectGlobalPythonRuntime={(runtime) => {
-                  if (autoLocked) return;
-                  setGlobalPythonRuntime(projectId, runtime);
-                  setNotice(projectId, `全局 Python runtime: ${formatRuntime(runtime)}。`);
-                }}
-                onSelectGlobalRRuntime={(runtime) => {
-                  if (autoLocked) return;
-                  setGlobalRRuntime(projectId, runtime);
-                  setNotice(projectId, `全局 R runtime: ${formatRuntime(runtime)}。`);
-                }}
               />
               {selectedCard ? (
                 <div className="card-detail-panel-shell">
@@ -978,7 +996,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     other={resultsQuery.data?.other ?? []}
                   />
                   <ResultsGrid
-                    title="Results"
+                    title="结果"
                     items={allResultAssets}
                     selectedAssetId={selectedAsset?.asset_id}
                     onSelect={(asset) => setSelectedAsset(projectId, asset.asset_id)}
@@ -1019,18 +1037,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     graph={advancedGraphQuery.data?.graph ?? null}
                     gitItems={advancedGitQuery.data?.items ?? []}
                     readOnly={autoLocked}
-                    pythonRuntimes={environmentQuery.data?.python_runtimes ?? []}
-                    rRuntimes={environmentQuery.data?.r_runtimes ?? []}
                     globalPythonRuntime={effectiveGlobalPythonRuntime}
                     globalRRuntime={effectiveGlobalRRuntime}
-                    onSelectGlobalPythonRuntime={(runtime) => {
-                      setGlobalPythonRuntime(projectId, runtime);
-                      setNotice(projectId, `全局 Python runtime: ${formatRuntime(runtime)}。`);
-                    }}
-                    onSelectGlobalRRuntime={(runtime) => {
-                      setGlobalRRuntime(projectId, runtime);
-                      setNotice(projectId, `全局 R runtime: ${formatRuntime(runtime)}。`);
-                    }}
                   />
                   {selectedCard ? (
                     <div className="card-detail-panel-shell">

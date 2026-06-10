@@ -24,7 +24,7 @@ set -euo pipefail
 #   BLUEPRINT_DEEPSEEK_API_KEY     optional (runtime credential source)
 #
 # Usage:
-#   bash scripts/deploy_release.sh [--upgrade] [--allow-apt]
+#   bash scripts/deploy_release.sh [--upgrade] [--services-stopped] [--allow-apt]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELEASE_ROOT="${BLUEPRINT_RELEASE_ROOT:-${HOME}/.local/share/blueprint-re/current}"
@@ -36,6 +36,7 @@ REQUIRED_PYTHON_VERSION="3.13.0"
 REQUIRED_NODE_VERSION="22.19.0"
 
 IS_UPGRADE=0
+SERVICES_STOPPED=0
 ALLOW_APT=0
 DEPLOY_WARNINGS=()
 
@@ -152,6 +153,9 @@ for arg in "$@"; do
   case "${arg}" in
     --upgrade)
       IS_UPGRADE=1
+      ;;
+    --services-stopped)
+      SERVICES_STOPPED=1
       ;;
     --allow-apt)
       ALLOW_APT=1
@@ -755,12 +759,16 @@ systemctl --user enable blueprint-re-frontend.service
 systemctl --user enable blueprint-re-nginx.service
 
 if [[ "${IS_UPGRADE}" -eq 1 ]]; then
-  echo "Upgrade mode: stopping services..."
-  systemctl --user stop blueprint-re-nginx.service || true
-  systemctl --user stop blueprint-re-frontend.service || true
-  systemctl --user stop blueprint-re-backend.service || true
-  systemctl --user stop blueprint-re-manager-agent.service || true
-  sleep 2
+  if [[ "${SERVICES_STOPPED}" -eq 1 ]]; then
+    echo "Upgrade mode: services already stopped by caller."
+  else
+    echo "Upgrade mode: stopping services..."
+    systemctl --user stop blueprint-re-nginx.service || true
+    systemctl --user stop blueprint-re-frontend.service || true
+    systemctl --user stop blueprint-re-backend.service || true
+    systemctl --user stop blueprint-re-manager-agent.service || true
+    sleep 2
+  fi
   echo "Starting services..."
   systemctl --user start blueprint-re-manager-agent.service
   systemctl --user start blueprint-re-backend.service

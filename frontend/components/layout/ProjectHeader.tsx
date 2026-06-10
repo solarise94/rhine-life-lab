@@ -41,7 +41,7 @@ export function ProjectHeader({ summary, title }: { summary: ProjectSummary; tit
             borderColor: summary.status === "active" ? "var(--green-border)" : "var(--gray-border)",
           }}
         >
-          {summary.status}
+          {summary.status === "active" ? "活跃" : summary.status}
         </span>
         <span className="pill" style={{ fontSize: 11 }}>
           v{summary.schema_version}

@@ -55,39 +55,46 @@ class ChatStreamRelay:
             pending_stream_payloads.clear()
             last_published_at = now
 
-        for payload in self._iter_stream_payloads(project_id, request):
-            message = self._apply_stream_payload(message, payload)
-            event_type = payload.get("type")
-            if event_type == "response":
-                saw_response = True
-            now = time.monotonic()
-            if self._is_immediate_stream_event(event_type):
-                flush_pending_stream_payloads(now)
-                stream_seq += 1
-                self.chat_session_service.publish_stream_event(
-                    project_id,
-                    session_id,
-                    message_id=message.id,
-                    event=payload,
-                    seq=stream_seq,
-                )
-                last_published_at = now
-            else:
-                pending_stream_payloads.append(payload)
-                if now - last_published_at >= STREAM_EVENT_PUBLISH_INTERVAL_SECONDS:
+        try:
+            for payload in self._iter_stream_payloads(project_id, request):
+                message = self._apply_stream_payload(message, payload)
+                event_type = payload.get("type")
+                if event_type == "response":
+                    saw_response = True
+                now = time.monotonic()
+                if self._is_immediate_stream_event(event_type):
                     flush_pending_stream_payloads(now)
-            if self._should_persist_stream_event(event_type, now, last_persisted_at):
-                self.chat_session_service.upsert_message(project_id, session_id, message)
-                last_persisted_at = now
-            if event_type == "error":
-                raise RuntimeError(str(payload.get("detail") or "Manager stream failed."))
-        flush_pending_stream_payloads(time.monotonic())
-        if message.state not in {"done", "error"}:
-            message = self.settle_stream_message(message, "done")
-        if not saw_response and not message.content.strip():
-            raise RuntimeError("Manager stream ended without a response.")
-        self.chat_session_service.upsert_message(project_id, session_id, message)
-        return ChatResponse(message=message.content, thinking=message.thinking, metadata={"token_usage": message.token_usage.model_dump() if message.token_usage else None})
+                    stream_seq += 1
+                    self.chat_session_service.publish_stream_event(
+                        project_id,
+                        session_id,
+                        message_id=message.id,
+                        event=payload,
+                        seq=stream_seq,
+                    )
+                    last_published_at = now
+                else:
+                    pending_stream_payloads.append(payload)
+                    if now - last_published_at >= STREAM_EVENT_PUBLISH_INTERVAL_SECONDS:
+                        flush_pending_stream_payloads(now)
+                if self._should_persist_stream_event(event_type, now, last_persisted_at):
+                    self.chat_session_service.upsert_message(project_id, session_id, message)
+                    last_persisted_at = now
+                if event_type == "error":
+                    raise RuntimeError(str(payload.get("detail") or "Manager stream failed."))
+            flush_pending_stream_payloads(time.monotonic())
+            if message.state not in {"done", "error"}:
+                message = self.settle_stream_message(message, "done")
+            if not saw_response and not message.content.strip():
+                raise RuntimeError("Manager stream ended without a response.")
+            self.chat_session_service.upsert_message(project_id, session_id, message)
+            return ChatResponse(message=message.content, thinking=message.thinking, metadata={"token_usage": message.token_usage.model_dump() if message.token_usage else None})
+        except Exception:
+            message = self.settle_stream_message(message, "error")
+            if not message.content:
+                message.content = "AUTO 处理意外中断。"
+            self.chat_session_service.upsert_message(project_id, session_id, message)
+            raise
 
     def settle_message(self, project_id: str, session_id: str, message_id: str, status: str) -> None:
         session = self.chat_session_service.get_session(project_id, session_id)

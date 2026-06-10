@@ -1559,6 +1559,7 @@ button {
   align-items: center;
   gap: 12px;
   background: var(--panel-solid);
+  flex-wrap: wrap;
 }
 
 .panel-header h3 {
@@ -1567,11 +1568,17 @@ button {
   font-weight: 600;
   letter-spacing: -0.1px;
   color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .panel-header span {
   color: var(--muted);
   font-size: 12px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .panel-body {
@@ -1585,60 +1592,45 @@ button {
   gap: 12px;
 }
 
-/* ─── Advanced view: two-stage flex height chain so CardDetailPanel can scroll internally ─── */
+/* ─── Advanced view: normal vertical scrolling page ─── */
 .advanced-content {
   display: flex;
   flex-direction: column;
-  min-height: 0;
-  max-height: calc(100vh - 120px);
-  overflow: hidden;
 }
 
 .advanced-content .desktop-content {
   display: flex;
   flex-direction: column;
-  min-height: 0;
   flex: 1 1 auto;
-  overflow: hidden;
 }
 
 .advanced-view {
   display: flex;
   flex-direction: column;
-  min-height: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
   gap: 12px;
 }
 
-.advanced-view > .panel:first-child {
-  flex: 0 0 auto;
-}
-
 .card-detail-panel-shell {
-  min-height: 0;
-  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
 }
 
 .card-detail-panel {
   flex: 1 1 auto;
-  min-height: 0;
-  max-height: 100%;
   overflow: hidden;
 }
 
 .card-detail-panel-body {
-  min-height: 0;
   overflow-y: auto;
   overscroll-behavior-y: contain;
 }
 
-.card-detail-panel-shell > .card-detail-panel {
-  flex: 1 1 auto;
-  min-height: 0;
+.page-intro {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  margin: -8px 0 4px;
+  padding: 0 2px;
 }
 
 .muted {
@@ -3817,6 +3809,12 @@ button {
 }
 
 /* ─── Results / Report grids ─── */
+.deck-container {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+}
+
 .overview-grid,
 .results-grid,
 .report-grid,
@@ -3827,6 +3825,124 @@ button {
 
 .overview-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.result-item {
+  min-height: 76px;
+}
+
+.result-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.result-icon-blue {
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.15);
+  color: var(--blue);
+}
+
+.result-icon-green {
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.15);
+  color: var(--green);
+}
+
+.result-icon-purple {
+  background: rgba(139, 92, 246, 0.08);
+  border: 1px solid rgba(139, 92, 246, 0.15);
+  color: var(--purple);
+}
+
+.result-icon-cyan {
+  background: rgba(6, 182, 212, 0.08);
+  border: 1px solid rgba(6, 182, 212, 0.15);
+  color: var(--cyan);
+}
+
+.result-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.result-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.result-summary {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.result-tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: auto;
+}
+
+.pill-success {
+  color: var(--green-dark);
+  border-color: var(--green-border);
+  background: var(--green-bg);
+}
+
+.report-deck {
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.report-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: var(--green-bg);
+  border: 1px solid var(--green-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--green);
+  flex-shrink: 0;
+}
+
+.report-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text);
+}
+
+.report-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.report-summary {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.report-assets {
+  font-size: 11px;
+  color: var(--cyan);
+}
+
+.report-actions {
+  margin-top: 6px;
 }
 
 .result-item,
@@ -4386,4 +4502,100 @@ button {
   white-space: normal;
   overflow-wrap: anywhere;
   text-align: center;
+}
+
+/* ─── Artifact management tabs ─── */
+.artifact-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 20px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.artifact-tab {
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  text-decoration: none;
+  transition: all 0.15s ease;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+}
+
+.artifact-tab:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.artifact-tab.active {
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+/* ─── SideNav compact runtime selector ─── */
+.nav-runtime-title {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  margin: 18px 8px 8px;
+  letter-spacing: 0.7px;
+  font-weight: 600;
+}
+
+.nav-runtime-section {
+  padding: 0 8px 10px;
+}
+
+.nav-runtime-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.nav-runtime-field {
+  display: grid;
+  gap: 4px;
+}
+
+.nav-runtime-field span {
+  font-size: 10px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.nav-runtime-field select {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-solid);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.nav-runtime-field select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background: var(--panel-2);
+}
+
+.nav-runtime-field select:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px var(--glow-blue);
+}
+
+@media (max-width: 1100px) {
+  .nav-runtime-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }

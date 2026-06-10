@@ -90,6 +90,7 @@ export function ProjectDashboard() {
   const [projectIdTouched, setProjectIdTouched] = useState(false);
   const [currentGoal, setCurrentGoal] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
+  const [createdProjectId, setCreatedProjectId] = useState<string | null>(null);
 
   // Data directory mount state
   const [mountExpanded, setMountExpanded] = useState(false);
@@ -121,6 +122,7 @@ export function ProjectDashboard() {
     setProjectIdTouched(false);
     setCurrentGoal("");
     setFormError(null);
+    setCreatedProjectId(null);
     setMountExpanded(false);
     setSelectedDataDirectory(null);
     setDataBrowserPath("");
@@ -208,12 +210,14 @@ export function ProjectDashboard() {
           }
         );
       } catch (err) {
-        // Mount failed but project was created; show warning and still navigate
-        setFormError(err instanceof Error ? `项目已创建，但挂载数据目录失败：${err.message}` : "项目已创建，但挂载数据目录失败。");
+        // Mount failed but project was created; close form and show recovery banner
+        const msg = err instanceof Error ? `项目已创建，但挂载数据目录失败：${err.message}` : "项目已创建，但挂载数据目录失败。";
+        const pid = response.project.project_id;
         await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
-        setTimeout(() => {
-          router.push(`/projects/${response.project.project_id}/tasks`);
-        }, 2000);
+        resetForm();
+        setIsCreating(false);
+        setFormError(msg);
+        setCreatedProjectId(pid);
         return;
       }
     }
@@ -241,8 +245,8 @@ export function ProjectDashboard() {
     <main className="projects-page">
       <section className="projects-header">
         <div>
-          <h1>Projects</h1>
-          <p>管理项目 workspace，打开后进入对应的 Sessions、Cards、文件和结果库。</p>
+          <h1>项目管理</h1>
+          <p>管理项目工作区，打开后进入对应的会话、卡片、文件和结果库。</p>
         </div>
         <div className="projects-header-actions">
           <button
@@ -251,6 +255,7 @@ export function ProjectDashboard() {
             onClick={() => {
               setIsCreating(true);
               setFormError(null);
+              setCreatedProjectId(null);
             }}
           >
             <Plus size={16} />
@@ -259,7 +264,32 @@ export function ProjectDashboard() {
         </div>
       </section>
 
-      {error ? <div className="notice-panel error">{error}</div> : null}
+      {createdProjectId ? (
+        <div className="notice-panel warning">
+          <div>{formError}</div>
+          <div className="project-form-actions" style={{ marginTop: 12 }}>
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => router.push(`/projects/${createdProjectId}/tasks`)}
+            >
+              进入项目
+            </button>
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => {
+                setCreatedProjectId(null);
+                setFormError(null);
+              }}
+            >
+              关闭
+            </button>
+          </div>
+        </div>
+      ) : error ? (
+        <div className="notice-panel error">{error}</div>
+      ) : null}
 
       {isCreating ? (
         <section className="panel project-create-panel">
@@ -282,12 +312,12 @@ export function ProjectDashboard() {
               <input
                 value={name}
                 onChange={(event) => handleNameChange(event.target.value)}
-                placeholder="RNA-seq Project"
+                placeholder="示例：RNA-seq 项目"
                 required
               />
             </label>
             <label>
-              <span>Project ID</span>
+              <span>项目标识符（Project ID）</span>
               <input
                 value={projectId}
                 onChange={(event) => {
@@ -363,23 +393,6 @@ export function ProjectDashboard() {
                         </option>
                       ))}
                     </select>
-                    {!selectedDataDirectory && selectedDataRoot && (
-                      <button
-                        type="button"
-                        className="btn secondary"
-                        onClick={() => {
-                          if (selectedDataRoot) {
-                            setSelectedDataDirectory({
-                              root_id: selectedDataRoot.root_id,
-                              path: dataBrowserPath,
-                            });
-                          }
-                        }}
-                        disabled={dataBrowserLoading}
-                      >
-                        使用当前目录
-                      </button>
-                    )}
                   </div>
 
                   <div className="directory-browser-breadcrumb">
@@ -423,7 +436,10 @@ export function ProjectDashboard() {
                       </button>
                     ) : null}
                     {!dataBrowserLoading && dataBrowserEntries.length === 0 && dataBrowserPath === "" ? (
-                      <div className="browser-empty">空目录</div>
+                      <div className="browser-empty">
+                        空目录
+                        <span className="muted-hint">当前目录为空，仍可作为挂载点。</span>
+                      </div>
                     ) : null}
                     {dataBrowserEntries.map((entry) => (
                       <button
@@ -444,6 +460,25 @@ export function ProjectDashboard() {
                       </button>
                     ))}
                   </div>
+                  {!selectedDataDirectory && selectedDataRoot && (
+                    <div className="directory-browser-toolbar" style={{ marginTop: 8 }}>
+                      <button
+                        type="button"
+                        className="btn secondary"
+                        onClick={() => {
+                          if (selectedDataRoot) {
+                            setSelectedDataDirectory({
+                              root_id: selectedDataRoot.root_id,
+                              path: dataBrowserPath,
+                            });
+                          }
+                        }}
+                        disabled={dataBrowserLoading}
+                      >
+                        使用当前目录
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

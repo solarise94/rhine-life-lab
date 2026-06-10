@@ -9,15 +9,15 @@ import { useProjectDataDirectoryExportHistory } from "@/lib/hooks";
 import { Asset, DataDirectoryMount, ExecutionFileEntry, ExportHistoryEntry, ProjectFiles, WorkspaceEntry } from "@/lib/types";
 
 const EXECUTION_CATEGORY_LABELS: Record<string, string> = {
-  task_packet: "Task Packet",
-  manifest: "Manifest",
-  dependency_issue: "Dependency Issue",
-  review_context: "Review Context",
-  reviewer_trace: "Reviewer Trace",
-  transcript: "Transcript",
-  agent_trace: "Agent Trace",
-  agent_output_timeline: "Agent Output Timeline",
-  generated_script: "Generated Script",
+  task_packet: "任务包",
+  manifest: "清单",
+  dependency_issue: "依赖问题",
+  review_context: "审核上下文",
+  reviewer_trace: "审核跟踪",
+  transcript: "对话记录",
+  agent_trace: "代理跟踪",
+  agent_output_timeline: "代理输出时间线",
+  generated_script: "生成脚本",
 };
 
 function formatBytes(size: number) {
@@ -29,6 +29,17 @@ function formatBytes(size: number) {
 function formatTime(timestamp: number) {
   return new Date(timestamp * 1000).toLocaleString();
 }
+
+const ASSET_STATUS_LABELS: Record<string, string> = {
+  accepted: "已接受",
+  rejected: "已拒绝",
+  stale: "已过时",
+  superseded: "已替代",
+  archived: "已归档",
+  missing: "缺失",
+  active: "活跃",
+  candidate: "候选",
+};
 
 function fallbackActiveAssets(items: Asset[]) {
   return items.filter((asset) => !["stale", "superseded", "rejected", "archived", "missing"].includes(asset.status));
@@ -105,16 +116,16 @@ export function FilesPanel({
     <div className="stack">
       <section className="panel">
         <div className="panel-header">
-          <h3>Files Workspace</h3>
+          <h3>文件管理</h3>
           <span>
-            {(files?.data_assets.length ?? 0) + (files?.session_uploads.length ?? 0)} tracked files
+            {(files?.data_assets.length ?? 0) + (files?.session_uploads.length ?? 0)} 个跟踪文件
           </span>
         </div>
         <div className="panel-body stack">
           <div className="files-toolbar">
             <div className="files-toolbar-copy">
               <strong>上传到当前项目</strong>
-              <span>上传的文件会进入 session uploads，并可直接加入 Manager 对话上下文。</span>
+              <span>上传的文件会进入会话上传，并可直接加入 Manager 对话上下文。</span>
             </div>
             <div className="proposal-actions" style={{ marginTop: 0 }}>
               <input ref={fileInputRef} type="file" hidden onChange={handleFileChange} />
@@ -135,15 +146,15 @@ export function FilesPanel({
           {clientError ? <div className="notice-panel error">{clientError}</div> : null}
           <div className="files-summary-grid">
             <div className="files-summary-card">
-              <span>Data Assets</span>
+              <span>数据资产</span>
               <strong>{files?.data_assets.length ?? 0}</strong>
             </div>
             <div className="files-summary-card">
-              <span>Session Uploads</span>
+              <span>会话上传</span>
               <strong>{files?.session_uploads.length ?? 0}</strong>
             </div>
             <div className="files-summary-card">
-              <span>Execution Files</span>
+              <span>执行文件</span>
               <strong>{files?.execution_files.length ?? 0}</strong>
             </div>
           </div>
@@ -177,7 +188,7 @@ export function FilesPanel({
         deletingAssetId={deleteAssetMutation.isPending ? deleteAssetMutation.variables : undefined}
       />
       <AssetSection
-        title="Session Uploads"
+        title="会话上传"
         description="通过聊天或文件管理上传的临时文件。仍然作为资产跟踪，但默认单独归组。"
         items={files?.session_uploads ?? []}
         projectId={projectId}
@@ -208,7 +219,7 @@ function ExportHistorySection({ projectId }: { projectId: string }) {
     <section className="panel">
       <div className="panel-header">
         <h3>导出历史</h3>
-        <span>{items.length} records</span>
+        <span>{items.length} 条记录</span>
       </div>
       <div className="panel-body stack">
         <button type="button" className="btn secondary" onClick={handleToggle}>
@@ -340,6 +351,10 @@ function DataDirectorySection({ projectId, onRefresh, readOnly = false }: { proj
           <div className="muted" style={{ fontSize: 13 }}>
             此项目没有挂载数据目录。在项目设置中可以挂载一个已有的服务器数据目录，用于输入数据和结果导出。
           </div>
+          <a href={`/projects/${projectId}/settings`} className="btn secondary" style={{ display: "inline-flex", alignSelf: "flex-start" }}>
+            <Link2 size={14} />
+            前往工作台设置挂载数据目录
+          </a>
         </div>
       </section>
     );
@@ -356,21 +371,6 @@ function DataDirectorySection({ projectId, onRefresh, readOnly = false }: { proj
         <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Database size={14} style={{ marginRight: 4 }} />
           {mountLabel} — {isAvailable ? `${entries.length} entries` : "不可用"}
-          <button
-            type="button"
-            className="btn danger"
-            style={{ padding: "2px 8px", fontSize: 12 }}
-            onClick={() => {
-              if (window.confirm("解除挂载将移除数据目录关联，但不会删除服务器上的目录。data_mount/ 资产将标记为不可用。确认解除挂载？")) {
-                detachMutation.mutate();
-              }
-            }}
-            disabled={readOnly || detachMutation.isPending}
-            title="解除数据目录挂载"
-          >
-            {detachMutation.isPending ? <Loader2 size={12} className="spinning" /> : <Unlink size={12} />}
-            解除挂载
-          </button>
         </span>
       </div>
       <div className="panel-body stack">
@@ -387,6 +387,22 @@ function DataDirectorySection({ projectId, onRefresh, readOnly = false }: { proj
         {detachError ? <div className="notice-panel error">{detachError}</div> : null}
         {registerError ? <div className="notice-panel error">{registerError}</div> : null}
         {registerSuccess ? <div className="notice-panel success">{registerSuccess}</div> : null}
+        <div className="proposal-actions" style={{ justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            className="btn danger"
+            onClick={() => {
+              if (window.confirm("解除挂载将移除数据目录关联，但不会删除服务器上的目录。data_mount/ 资产将标记为不可用。确认解除挂载？")) {
+                detachMutation.mutate();
+              }
+            }}
+            disabled={readOnly || detachMutation.isPending}
+            title="解除数据目录挂载"
+          >
+            {detachMutation.isPending ? <Loader2 size={14} className="spinning" /> : <Unlink size={14} />}
+            解除挂载
+          </button>
+        </div>
         {isAvailable ? (
           <>
             <div className="directory-browser-breadcrumb" style={{ padding: 0, border: 0 }}>
@@ -420,20 +436,29 @@ function DataDirectorySection({ projectId, onRefresh, readOnly = false }: { proj
           ) : null}
           {entries.map((entry) => (
             <div key={entry.name} className="browser-entry" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button
-                type="button"
-                className="browser-entry"
-                style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, padding: 0, border: 0, background: "transparent" }}
-                onClick={() => {
-                  if (entry.kind === "directory") {
+              {entry.kind === "directory" ? (
+                <button
+                  type="button"
+                  className="browser-entry"
+                  style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, padding: 0, border: 0, background: "transparent" }}
+                  onClick={() => {
                     setCurrentPath(currentPath ? `${currentPath}/${entry.name}` : entry.name);
-                  }
-                }}
-              >
-                {entry.kind === "directory" ? <Folder size={16} /> : <FileText size={16} />}
-                <span className="entry-name">{entry.name}</span>
-                {entry.size_bytes != null ? <span className="entry-badge">{formatBytes(entry.size_bytes)}</span> : null}
-              </button>
+                  }}
+                >
+                  <Folder size={16} />
+                  <span className="entry-name">{entry.name}</span>
+                  {entry.size_bytes != null ? <span className="entry-badge">{formatBytes(entry.size_bytes)}</span> : null}
+                </button>
+              ) : (
+                <div
+                  className="browser-entry"
+                  style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, padding: 0, border: 0, background: "transparent" }}
+                >
+                  <FileText size={16} />
+                  <span className="entry-name">{entry.name}</span>
+                  {entry.size_bytes != null ? <span className="entry-badge">{formatBytes(entry.size_bytes)}</span> : null}
+                </div>
+              )}
               {entry.kind === "file" ? (
                 <button
                   type="button"
@@ -511,7 +536,7 @@ function AssetSection({
                 <div className="muted files-path">{asset.path}</div>
                 <div style={{ fontSize: 13, lineHeight: 1.6 }}>{asset.summary}</div>
                 <div className="files-asset-tags">
-                  <span className="pill">{asset.status}</span>
+                  <span className="pill">{ASSET_STATUS_LABELS[asset.status] ?? asset.status}</span>
                   {asset.created_by_run ? <span className="pill">run {asset.created_by_run}</span> : null}
                 </div>
                 <div className="proposal-actions">
@@ -554,7 +579,7 @@ function ExecutionFilesSection({ projectId, items }: { projectId: string; items:
   return (
     <section className="panel">
       <div className="panel-header">
-        <h3>Execution Files</h3>
+        <h3>执行文件</h3>
         <span>{items.length}</span>
       </div>
       <div className="panel-body stack">

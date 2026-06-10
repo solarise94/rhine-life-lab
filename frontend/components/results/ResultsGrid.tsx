@@ -3,11 +3,11 @@
 import { FileText, Image, Table, FileCode } from "lucide-react";
 import { Asset } from "@/lib/types";
 
-const TYPE_ICON_BG: Record<string, { bg: string; border: string; color: string }> = {
-  image: { bg: "rgba(59,130,246,0.08)", border: "rgba(59,130,246,0.15)", color: "var(--blue)" },
-  table: { bg: "rgba(34,197,94,0.08)", border: "rgba(34,197,94,0.15)", color: "var(--green)" },
-  markdown: { bg: "rgba(139,92,246,0.08)", border: "rgba(139,92,246,0.15)", color: "var(--purple)" },
-  text: { bg: "rgba(6,182,212,0.08)", border: "rgba(6,182,212,0.15)", color: "var(--cyan)" },
+const TYPE_ICON_CLASS: Record<string, string> = {
+  image: "result-icon-blue",
+  table: "result-icon-green",
+  markdown: "result-icon-purple",
+  text: "result-icon-cyan",
 };
 
 const TYPE_ICONS: Record<string, React.ReactNode> = {
@@ -15,6 +15,17 @@ const TYPE_ICONS: Record<string, React.ReactNode> = {
   table: <Table size={14} />,
   markdown: <FileText size={14} />,
   text: <FileCode size={14} />,
+};
+
+const ASSET_STATUS_LABELS: Record<string, string> = {
+  accepted: "已接受",
+  rejected: "已拒绝",
+  stale: "已过时",
+  superseded: "已替代",
+  archived: "已归档",
+  missing: "缺失",
+  active: "活跃",
+  candidate: "候选",
 };
 
 export function ResultsGrid({
@@ -37,61 +48,34 @@ export function ResultsGrid({
         <span>{items.length}</span>
       </div>
       <div className="panel-body">
-        <div className="deck-container" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))" }}>
+        <div className="deck-container">
           {items.length ? (
             items.map((item, idx) => {
-              const style = TYPE_ICON_BG[item.asset_type] || TYPE_ICON_BG.text;
+              const iconClass = TYPE_ICON_CLASS[item.asset_type] || TYPE_ICON_CLASS.text;
               return (
                 <button
                   type="button"
                   key={item.asset_id}
                   className={`result-item result-button ${selectedAssetId === item.asset_id ? "active" : ""} animate-enter`}
-                  style={{ animationDelay: `${idx * 40}ms`, minHeight: 100 }}
+                  style={{ animationDelay: `${idx * 40}ms` }}
+                  title={item.title}
                   onClick={() => {
                     onSelect(item);
                     onPreview?.(item);
                   }}
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <div
-                      style={{
-                        width: 32,
-                        height: 32,
-                        borderRadius: 10,
-                        background: style.bg,
-                        border: `1px solid ${style.border}`,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        color: style.color,
-                        flexShrink: 0,
-                      }}
-                    >
+                    <div className={`result-icon ${iconClass}`}>
                       {TYPE_ICONS[item.asset_type] || <FileText size={14} />}
                     </div>
                     <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.3, color: "var(--text)" }}>
-                        {item.title}
-                      </div>
-                      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{item.asset_type}</div>
+                      <div className="result-title">{item.title}</div>
                     </div>
                   </div>
-                  <div className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>
-                    {item.summary}
-                  </div>
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: "auto" }}>
-                    <span className="pill">{item.status}</span>
+                  <div className="result-tags">
+                    <span className="pill">{ASSET_STATUS_LABELS[item.status] ?? item.status}</span>
                     {item.report_selected ? (
-                      <span
-                        className="pill"
-                        style={{
-                          color: "var(--green-dark)",
-                          borderColor: "var(--green-border)",
-                          background: "var(--green-bg)",
-                        }}
-                      >
-                        已入选报告
-                      </span>
+                      <span className="pill pill-success">已入选报告</span>
                     ) : null}
                   </div>
                 </button>

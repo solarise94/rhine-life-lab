@@ -45,42 +45,42 @@ export function CardDetailPanel({
       </div>
       <div className="panel-body card-detail-panel-body meta-grid">
         <div className="meta-block">
-          <h4>Summary</h4>
+          <h4>摘要</h4>
           <div className="meta-text">{card.summary}</div>
         </div>
         <div className="meta-block">
-          <h4>Execution</h4>
+          <h4>执行状态</h4>
           <div className="kv">
-            <div className="meta-text">Current status: {card.status}</div>
-            <div className="meta-text">Latest run: {run?.run_id ?? "—"}</div>
-            <div className="meta-text">Run state: {run?.status ?? "—"}</div>
-            <div className="meta-text">Worker: {run?.worker_type ?? "—"}</div>
+            <div className="meta-text">当前状态：{card.status}</div>
+            <div className="meta-text">最新运行：{run?.run_id ?? "—"}</div>
+            <div className="meta-text">运行状态：{run?.status ?? "—"}</div>
+            <div className="meta-text">执行器：{run?.worker_type ?? "—"}</div>
             {latestEvent ? (
               <div className="meta-text" style={{ lineHeight: 1.5 }}>
-                Latest event: {latestEvent.message}
+                最新事件：{latestEvent.message}
               </div>
             ) : null}
           </div>
         </div>
         <div className="meta-block">
-          <h4>Why</h4>
+          <h4>原因</h4>
           <div className="meta-text" style={{ lineHeight: 1.5 }}>{card.why || summary.current_goal}</div>
         </div>
         <div className="meta-block">
-          <h4>Work Order</h4>
+          <h4>工作顺序</h4>
           <div className="kv">
-            <div className="meta-text">Can start: {workItem ? (workItem.can_start ? "Yes" : "No") : "—"}</div>
-            <div className="meta-text">Depends on cards: {workItem?.depends_on_card_ids.join(", ") || "—"}</div>
+            <div className="meta-text">可启动：{workItem ? (workItem.can_start ? "是" : "否") : "—"}</div>
+            <div className="meta-text">依赖卡片：{workItem?.depends_on_card_ids.join(", ") || "—"}</div>
             {!workItem?.can_start && workItem?.block_reasons.length ? (
               <div className="meta-text" style={{ lineHeight: 1.5 }}>
-                Block reasons: {workItem.block_reasons.join(", ")}
+                阻塞原因：{workItem.block_reasons.join(", ")}
               </div>
             ) : null}
           </div>
         </div>
         {workItem?.dependency_attention_count ? (
           <div className="meta-block attention-block">
-            <h4>Dependency Attention</h4>
+            <h4>依赖关注</h4>
             <div className="kv">
               {(workItem.dependency_attention ?? []).map((issue) => (
                 <div key={issue.issue_id} className={`attention-detail ${issue.severity}`}>
@@ -90,7 +90,7 @@ export function CardDetailPanel({
                   </div>
                   <div className="meta-text">{issue.message || issue.asset_id || issue.issue_id}</div>
                   {issue.current_asset_id ? (
-                    <div className="meta-text muted">Current asset: {issue.current_asset_id}</div>
+                    <div className="meta-text muted">当前资产：{issue.current_asset_id}</div>
                   ) : null}
                 </div>
               ))}
@@ -99,7 +99,7 @@ export function CardDetailPanel({
         ) : null}
         {workItem?.runtime_dependency_blocker?.status === "failed" ? (
           <div className="meta-block attention-block">
-            <h4>Runtime Dependency Failure</h4>
+            <h4>运行时依赖失败</h4>
             <div className="kv">
               <div className="attention-detail error">
                 <div className="attention-detail-title">
@@ -107,42 +107,42 @@ export function CardDetailPanel({
                   <span>error</span>
                 </div>
                 <div className="meta-text" style={{ marginBottom: 6 }}>
-                  {workItem.runtime_dependency_blocker.message || "Dependency installation failed."}
+                  {workItem.runtime_dependency_blocker.message || "依赖安装失败。"}
                 </div>
                 {workItem.runtime_dependency_blocker.requested_package ? (
                   <div className="meta-text muted">
-                    Failed package: {workItem.runtime_dependency_blocker.requested_package}
+                    失败包：{workItem.runtime_dependency_blocker.requested_package}
                   </div>
                 ) : null}
                 {workItem.runtime_dependency_blocker.runtime ? (
                   <div className="meta-text muted">
-                    Runtime: {workItem.runtime_dependency_blocker.runtime}
+                    运行时：{workItem.runtime_dependency_blocker.runtime}
                   </div>
                 ) : null}
                 {workItem.runtime_dependency_blocker.attempted_candidates?.length ? (
                   <div className="meta-text muted">
                     {workItem.runtime_dependency_blocker.ecosystem === "R"
-                      ? "Conda name variants tried"
-                      : "Package tried"}
-                    : {workItem.runtime_dependency_blocker.attempted_candidates.join(", ")}
+                      ? "已尝试 Conda 名称变体"
+                      : "已尝试包名"}
+                    ：{workItem.runtime_dependency_blocker.attempted_candidates.join(", ")}
                   </div>
                 ) : null}
                 {workItem.runtime_dependency_blocker.fallback_available?.length ? (
                   <div className="meta-text muted">
-                    Fallback available: {workItem.runtime_dependency_blocker.fallback_available.join(", ")}
+                    可用回退：{workItem.runtime_dependency_blocker.fallback_available.join(", ")}
                   </div>
                 ) : null}
                 {workItem.runtime_dependency_blocker.retry_hint ? (
                   <div className="meta-text muted" style={{ marginTop: 4 }}>
-                    Action: {(() => {
+                    操作建议：{(() => {
                       const hint = workItem.runtime_dependency_blocker.retry_hint;
-                      if (hint === "do_not_retry_same_conda_request") return "Open runtime detail / edit package list";
-                      if (hint === "manual_preparation_required") return "Mark manually resolved";
-                      if (hint === "manual_runtime_preparation_required") return "Open runtime settings / mark manually resolved";
-                      if (hint === "choose_fallback") return "Try fallback installer only when policy allows it";
-                      if (hint === "retry_allowed_after_runtime_check") return "Retry after checking runtime availability";
-                      if (hint === "inspect_stderr") return "View stderr tail / lazy fetch job detail";
-                      if (hint === "wait_for_existing_dependency_job") return "Wait for existing dependency job";
+                      if (hint === "do_not_retry_same_conda_request") return "打开运行时详情 / 编辑包列表";
+                      if (hint === "manual_preparation_required") return "标记为已手动解决";
+                      if (hint === "manual_runtime_preparation_required") return "打开运行时设置 / 标记为已手动解决";
+                      if (hint === "choose_fallback") return "仅在策略允许时尝试回退安装器";
+                      if (hint === "retry_allowed_after_runtime_check") return "检查运行时可用性后重试";
+                      if (hint === "inspect_stderr") return "查看 stderr 尾部 / 延迟获取任务详情";
+                      if (hint === "wait_for_existing_dependency_job") return "等待现有依赖任务完成";
                       return hint;
                     })()}
                   </div>
@@ -152,7 +152,7 @@ export function CardDetailPanel({
           </div>
         ) : null}
         <div className="meta-block">
-          <h4>Inputs</h4>
+          <h4>输入</h4>
           <div className="kv">
             {card.inputs.length ? (
               card.inputs.map((item) => (
@@ -161,12 +161,12 @@ export function CardDetailPanel({
                 </div>
               ))
             ) : (
-              <div className="muted meta-text">No linked inputs</div>
+              <div className="muted meta-text">无关联输入</div>
             )}
           </div>
         </div>
         <div className="meta-block">
-          <h4>Outputs</h4>
+          <h4>输出</h4>
           <div className="kv">
             {card.outputs.length ? (
               card.outputs.map((item) => (
@@ -175,49 +175,49 @@ export function CardDetailPanel({
                 </div>
               ))
             ) : (
-              <div className="muted meta-text">No linked outputs</div>
+              <div className="muted meta-text">无关联输出</div>
             )}
           </div>
         </div>
         <div className="meta-block">
-          <h4>Manager Review</h4>
-          <div className="meta-text" style={{ lineHeight: 1.5 }}>{visibleManagerReview || "Pending manager review."}</div>
+          <h4>审核</h4>
+          <div className="meta-text" style={{ lineHeight: 1.5 }}>{visibleManagerReview || "等待审核。"}</div>
         </div>
         <div className="meta-block">
-          <h4>Key Findings</h4>
+          <h4>关键发现</h4>
           <div className="kv">
             {card.key_findings.length ? (
               card.key_findings.map((item) => (
                 <div key={item} className="meta-text">{item}</div>
               ))
             ) : (
-              <div className="muted meta-text">No findings yet</div>
+              <div className="muted meta-text">暂无发现</div>
             )}
           </div>
         </div>
         <div className="meta-block">
-          <h4>Next Actions</h4>
+          <h4>后续动作</h4>
           <div className="kv">
             {card.next_actions.length ? (
               card.next_actions.map((item) => (
                 <div key={item} className="meta-text">{item}</div>
               ))
             ) : (
-              <div className="muted meta-text">No actions</div>
+              <div className="muted meta-text">暂无动作</div>
             )}
           </div>
         </div>
         <div className="meta-block">
-          <h4>Executor Context</h4>
+          <h4>执行器上下文</h4>
           <div className="kv">
             <div className="meta-text">
-              Profile: {typeof card.executor_context?.executor_profile === "string" ? card.executor_context.executor_profile : "—"}
+              配置：{typeof card.executor_context?.executor_profile === "string" ? card.executor_context.executor_profile : "—"}
             </div>
             <div className="meta-text">
-              Skills: {Array.isArray(card.executor_context?.skills) && card.executor_context.skills.length ? card.executor_context.skills.join(", ") : "—"}
+              技能：{Array.isArray(card.executor_context?.skills) && card.executor_context.skills.length ? card.executor_context.skills.join(", ") : "—"}
             </div>
             <div className="meta-text">
-              MCP: {Array.isArray(card.executor_context?.mcp_servers) && card.executor_context.mcp_servers.length ? card.executor_context.mcp_servers.join(", ") : "—"}
+              MCP：{Array.isArray(card.executor_context?.mcp_servers) && card.executor_context.mcp_servers.length ? card.executor_context.mcp_servers.join(", ") : "—"}
             </div>
           </div>
         </div>

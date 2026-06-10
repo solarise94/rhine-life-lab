@@ -166,10 +166,10 @@ function LibrarySection({
                 <div><strong>ID</strong><span>{selected.id}</span></div>
                 <div><strong>启用</strong><span>{selected.enabled ? "是" : "否"}</span></div>
                 <div><strong>标签</strong><span>{selected.tags?.join(", ") || "—"}</span></div>
-                <div><strong>Use Cases</strong><span>{selected.use_cases?.join(", ") || "—"}</span></div>
-                <div><strong>Runtime</strong><span>{selected.runtime_requirements?.join(", ") || selected.supported_runtimes?.join(", ") || "—"}</span></div>
-                <div><strong>Launch Hint</strong><span>{selected.launch_hint || "—"}</span></div>
-                <div><strong>Source</strong><span>{selected.source_path ?? selected.source ?? "—"}</span></div>
+                <div><strong>使用场景</strong><span>{selected.use_cases?.join(", ") || "—"}</span></div>
+                <div><strong>运行时要求</strong><span>{selected.runtime_requirements?.join(", ") || selected.supported_runtimes?.join(", ") || "—"}</span></div>
+                <div><strong>启动提示</strong><span>{selected.launch_hint || "—"}</span></div>
+                <div><strong>来源</strong><span>{selected.source_path ?? selected.source ?? "—"}</span></div>
               </div>
             </>
           ) : (
@@ -314,6 +314,11 @@ function DataDirectorySettingsSection({ projectId, readOnly = false }: { project
   async function handleMount(rootId: string, path: string) {
     setMountError(null);
     setMountSuccess(null);
+    if (isMounted) {
+      if (!window.confirm("切换数据目录将使原目录下的已注册资产标记为不可用，确认切换？")) {
+        return;
+      }
+    }
     try {
       await api.updateProjectDataDirectory(projectId, { root_id: rootId, path });
       setMountSuccess("数据目录已挂载。");
@@ -352,9 +357,9 @@ function DataDirectorySettingsSection({ projectId, readOnly = false }: { project
           <p>挂载一个服务器数据目录到项目，用于输入数据和结果导出。</p>
         </div>
         {isMounted ? (
-          <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ display: "flex", alignItems: "center", gap: 8, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             <Database size={14} />
-            {isAvailable ? "已挂载" : "不可用"}
+            {isAvailable ? `已挂载 · ${mount?.path || "."}` : "不可用"}
           </span>
         ) : (
           <span>未挂载</span>
@@ -402,7 +407,7 @@ function DataDirectorySettingsSection({ projectId, readOnly = false }: { project
                 disabled={readOnly}
               >
                 <Link2 size={14} />
-                {browserExpanded ? "取消切换" : "切换目录"}
+                {browserExpanded ? "取消" : "切换目录"}
               </button>
             </>
           ) : (
@@ -413,7 +418,7 @@ function DataDirectorySettingsSection({ projectId, readOnly = false }: { project
               disabled={readOnly}
             >
               <Link2 size={14} />
-              {browserExpanded ? "取消挂载" : "挂载数据目录"}
+              {browserExpanded ? "取消" : "挂载数据目录"}
             </button>
           )}
         </div>
@@ -806,6 +811,7 @@ export function SettingsPanels({
       return next;
     });
     setEditingProviderId(null);
+    setStatus("Provider 配置已更新，请点击下方「保存 API 设置」生效。");
   }
 
   async function testProvider(profile: EditableProviderProfile) {
@@ -843,8 +849,8 @@ export function SettingsPanels({
       <section className="settings-section">
         <div className="settings-section-header">
           <div>
-            <h3>Runtime Preferences</h3>
-            <p>项目级持久化运行时偏好。Manager 和 card 执行共用这套设置。</p>
+            <h3>运行时偏好</h3>
+            <p>项目级持久化运行时偏好。Manager 和 card 执行共用这套设置。侧边栏可快速切换 Python / R Runtime；此处保留完整运行时设置。</p>
           </div>
           <div className="settings-inline-note">{runtimeSummary}</div>
         </div>
@@ -859,7 +865,7 @@ export function SettingsPanels({
             </select>
           </label>
           <label className="settings-field">
-            <span>Python runtime</span>
+            <span>Python 运行时</span>
             <select value={pythonRuntime} onChange={(event) => setPythonRuntime(event.target.value)} disabled={readOnly}>
               {pythonRuntimes.map((item) => (
                 <option key={`${item.manager}:${item.name}`} value={item.name}>
@@ -869,7 +875,7 @@ export function SettingsPanels({
             </select>
           </label>
           <label className="settings-field">
-            <span>R runtime</span>
+            <span>R 运行时</span>
             <select value={rRuntime} onChange={(event) => setRRuntime(event.target.value)} disabled={readOnly}>
               {rRuntimes.map((item) => (
                 <option key={`${item.manager}:${item.name}`} value={item.name}>
@@ -896,7 +902,7 @@ export function SettingsPanels({
       <section className="settings-section">
         <div className="settings-section-header">
           <div>
-            <h3>API Settings</h3>
+            <h3>API 设置</h3>
             <p>配置 Manager API、执行器项目 API 注入和 Tavily web search。执行器原生登录模式不会读取这里的 key。</p>
           </div>
         </div>
@@ -1027,7 +1033,7 @@ export function SettingsPanels({
                             取消
                           </button>
                           <button type="button" className="settings-button" onClick={() => finishEditingProvider(provider.provider_id)}>
-                            完成
+                            关闭编辑
                           </button>
                         </div>
                       </div>
@@ -1063,7 +1069,7 @@ export function SettingsPanels({
                     <div className="settings-model-card-model">{provider.model || "—"}</div>
                     <div className="settings-model-card-meta">
                       <span className={`settings-protocol-badge ${provider.protocol}`}>{formatProtocolLabel(provider.protocol)}</span>
-                      <span>{provider.api_key_configured ? "key configured" : "key missing"}</span>
+                      <span>{provider.api_key_configured ? "key 已配置" : "key 未配置"}</span>
                       <span className="settings-model-card-url">{provider.base_url}</span>
                     </div>
                     <div className="settings-model-card-actions">
@@ -1102,7 +1108,7 @@ export function SettingsPanels({
                 <strong>角色绑定</strong>
                 <span>Manager/Reviewer/Pi/OpenCode project_api 都优先使用 Anthropic-Compatible provider。Pi 兼容性最好，绑定无效时会直接报错。</span>
               </div>
-              <em>role routing</em>
+              <em>角色路由</em>
             </div>
             <div className="settings-form-grid compact">
               {PROVIDER_ROLE_OPTIONS.map((option) => {
@@ -1146,7 +1152,7 @@ export function SettingsPanels({
                 <strong>默认执行器</strong>
                 <span>运行任务时优先使用的执行器。如果所选执行器未配置，运行会直接报错。</span>
               </div>
-              <em>default executor</em>
+              <em>默认执行器</em>
             </div>
             <div className="settings-form-grid compact">
               <label className="settings-field">
@@ -1236,10 +1242,10 @@ export function SettingsPanels({
           <div className="settings-provider-card">
             <div className="settings-provider-card-header">
               <div>
-                <strong>Web Search</strong>
+                <strong>网络搜索</strong>
                 <span>Tavily 仅供 Manager 搜索使用，不参与执行器 API 注入。</span>
               </div>
-              <em>{webSearchEnabled ? "enabled" : "disabled"}</em>
+              <em>{webSearchEnabled ? "已启用" : "已禁用"}</em>
             </div>
             <div className="settings-form-grid compact">
               <label className="settings-field">
@@ -1284,7 +1290,7 @@ export function SettingsPanels({
       <section className="settings-section">
         <div className="settings-section-header">
           <div>
-            <h3>Diagnostics</h3>
+            <h3>诊断</h3>
             <p>导出脱敏诊断包，包含会话、最近运行日志、错误摘要和配置概览，方便协作者回传排查。</p>
           </div>
         </div>
@@ -1310,12 +1316,12 @@ export function SettingsPanels({
 
       <LibrarySection
         kind="skill"
-        title="Skill Library"
+        title="技能库"
         description="注册后的技能库。Manager 默认只读取 id 和名称，再把选中的 id 挂到 card 执行配置。"
       />
       <LibrarySection
         kind="mcp"
-        title="MCP Library"
+        title="MCP 能力库"
         description="注册后的 MCP 能力库。Manager 默认只读取 id 和名称，再由 wrapper 在 run 启动时生成 run-local MCP 配置。"
       />
     </div>

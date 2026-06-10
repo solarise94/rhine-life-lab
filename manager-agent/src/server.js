@@ -92,9 +92,8 @@ function validateStartupConfig() {
   }
   const errors = [];
   const runtimeConfig = resolveManagerConfig();
-  if (!runtimeConfig.apiKey) {
-    errors.push("MANAGER_AGENT_API_KEY or BLUEPRINT_DEEPSEEK_API_KEY is not configured.");
-  }
+  // API credentials may come from backend-supplied manager_config on each request,
+  // so startup readiness must not require a fallback env key.
   const model = resolveModel(runtimeConfig);
   if (!model) {
     errors.push(`Manager model not found: provider=${runtimeConfig.provider}, model=${runtimeConfig.model}`);

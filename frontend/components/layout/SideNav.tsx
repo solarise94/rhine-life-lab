@@ -5,11 +5,9 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  BarChart3,
   ChevronDown,
-  FileText,
   FolderGit2,
-  Files,
+  Package,
   Beaker,
   MessageSquareText,
   Plus,
@@ -39,10 +37,11 @@ function useMediaQuery(query: string) {
   return matches;
 }
 
+const ARTIFACT_VIEWS = new Set(["results", "files", "report"]);
+
 const primary = [
-  { href: "results", label: "结果库", icon: BarChart3 },
-  { href: "files", label: "文件管理", icon: Files },
-  { href: "report", label: "报告", icon: FileText },
+  { href: "results", label: "文件管理", icon: Package },
+  { href: "settings", label: "工作台设置", icon: Settings2 },
 ];
 
 function sortSessions(items: ChatSessionSummary[]) {
@@ -226,10 +225,10 @@ export function SideNav({
           </div>
           <div>
             <h1 style={{ fontSize: 15, fontWeight: 700, margin: "0 0 2px", letterSpacing: "-0.2px" }}>
-              Blueprint RE
+              RhineDataLab
             </h1>
             <p style={{ margin: 0, color: "var(--muted)", fontSize: 11, lineHeight: 1.4 }}>
-              生信分析蓝图管理器
+              生信数据智能平台
             </p>
           </div>
         </div>
@@ -274,7 +273,7 @@ export function SideNav({
       </div>
 
       <div className="nav-section-label nav-session-label">
-        <span>Sessions</span>
+        <span>会话</span>
         <button
           type="button"
           className="nav-session-add"
@@ -286,8 +285,8 @@ export function SideNav({
         </button>
       </div>
       <div className="nav-session-list">
-        {sessionsQuery.isLoading ? <div className="nav-session-empty">加载 sessions…</div> : null}
-        {sessionsQuery.isError ? <div className="nav-session-empty error">Sessions 加载失败</div> : null}
+        {sessionsQuery.isLoading ? <div className="nav-session-empty">加载会话…</div> : null}
+        {sessionsQuery.isError ? <div className="nav-session-empty error">会话加载失败</div> : null}
         {!sessionsQuery.isLoading && !sessionsQuery.isError && !sessions.length ? (
           <div className="nav-session-empty">暂无 session</div>
         ) : null}
@@ -332,7 +331,7 @@ export function SideNav({
         {primary.map((item) => {
           const Icon = item.icon;
           const href = `/projects/${projectId}/${item.href}`;
-          const isActive = current === item.href;
+          const isActive = item.href === "results" ? ARTIFACT_VIEWS.has(current) : current === item.href;
           return (
             <Link key={item.href} href={href} className={`nav-link ${isActive ? "active" : ""}`}>
               <Icon size={16} />
@@ -342,15 +341,44 @@ export function SideNav({
         })}
       </div>
 
+      <div className="nav-runtime-title">运行时</div>
+      <div className="nav-runtime-section">
+        <div className="nav-runtime-grid">
+          <label className="nav-runtime-field">
+            <span>Python</span>
+            <select
+              value={globalPythonRuntime ?? "__system__"}
+              onChange={(event) => onSelectGlobalPythonRuntime?.(event.target.value)}
+              disabled={Boolean(managerAuto?.enabled)}
+            >
+              <option value="__system__">系统默认</option>
+              {pythonRuntimes.map((item) => (
+                <option key={`${item.manager}:${item.name}`} value={item.name}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="nav-runtime-field">
+            <span>R</span>
+            <select
+              value={globalRRuntime ?? "__system__"}
+              onChange={(event) => onSelectGlobalRRuntime?.(event.target.value)}
+              disabled={Boolean(managerAuto?.enabled)}
+            >
+              <option value="__system__">系统默认</option>
+              {rRuntimes.map((item) => (
+                <option key={`${item.manager}:${item.name}`} value={item.name}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </div>
+
       <div className="nav-section-label">高级</div>
       <div className="nav-secondary">
-        <Link
-          href={`/projects/${projectId}/settings`}
-          className={`nav-link ${current === "settings" ? "active" : ""}`}
-        >
-          <Settings2 size={16} />
-          <span>工作台设置</span>
-        </Link>
         <Link
           href={`/projects/${projectId}/advanced`}
           className={`nav-link ${current === "advanced" ? "active" : ""}`}

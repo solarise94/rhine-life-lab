@@ -97,8 +97,8 @@ export function ModuleCard({
   const executorCompatibility = effectiveSelectedProfile
     ? executorCompatibilityCopy(effectiveSelectedProfile.worker_type)
     : null;
-  const globalRuntimeLabel = globalPythonRuntime && globalPythonRuntime !== "__system__" ? globalPythonRuntime : "system";
-  const globalRRuntimeLabel = globalRRuntime && globalRRuntime !== "__system__" ? globalRRuntime : "system";
+  const globalRuntimeLabel = globalPythonRuntime && globalPythonRuntime !== "__system__" ? globalPythonRuntime : "系统默认";
+  const globalRRuntimeLabel = globalRRuntime && globalRRuntime !== "__system__" ? globalRRuntime : "系统默认";
 
   const pages: CardPage[] = isDormant
     ? ["specialist", "result", "archive"]
