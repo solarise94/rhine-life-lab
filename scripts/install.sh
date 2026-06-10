@@ -310,7 +310,7 @@ if [[ -n "${ROLLBACK_VERSION}" ]]; then
   ln -sfn "${ROLLBACK_TARGET}" "${CURRENT_LINK}"
 
   info "Re-deploying previous release..."
-  if ! run_deploy_for_release "${ROLLBACK_TARGET}" --upgrade; then
+  if ! run_deploy_for_release "${ROLLBACK_TARGET}" --upgrade --services-stopped; then
     die "Rollback deploy failed. Services may be in an inconsistent state."
   fi
 
@@ -607,12 +607,22 @@ info "Installed ${WHEEL_BASENAME}."
 info "Phase 8: Deploying release"
 
 VERSION_DIR="${RELEASES_DIR}/${RELEASE_VERSION}"
+CURRENT_TARGET=""
+if [[ -L "${CURRENT_LINK}" ]]; then
+  CURRENT_TARGET="$(readlink -f "${CURRENT_LINK}" || true)"
+fi
+PREV_TARGET="${CURRENT_TARGET}"
+VERSION_BACKUP_DIR=""
 
 # If this version already exists, back it up.
 if [[ -d "${VERSION_DIR}" ]]; then
-  BACKUP_DIR="${VERSION_DIR}.backup.$(date +%s)"
-  info "Existing version found; backing up to ${BACKUP_DIR}"
-  mv "${VERSION_DIR}" "${BACKUP_DIR}"
+  VERSION_BACKUP_DIR="${VERSION_DIR}.backup.$(date +%s)"
+  info "Existing version found; backing up to ${VERSION_BACKUP_DIR}"
+  mv "${VERSION_DIR}" "${VERSION_BACKUP_DIR}"
+  if [[ -n "${CURRENT_TARGET}" && "${CURRENT_TARGET}" == "${VERSION_DIR}" ]]; then
+    PREV_TARGET="${VERSION_BACKUP_DIR}"
+    info "Current release points at the version being replaced; rollback target is ${PREV_TARGET}"
+  fi
 fi
 
 mkdir -p "${VERSION_DIR}"
@@ -626,11 +636,11 @@ info "Phase 9: Switching current symlink"
 
 # Determine if this is an upgrade.
 IS_UPGRADE=0
-PREV_TARGET=""
-if [[ -L "${CURRENT_LINK}" ]]; then
-  PREV_TARGET="$(readlink -f "${CURRENT_LINK}" || true)"
-  if [[ -n "${PREV_TARGET}" && "${PREV_TARGET}" != "${VERSION_DIR}" ]]; then
-    IS_UPGRADE=1
+if [[ -n "${PREV_TARGET}" ]]; then
+  IS_UPGRADE=1
+  if [[ -n "${VERSION_BACKUP_DIR}" && "${PREV_TARGET}" == "${VERSION_BACKUP_DIR}" ]]; then
+    info "Reinstalling current release; rollback target is ${PREV_TARGET}"
+  else
     info "Upgrading from ${PREV_TARGET}"
   fi
 fi
@@ -720,7 +730,7 @@ rollback() {
   # Re-deploy previous release with full env and health checks.
   if [[ -n "${PREV_TARGET}" && -d "${PREV_TARGET}" ]]; then
     info "Re-deploying previous release..."
-    if run_deploy_for_release "${PREV_TARGET}" --upgrade; then
+    if run_deploy_for_release "${PREV_TARGET}" --upgrade --services-stopped; then
       if wait_for_health; then
         info "Previous release is healthy after rollback."
       else
@@ -749,6 +759,7 @@ info "Phase 10: Running deploy"
 DEPLOY_ARGS=()
 if [[ "${IS_UPGRADE}" -eq 1 ]]; then
   DEPLOY_ARGS+=("--upgrade")
+  DEPLOY_ARGS+=("--services-stopped")
 fi
 
 if ! run_deploy "${DEPLOY_ARGS[@]}"; then
