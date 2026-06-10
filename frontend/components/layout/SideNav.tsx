@@ -40,7 +40,7 @@ function useMediaQuery(query: string) {
 const ARTIFACT_VIEWS = new Set(["results", "files", "report"]);
 
 const primary = [
-  { href: "results", label: "数据目录", icon: Package },
+  { href: "results", label: "文件管理", icon: Package },
   { href: "settings", label: "工作台设置", icon: Settings2 },
 ];
 
