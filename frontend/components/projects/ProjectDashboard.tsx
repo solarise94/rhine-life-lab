@@ -208,12 +208,9 @@ export function ProjectDashboard() {
           }
         );
       } catch (err) {
-        // Mount failed but project was created; show warning and still navigate
+        // Mount failed but project was created; show warning and let user stay
         setFormError(err instanceof Error ? `项目已创建，但挂载数据目录失败：${err.message}` : "项目已创建，但挂载数据目录失败。");
         await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
-        setTimeout(() => {
-          router.push(`/projects/${response.project.project_id}/tasks`);
-        }, 2000);
         return;
       }
     }
@@ -423,7 +420,10 @@ export function ProjectDashboard() {
                       </button>
                     ) : null}
                     {!dataBrowserLoading && dataBrowserEntries.length === 0 && dataBrowserPath === "" ? (
-                      <div className="browser-empty">空目录</div>
+                      <div className="browser-empty">
+                        空目录
+                        <span className="muted-hint">当前目录为空，仍可作为挂载点。</span>
+                      </div>
                     ) : null}
                     {dataBrowserEntries.map((entry) => (
                       <button
@@ -444,6 +444,25 @@ export function ProjectDashboard() {
                       </button>
                     ))}
                   </div>
+                  {!selectedDataDirectory && selectedDataRoot && (
+                    <div className="directory-browser-toolbar" style={{ marginTop: 8 }}>
+                      <button
+                        type="button"
+                        className="btn secondary"
+                        onClick={() => {
+                          if (selectedDataRoot) {
+                            setSelectedDataDirectory({
+                              root_id: selectedDataRoot.root_id,
+                              path: dataBrowserPath,
+                            });
+                          }
+                        }}
+                        disabled={dataBrowserLoading}
+                      >
+                        使用当前目录
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

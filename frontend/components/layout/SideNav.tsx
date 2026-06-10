@@ -43,6 +43,7 @@ const primary = [
   { href: "results", label: "结果库", icon: BarChart3 },
   { href: "files", label: "文件管理", icon: Files },
   { href: "report", label: "报告", icon: FileText },
+  { href: "settings", label: "工作台设置", icon: Settings2 },
 ];
 
 function sortSessions(items: ChatSessionSummary[]) {
@@ -344,13 +345,6 @@ export function SideNav({
 
       <div className="nav-section-label">高级</div>
       <div className="nav-secondary">
-        <Link
-          href={`/projects/${projectId}/settings`}
-          className={`nav-link ${current === "settings" ? "active" : ""}`}
-        >
-          <Settings2 size={16} />
-          <span>工作台设置</span>
-        </Link>
         <Link
           href={`/projects/${projectId}/advanced`}
           className={`nav-link ${current === "advanced" ? "active" : ""}`}

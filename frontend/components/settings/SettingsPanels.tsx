@@ -314,6 +314,11 @@ function DataDirectorySettingsSection({ projectId, readOnly = false }: { project
   async function handleMount(rootId: string, path: string) {
     setMountError(null);
     setMountSuccess(null);
+    if (isMounted) {
+      if (!window.confirm("切换数据目录将使原目录下的已注册资产标记为不可用，确认切换？")) {
+        return;
+      }
+    }
     try {
       await api.updateProjectDataDirectory(projectId, { root_id: rootId, path });
       setMountSuccess("数据目录已挂载。");
@@ -352,9 +357,9 @@ function DataDirectorySettingsSection({ projectId, readOnly = false }: { project
           <p>挂载一个服务器数据目录到项目，用于输入数据和结果导出。</p>
         </div>
         {isMounted ? (
-          <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ display: "flex", alignItems: "center", gap: 8, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             <Database size={14} />
-            {isAvailable ? "已挂载" : "不可用"}
+            {isAvailable ? `已挂载 · ${mount?.path || "."}` : "不可用"}
           </span>
         ) : (
           <span>未挂载</span>
@@ -402,7 +407,7 @@ function DataDirectorySettingsSection({ projectId, readOnly = false }: { project
                 disabled={readOnly}
               >
                 <Link2 size={14} />
-                {browserExpanded ? "取消切换" : "切换目录"}
+                {browserExpanded ? "取消" : "切换目录"}
               </button>
             </>
           ) : (
@@ -413,7 +418,7 @@ function DataDirectorySettingsSection({ projectId, readOnly = false }: { project
               disabled={readOnly}
             >
               <Link2 size={14} />
-              {browserExpanded ? "取消挂载" : "挂载数据目录"}
+              {browserExpanded ? "取消" : "挂载数据目录"}
             </button>
           )}
         </div>
@@ -806,6 +811,7 @@ export function SettingsPanels({
       return next;
     });
     setEditingProviderId(null);
+    setStatus("Provider 配置已更新，请点击下方「保存 API 设置」生效。");
   }
 
   async function testProvider(profile: EditableProviderProfile) {
@@ -843,7 +849,7 @@ export function SettingsPanels({
       <section className="settings-section">
         <div className="settings-section-header">
           <div>
-            <h3>Runtime Preferences</h3>
+            <h3>运行时偏好</h3>
             <p>项目级持久化运行时偏好。Manager 和 card 执行共用这套设置。</p>
           </div>
           <div className="settings-inline-note">{runtimeSummary}</div>
@@ -896,7 +902,7 @@ export function SettingsPanels({
       <section className="settings-section">
         <div className="settings-section-header">
           <div>
-            <h3>API Settings</h3>
+            <h3>API 设置</h3>
             <p>配置 Manager API、执行器项目 API 注入和 Tavily web search。执行器原生登录模式不会读取这里的 key。</p>
           </div>
         </div>
@@ -1284,7 +1290,7 @@ export function SettingsPanels({
       <section className="settings-section">
         <div className="settings-section-header">
           <div>
-            <h3>Diagnostics</h3>
+            <h3>诊断</h3>
             <p>导出脱敏诊断包，包含会话、最近运行日志、错误摘要和配置概览，方便协作者回传排查。</p>
           </div>
         </div>

@@ -105,7 +105,7 @@ export function FilesPanel({
     <div className="stack">
       <section className="panel">
         <div className="panel-header">
-          <h3>Files Workspace</h3>
+          <h3>文件管理</h3>
           <span>
             {(files?.data_assets.length ?? 0) + (files?.session_uploads.length ?? 0)} tracked files
           </span>
@@ -340,6 +340,10 @@ function DataDirectorySection({ projectId, onRefresh, readOnly = false }: { proj
           <div className="muted" style={{ fontSize: 13 }}>
             此项目没有挂载数据目录。在项目设置中可以挂载一个已有的服务器数据目录，用于输入数据和结果导出。
           </div>
+          <a href={`/projects/${projectId}/settings`} className="btn secondary" style={{ display: "inline-flex", alignSelf: "flex-start" }}>
+            <Link2 size={14} />
+            前往工作台设置挂载数据目录
+          </a>
         </div>
       </section>
     );
@@ -356,21 +360,6 @@ function DataDirectorySection({ projectId, onRefresh, readOnly = false }: { proj
         <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Database size={14} style={{ marginRight: 4 }} />
           {mountLabel} — {isAvailable ? `${entries.length} entries` : "不可用"}
-          <button
-            type="button"
-            className="btn danger"
-            style={{ padding: "2px 8px", fontSize: 12 }}
-            onClick={() => {
-              if (window.confirm("解除挂载将移除数据目录关联，但不会删除服务器上的目录。data_mount/ 资产将标记为不可用。确认解除挂载？")) {
-                detachMutation.mutate();
-              }
-            }}
-            disabled={readOnly || detachMutation.isPending}
-            title="解除数据目录挂载"
-          >
-            {detachMutation.isPending ? <Loader2 size={12} className="spinning" /> : <Unlink size={12} />}
-            解除挂载
-          </button>
         </span>
       </div>
       <div className="panel-body stack">
@@ -387,6 +376,22 @@ function DataDirectorySection({ projectId, onRefresh, readOnly = false }: { proj
         {detachError ? <div className="notice-panel error">{detachError}</div> : null}
         {registerError ? <div className="notice-panel error">{registerError}</div> : null}
         {registerSuccess ? <div className="notice-panel success">{registerSuccess}</div> : null}
+        <div className="proposal-actions" style={{ justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            className="btn danger"
+            onClick={() => {
+              if (window.confirm("解除挂载将移除数据目录关联，但不会删除服务器上的目录。data_mount/ 资产将标记为不可用。确认解除挂载？")) {
+                detachMutation.mutate();
+              }
+            }}
+            disabled={readOnly || detachMutation.isPending}
+            title="解除数据目录挂载"
+          >
+            {detachMutation.isPending ? <Loader2 size={14} className="spinning" /> : <Unlink size={14} />}
+            解除挂载
+          </button>
+        </div>
         {isAvailable ? (
           <>
             <div className="directory-browser-breadcrumb" style={{ padding: 0, border: 0 }}>
@@ -420,20 +425,29 @@ function DataDirectorySection({ projectId, onRefresh, readOnly = false }: { proj
           ) : null}
           {entries.map((entry) => (
             <div key={entry.name} className="browser-entry" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button
-                type="button"
-                className="browser-entry"
-                style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, padding: 0, border: 0, background: "transparent" }}
-                onClick={() => {
-                  if (entry.kind === "directory") {
+              {entry.kind === "directory" ? (
+                <button
+                  type="button"
+                  className="browser-entry"
+                  style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, padding: 0, border: 0, background: "transparent" }}
+                  onClick={() => {
                     setCurrentPath(currentPath ? `${currentPath}/${entry.name}` : entry.name);
-                  }
-                }}
-              >
-                {entry.kind === "directory" ? <Folder size={16} /> : <FileText size={16} />}
-                <span className="entry-name">{entry.name}</span>
-                {entry.size_bytes != null ? <span className="entry-badge">{formatBytes(entry.size_bytes)}</span> : null}
-              </button>
+                  }}
+                >
+                  <Folder size={16} />
+                  <span className="entry-name">{entry.name}</span>
+                  {entry.size_bytes != null ? <span className="entry-badge">{formatBytes(entry.size_bytes)}</span> : null}
+                </button>
+              ) : (
+                <div
+                  className="browser-entry"
+                  style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, padding: 0, border: 0, background: "transparent" }}
+                >
+                  <FileText size={16} />
+                  <span className="entry-name">{entry.name}</span>
+                  {entry.size_bytes != null ? <span className="entry-badge">{formatBytes(entry.size_bytes)}</span> : null}
+                </div>
+              )}
               {entry.kind === "file" ? (
                 <button
                   type="button"
