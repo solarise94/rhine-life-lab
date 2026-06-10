@@ -245,8 +245,8 @@ export function ProjectDashboard() {
     <main className="projects-page">
       <section className="projects-header">
         <div>
-          <h1>Projects</h1>
-          <p>管理项目 workspace，打开后进入对应的 Sessions、Cards、文件和结果库。</p>
+          <h1>项目管理</h1>
+          <p>管理项目工作区，打开后进入对应的会话、卡片、文件和结果库。</p>
         </div>
         <div className="projects-header-actions">
           <button
@@ -255,6 +255,7 @@ export function ProjectDashboard() {
             onClick={() => {
               setIsCreating(true);
               setFormError(null);
+              setCreatedProjectId(null);
             }}
           >
             <Plus size={16} />
@@ -277,7 +278,10 @@ export function ProjectDashboard() {
             <button
               type="button"
               className="btn secondary"
-              onClick={() => setCreatedProjectId(null)}
+              onClick={() => {
+                setCreatedProjectId(null);
+                setFormError(null);
+              }}
             >
               关闭
             </button>
@@ -308,12 +312,12 @@ export function ProjectDashboard() {
               <input
                 value={name}
                 onChange={(event) => handleNameChange(event.target.value)}
-                placeholder="RNA-seq Project"
+                placeholder="示例：RNA-seq 项目"
                 required
               />
             </label>
             <label>
-              <span>Project ID</span>
+              <span>项目标识符（Project ID）</span>
               <input
                 value={projectId}
                 onChange={(event) => {

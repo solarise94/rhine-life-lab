@@ -19,7 +19,7 @@ export function ResultsOverviewChart({
     grid: { left: 24, right: 18, top: 28, bottom: 24, containLabel: true },
     xAxis: {
       type: "category",
-      data: ["Accepted", "Candidate", "Other"],
+      data: ["已接受", "候选", "其他"],
       axisLine: { lineStyle: { color: "rgba(157, 175, 201, 0.24)" } },
       axisLabel: { color: "#9cb0cd" },
     },
@@ -46,8 +46,8 @@ export function ResultsOverviewChart({
   return (
     <section className="panel">
       <div className="panel-header">
-        <h3>Results Overview</h3>
-        <span>Status distribution</span>
+        <h3>结果概览</h3>
+        <span>状态分布</span>
       </div>
       <div className="panel-body">
         <ReactECharts option={option} style={{ height: 260 }} notMerge lazyUpdate />

@@ -70,6 +70,14 @@ const SettingsPanels = dynamic(
 type View = "tasks" | "results" | "files" | "report" | "advanced" | "settings";
 const EMPTY_CARD_INTERACTION_ORDER: string[] = [];
 
+const PAGE_INTRO: Record<Exclude<View, "tasks">, string> = {
+  results: "查看和管理项目执行结果，包括已接受的结果、候选结果和其他结果。",
+  files: "管理数据资产、会话上传文件、执行文件和数据目录挂载。",
+  report: "组装项目报告，调整章节顺序，导出为 HTML。",
+  settings: "配置项目运行时偏好、API 供应商、角色绑定和诊断选项。",
+  advanced: "查看项目图结构、Git 历史、运行时诊断和卡片详情。",
+};
+
 function useMediaQuery(query: string) {
   const [matches, setMatches] = useState(() =>
     typeof window === "undefined" ? false : window.matchMedia(query).matches,
@@ -88,7 +96,7 @@ function useMediaQuery(query: string) {
 }
 
 function formatRuntime(runtime?: string) {
-  if (!runtime || runtime === "__system__") return "system";
+  if (!runtime || runtime === "__system__") return "系统默认";
   return runtime;
 }
 
@@ -788,16 +796,19 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             summary={snapshot.summary}
             title={
               view === "results"
-                ? "Accepted and candidate results"
+                ? "结果库"
                 : view === "files"
-              ? "Uploads, data assets, and execution files"
+              ? "文件管理"
               : view === "report"
-              ? "Report assembly"
+              ? "报告"
               : view === "settings"
-              ? "Runtime, libraries, and API settings"
-                : "Graph and Git history"
+              ? "工作台设置"
+                : "技术详情"
             }
           />
+        ) : null}
+        {view !== "tasks" ? (
+          <div className="page-intro">{PAGE_INTRO[view]}</div>
         ) : null}
         {notice ? <div className="notice-panel notice-toast">{notice}</div> : null}
         {isMobileWorkspace ? <DependencyJobChip projectId={projectId} className="floating" /> : null}
@@ -813,21 +824,21 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 other={resultsQuery.data?.other ?? []}
               />
               <ResultsGrid
-                title="Accepted Results"
+                title="已接受结果"
                 items={resultsQuery.data?.accepted ?? []}
                 selectedAssetId={selectedAsset?.asset_id}
                 onSelect={(asset) => setSelectedAsset(projectId, asset.asset_id)}
                 onPreview={(asset) => handleOpenAssetPreview(asset.asset_id, "results")}
               />
               <ResultsGrid
-                title="Candidate Results"
+                title="候选结果"
                 items={resultsQuery.data?.candidate ?? []}
                 selectedAssetId={selectedAsset?.asset_id}
                 onSelect={(asset) => setSelectedAsset(projectId, asset.asset_id)}
                 onPreview={(asset) => handleOpenAssetPreview(asset.asset_id, "results")}
               />
               <ResultsGrid
-                title="Other Results"
+                title="其他结果"
                 items={resultsQuery.data?.other ?? []}
                 selectedAssetId={selectedAsset?.asset_id}
                 onSelect={(asset) => setSelectedAsset(projectId, asset.asset_id)}
@@ -978,7 +989,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     other={resultsQuery.data?.other ?? []}
                   />
                   <ResultsGrid
-                    title="Results"
+                    title="结果"
                     items={allResultAssets}
                     selectedAssetId={selectedAsset?.asset_id}
                     onSelect={(asset) => setSelectedAsset(projectId, asset.asset_id)}

@@ -275,7 +275,7 @@ export function SideNav({
       </div>
 
       <div className="nav-section-label nav-session-label">
-        <span>Sessions</span>
+        <span>会话</span>
         <button
           type="button"
           className="nav-session-add"
@@ -287,8 +287,8 @@ export function SideNav({
         </button>
       </div>
       <div className="nav-session-list">
-        {sessionsQuery.isLoading ? <div className="nav-session-empty">加载 sessions…</div> : null}
-        {sessionsQuery.isError ? <div className="nav-session-empty error">Sessions 加载失败</div> : null}
+        {sessionsQuery.isLoading ? <div className="nav-session-empty">加载会话…</div> : null}
+        {sessionsQuery.isError ? <div className="nav-session-empty error">会话加载失败</div> : null}
         {!sessionsQuery.isLoading && !sessionsQuery.isError && !sessions.length ? (
           <div className="nav-session-empty">暂无 session</div>
         ) : null}

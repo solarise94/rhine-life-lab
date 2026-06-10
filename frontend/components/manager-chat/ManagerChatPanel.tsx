@@ -245,6 +245,10 @@ function formatElapsedTime(startedAt?: number, endedAt?: number) {
   return `${seconds} 秒`;
 }
 
+function isNearBottom(element: HTMLElement, threshold = 48) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
+}
+
 function formatUploadBytes(size: number) {
   if (!Number.isFinite(size) || size <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -582,6 +586,7 @@ export function ManagerChatPanel({
   const autoSessionEventSourceRef = useRef<EventSource | null>(null);
   const activeAutoStreamMessagesRef = useRef<Set<string>>(new Set());
   const autoStreamSeqRef = useRef<Map<string, number>>(new Map());
+  const shouldStickToBottomRef = useRef(true);
   const remoteHydratingRef = useRef(false);
   const stopRequestedRef = useRef(false);
   const currentSessionKeyRef = useRef(`${projectId}:${sessionId ?? ""}`);
@@ -745,10 +750,24 @@ export function ManagerChatPanel({
   }, [projectId, sessionId]);
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    const element = scrollRef.current;
+    if (!element) return;
+    shouldStickToBottomRef.current = true;
+    const handleScroll = () => {
+      shouldStickToBottomRef.current = isNearBottom(element);
+    };
+    handleScroll();
+    element.addEventListener("scroll", handleScroll, { passive: true });
+    return () => element.removeEventListener("scroll", handleScroll);
+  }, [sessionId]);
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element || !shouldStickToBottomRef.current) {
+      return;
     }
-  }, [messages, error, busy, attachments, chatSessionQuery.isLoading]);
+    element.scrollTop = element.scrollHeight;
+  }, [sessionId, messages, error, busy, attachments, chatSessionQuery.isLoading]);
 
   useEffect(() => {
     if (draftMessage) {

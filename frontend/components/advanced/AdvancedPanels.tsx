@@ -25,23 +25,23 @@ export function AdvancedPanels({
   onSelectGlobalPythonRuntime?: (runtime: string) => void;
   onSelectGlobalRRuntime?: (runtime: string) => void;
 }) {
-  const runtimeLabel = globalPythonRuntime && globalPythonRuntime !== "__system__" ? globalPythonRuntime : "system";
-  const rRuntimeLabel = globalRRuntime && globalRRuntime !== "__system__" ? globalRRuntime : "system";
+  const runtimeLabel = globalPythonRuntime && globalPythonRuntime !== "__system__" ? globalPythonRuntime : "系统默认";
+  const rRuntimeLabel = globalRRuntime && globalRRuntime !== "__system__" ? globalRRuntime : "系统默认";
   return (
     <section className="panel">
       <div className="panel-header">
         <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <ShieldAlert size={16} style={{ color: "var(--purple)" }} />
-          Advanced
+          技术详情
         </h3>
-        <span style={{ color: "var(--muted)", fontSize: 12 }}>Diagnostics</span>
+        <span style={{ color: "var(--muted)", fontSize: 12 }}>诊断</span>
       </div>
       <div className="panel-body stack">
         <div className="meta-block">
-          <h4>Executor Runtime</h4>
+          <h4>执行器运行时</h4>
           <div className="kv">
             <label style={{ display: "grid", gap: 6 }}>
-              <span style={{ fontSize: 12, color: "var(--muted)" }}>Global Python runtime</span>
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>全局 Python 运行时</span>
               <select
                 value={globalPythonRuntime ?? "__system__"}
                 onChange={(event) => onSelectGlobalPythonRuntime?.(event.target.value)}
@@ -63,7 +63,7 @@ export function AdvancedPanels({
               </select>
             </label>
             <label style={{ display: "grid", gap: 6 }}>
-              <span style={{ fontSize: 12, color: "var(--muted)" }}>Global R runtime</span>
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>全局 R 运行时</span>
               <select
                 value={globalRRuntime ?? "__system__"}
                 onChange={(event) => onSelectGlobalRRuntime?.(event.target.value)}
@@ -110,7 +110,7 @@ export function AdvancedPanels({
         <div className="meta-block">
           <h4 style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <GitCommit size={12} />
-            Git History
+            Git 历史
           </h4>
           <div className="stack">
             {gitItems.length ? (

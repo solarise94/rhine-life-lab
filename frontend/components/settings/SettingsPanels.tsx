@@ -166,10 +166,10 @@ function LibrarySection({
                 <div><strong>ID</strong><span>{selected.id}</span></div>
                 <div><strong>启用</strong><span>{selected.enabled ? "是" : "否"}</span></div>
                 <div><strong>标签</strong><span>{selected.tags?.join(", ") || "—"}</span></div>
-                <div><strong>Use Cases</strong><span>{selected.use_cases?.join(", ") || "—"}</span></div>
-                <div><strong>Runtime</strong><span>{selected.runtime_requirements?.join(", ") || selected.supported_runtimes?.join(", ") || "—"}</span></div>
-                <div><strong>Launch Hint</strong><span>{selected.launch_hint || "—"}</span></div>
-                <div><strong>Source</strong><span>{selected.source_path ?? selected.source ?? "—"}</span></div>
+                <div><strong>使用场景</strong><span>{selected.use_cases?.join(", ") || "—"}</span></div>
+                <div><strong>运行时要求</strong><span>{selected.runtime_requirements?.join(", ") || selected.supported_runtimes?.join(", ") || "—"}</span></div>
+                <div><strong>启动提示</strong><span>{selected.launch_hint || "—"}</span></div>
+                <div><strong>来源</strong><span>{selected.source_path ?? selected.source ?? "—"}</span></div>
               </div>
             </>
           ) : (
@@ -865,7 +865,7 @@ export function SettingsPanels({
             </select>
           </label>
           <label className="settings-field">
-            <span>Python runtime</span>
+            <span>Python 运行时</span>
             <select value={pythonRuntime} onChange={(event) => setPythonRuntime(event.target.value)} disabled={readOnly}>
               {pythonRuntimes.map((item) => (
                 <option key={`${item.manager}:${item.name}`} value={item.name}>
@@ -875,7 +875,7 @@ export function SettingsPanels({
             </select>
           </label>
           <label className="settings-field">
-            <span>R runtime</span>
+            <span>R 运行时</span>
             <select value={rRuntime} onChange={(event) => setRRuntime(event.target.value)} disabled={readOnly}>
               {rRuntimes.map((item) => (
                 <option key={`${item.manager}:${item.name}`} value={item.name}>
@@ -1069,7 +1069,7 @@ export function SettingsPanels({
                     <div className="settings-model-card-model">{provider.model || "—"}</div>
                     <div className="settings-model-card-meta">
                       <span className={`settings-protocol-badge ${provider.protocol}`}>{formatProtocolLabel(provider.protocol)}</span>
-                      <span>{provider.api_key_configured ? "key configured" : "key missing"}</span>
+                      <span>{provider.api_key_configured ? "key 已配置" : "key 未配置"}</span>
                       <span className="settings-model-card-url">{provider.base_url}</span>
                     </div>
                     <div className="settings-model-card-actions">
@@ -1108,7 +1108,7 @@ export function SettingsPanels({
                 <strong>角色绑定</strong>
                 <span>Manager/Reviewer/Pi/OpenCode project_api 都优先使用 Anthropic-Compatible provider。Pi 兼容性最好，绑定无效时会直接报错。</span>
               </div>
-              <em>role routing</em>
+              <em>角色路由</em>
             </div>
             <div className="settings-form-grid compact">
               {PROVIDER_ROLE_OPTIONS.map((option) => {
@@ -1152,7 +1152,7 @@ export function SettingsPanels({
                 <strong>默认执行器</strong>
                 <span>运行任务时优先使用的执行器。如果所选执行器未配置，运行会直接报错。</span>
               </div>
-              <em>default executor</em>
+              <em>默认执行器</em>
             </div>
             <div className="settings-form-grid compact">
               <label className="settings-field">
@@ -1242,10 +1242,10 @@ export function SettingsPanels({
           <div className="settings-provider-card">
             <div className="settings-provider-card-header">
               <div>
-                <strong>Web Search</strong>
+                <strong>网络搜索</strong>
                 <span>Tavily 仅供 Manager 搜索使用，不参与执行器 API 注入。</span>
               </div>
-              <em>{webSearchEnabled ? "enabled" : "disabled"}</em>
+              <em>{webSearchEnabled ? "已启用" : "已禁用"}</em>
             </div>
             <div className="settings-form-grid compact">
               <label className="settings-field">
@@ -1316,12 +1316,12 @@ export function SettingsPanels({
 
       <LibrarySection
         kind="skill"
-        title="Skill Library"
+        title="技能库"
         description="注册后的技能库。Manager 默认只读取 id 和名称，再把选中的 id 挂到 card 执行配置。"
       />
       <LibrarySection
         kind="mcp"
-        title="MCP Library"
+        title="MCP 能力库"
         description="注册后的 MCP 能力库。Manager 默认只读取 id 和名称，再由 wrapper 在 run 启动时生成 run-local MCP 配置。"
       />
     </div>
