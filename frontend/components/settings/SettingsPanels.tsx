@@ -1033,7 +1033,7 @@ export function SettingsPanels({
                             取消
                           </button>
                           <button type="button" className="settings-button" onClick={() => finishEditingProvider(provider.provider_id)}>
-                            完成
+                            关闭编辑
                           </button>
                         </div>
                       </div>

@@ -90,6 +90,7 @@ export function ProjectDashboard() {
   const [projectIdTouched, setProjectIdTouched] = useState(false);
   const [currentGoal, setCurrentGoal] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
+  const [createdProjectId, setCreatedProjectId] = useState<string | null>(null);
 
   // Data directory mount state
   const [mountExpanded, setMountExpanded] = useState(false);
@@ -121,6 +122,7 @@ export function ProjectDashboard() {
     setProjectIdTouched(false);
     setCurrentGoal("");
     setFormError(null);
+    setCreatedProjectId(null);
     setMountExpanded(false);
     setSelectedDataDirectory(null);
     setDataBrowserPath("");
@@ -208,9 +210,12 @@ export function ProjectDashboard() {
           }
         );
       } catch (err) {
-        // Mount failed but project was created; show warning and let user stay
+        // Mount failed but project was created; close form and show recovery banner
         setFormError(err instanceof Error ? `项目已创建，但挂载数据目录失败：${err.message}` : "项目已创建，但挂载数据目录失败。");
+        setCreatedProjectId(response.project.project_id);
         await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
+        resetForm();
+        setIsCreating(false);
         return;
       }
     }
@@ -256,7 +261,29 @@ export function ProjectDashboard() {
         </div>
       </section>
 
-      {error ? <div className="notice-panel error">{error}</div> : null}
+      {createdProjectId ? (
+        <div className="notice-panel warning">
+          <div>{formError}</div>
+          <div className="project-form-actions" style={{ marginTop: 12 }}>
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => router.push(`/projects/${createdProjectId}/tasks`)}
+            >
+              进入项目
+            </button>
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => setCreatedProjectId(null)}
+            >
+              关闭
+            </button>
+          </div>
+        </div>
+      ) : error ? (
+        <div className="notice-panel error">{error}</div>
+      ) : null}
 
       {isCreating ? (
         <section className="panel project-create-panel">
@@ -360,23 +387,6 @@ export function ProjectDashboard() {
                         </option>
                       ))}
                     </select>
-                    {!selectedDataDirectory && selectedDataRoot && (
-                      <button
-                        type="button"
-                        className="btn secondary"
-                        onClick={() => {
-                          if (selectedDataRoot) {
-                            setSelectedDataDirectory({
-                              root_id: selectedDataRoot.root_id,
-                              path: dataBrowserPath,
-                            });
-                          }
-                        }}
-                        disabled={dataBrowserLoading}
-                      >
-                        使用当前目录
-                      </button>
-                    )}
                   </div>
 
                   <div className="directory-browser-breadcrumb">
