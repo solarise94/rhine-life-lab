@@ -4536,3 +4536,66 @@ button {
   color: var(--text);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
 }
+
+/* ─── SideNav compact runtime selector ─── */
+.nav-runtime-title {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  margin: 18px 8px 8px;
+  letter-spacing: 0.7px;
+  font-weight: 600;
+}
+
+.nav-runtime-section {
+  padding: 0 8px 10px;
+}
+
+.nav-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.nav-runtime-field {
+  display: grid;
+  gap: 4px;
+}
+
+.nav-runtime-field span {
+  font-size: 10px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.nav-runtime-field select {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-solid);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.nav-runtime-field select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background: var(--panel-2);
+}
+
+.nav-runtime-field select:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px var(--glow-blue);
+}
+
+@media (max-width: 1100px) {
+  .nav-runtime-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

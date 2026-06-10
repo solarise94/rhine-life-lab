@@ -40,7 +40,7 @@ function useMediaQuery(query: string) {
 const ARTIFACT_VIEWS = new Set(["results", "files", "report"]);
 
 const primary = [
-  { href: "results", label: "产物管理", icon: Package },
+  { href: "results", label: "数据目录", icon: Package },
   { href: "settings", label: "工作台设置", icon: Settings2 },
 ];
 
@@ -339,6 +339,42 @@ export function SideNav({
             </Link>
           );
         })}
+      </div>
+
+      <div className="nav-runtime-title">运行时</div>
+      <div className="nav-runtime-section">
+        <div className="nav-runtime-grid">
+          <label className="nav-runtime-field">
+            <span>Python</span>
+            <select
+              value={globalPythonRuntime ?? "__system__"}
+              onChange={(event) => onSelectGlobalPythonRuntime?.(event.target.value)}
+              disabled={Boolean(managerAuto?.enabled)}
+            >
+              <option value="__system__">系统默认</option>
+              {pythonRuntimes.map((item) => (
+                <option key={`${item.manager}:${item.name}`} value={item.name}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="nav-runtime-field">
+            <span>R</span>
+            <select
+              value={globalRRuntime ?? "__system__"}
+              onChange={(event) => onSelectGlobalRRuntime?.(event.target.value)}
+              disabled={Boolean(managerAuto?.enabled)}
+            >
+              <option value="__system__">系统默认</option>
+              {rRuntimes.map((item) => (
+                <option key={`${item.manager}:${item.name}`} value={item.name}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
       </div>
 
       <div className="nav-section-label">高级</div>

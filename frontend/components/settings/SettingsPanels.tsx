@@ -850,7 +850,7 @@ export function SettingsPanels({
         <div className="settings-section-header">
           <div>
             <h3>运行时偏好</h3>
-            <p>项目级持久化运行时偏好。Manager 和 card 执行共用这套设置。</p>
+            <p>项目级持久化运行时偏好。Manager 和 card 执行共用这套设置。侧边栏可快速切换 Python / R Runtime；此处保留完整运行时设置。</p>
           </div>
           <div className="settings-inline-note">{runtimeSummary}</div>
         </div>

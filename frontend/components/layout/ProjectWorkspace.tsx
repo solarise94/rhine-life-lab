@@ -72,9 +72,9 @@ type View = "tasks" | "results" | "files" | "report" | "advanced" | "settings";
 const EMPTY_CARD_INTERACTION_ORDER: string[] = [];
 
 const PAGE_INTRO: Record<Exclude<View, "tasks">, string> = {
-  results: "查看和管理项目产物：数据资产、执行结果和报告导出。",
-  files: "查看和管理项目产物：数据资产、执行结果和报告导出。",
-  report: "查看和管理项目产物：数据资产、执行结果和报告导出。",
+  results: "查看和管理项目数据目录：数据资产、执行结果和报告导出。",
+  files: "查看和管理项目数据目录：数据资产、执行结果和报告导出。",
+  report: "查看和管理项目数据目录：数据资产、执行结果和报告导出。",
   settings: "配置项目运行时偏好、API 供应商、角色绑定和诊断选项。",
   advanced: "查看项目图结构、Git 历史、运行时诊断和卡片详情。",
 };
@@ -797,7 +797,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             summary={snapshot.summary}
             title={
               view === "results" || view === "files" || view === "report"
-                ? "产物管理"
+                ? "数据目录"
                 : view === "settings"
                 ? "工作台设置"
                 : "技术详情"
