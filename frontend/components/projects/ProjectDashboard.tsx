@@ -211,11 +211,13 @@ export function ProjectDashboard() {
         );
       } catch (err) {
         // Mount failed but project was created; close form and show recovery banner
-        setFormError(err instanceof Error ? `项目已创建，但挂载数据目录失败：${err.message}` : "项目已创建，但挂载数据目录失败。");
-        setCreatedProjectId(response.project.project_id);
+        const msg = err instanceof Error ? `项目已创建，但挂载数据目录失败：${err.message}` : "项目已创建，但挂载数据目录失败。";
+        const pid = response.project.project_id;
         await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
         resetForm();
         setIsCreating(false);
+        setFormError(msg);
+        setCreatedProjectId(pid);
         return;
       }
     }
