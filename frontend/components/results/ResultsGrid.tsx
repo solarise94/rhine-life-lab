@@ -58,6 +58,7 @@ export function ResultsGrid({
                   key={item.asset_id}
                   className={`result-item result-button ${selectedAssetId === item.asset_id ? "active" : ""} animate-enter`}
                   style={{ animationDelay: `${idx * 40}ms` }}
+                  title={item.title}
                   onClick={() => {
                     onSelect(item);
                     onPreview?.(item);
@@ -69,10 +70,8 @@ export function ResultsGrid({
                     </div>
                     <div style={{ minWidth: 0, flex: 1 }}>
                       <div className="result-title">{item.title}</div>
-                      <div className="result-meta">{item.asset_type}</div>
                     </div>
                   </div>
-                  <div className="muted result-summary">{item.summary}</div>
                   <div className="result-tags">
                     <span className="pill">{ASSET_STATUS_LABELS[item.status] ?? item.status}</span>
                     {item.report_selected ? (

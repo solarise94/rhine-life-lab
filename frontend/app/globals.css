@@ -3828,7 +3828,7 @@ button {
 }
 
 .result-item {
-  min-height: 100px;
+  min-height: 76px;
 }
 
 .result-icon {
@@ -3870,6 +3870,10 @@ button {
   font-weight: 600;
   line-height: 1.3;
   color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .result-meta {
