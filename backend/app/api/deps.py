@@ -12,6 +12,7 @@ from app.services.flow_service import FlowService
 from app.services.library_registry_service import LibraryRegistryService
 from app.services.manager_auto_service import ManagerAutoService
 from app.services.manifest_service import ManifestService
+from app.services.package_service import PackageService
 from app.services.patch_apply import PatchApplyService
 from app.services.patch_validator import PatchValidator
 from app.services.project_file_service import ProjectFileService
@@ -52,6 +53,7 @@ def get_manager_service() -> ManagerService:
         library_registry_service=get_library_registry_service(),
         manager_auto_service=get_manager_auto_service(),
         background_workboard_service=get_background_workboard_service(),
+        package_service=get_package_service(),
     )
 
 
@@ -151,6 +153,14 @@ def get_library_registry_service() -> LibraryRegistryService:
     return LibraryRegistryService(
         get_project_service(),
         get_app_config_service(),
+    )
+
+
+@lru_cache
+def get_package_service() -> PackageService:
+    return PackageService(
+        get_library_registry_service(),
+        get_project_service(),
     )
 
 
