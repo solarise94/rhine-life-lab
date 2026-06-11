@@ -580,47 +580,55 @@ class PackageService:
         """Resolve effective runtime for a package instance.
 
         Returns (eff_python, eff_r, python_source, r_source).
+        Priority: runtime_override > package_requirement > project_default.
         """
         pkg_python = manifest.executor.runtime_requirements.python_runtime
         pkg_r = manifest.executor.runtime_requirements.r_runtime
         proj_python = getattr(proj_prefs, "python_runtime", None)
         proj_r = getattr(proj_prefs, "r_runtime", None)
 
-        # Apply explicit runtime override if provided
-        if runtime_override:
-            if "python_runtime" in runtime_override:
-                proj_python = runtime_override["python_runtime"] or None
-            if "r_runtime" in runtime_override:
-                proj_r = runtime_override["r_runtime"] or None
-
         eff_python = proj_python
         eff_r = proj_r
         python_source = "project_default"
         r_source = "project_default"
 
-        # Python runtime resolution
+        # Python runtime resolution from package requirements
         if pkg_python == "__system__":
             eff_python = None
             python_source = "__system__"
         elif pkg_python:
-            if proj_python == pkg_python:
-                # Project default already satisfies → follow project default
-                pass
-            else:
+            if proj_python != pkg_python:
                 # Project default doesn't match → card override from package requirement
                 eff_python = pkg_python
                 python_source = "package_requirement"
 
-        # R runtime resolution
+        # R runtime resolution from package requirements
         if pkg_r == "__system__":
             eff_r = None
             r_source = "__system__"
         elif pkg_r:
-            if proj_r == pkg_r:
-                pass
-            else:
+            if proj_r != pkg_r:
                 eff_r = pkg_r
                 r_source = "package_requirement"
+
+        # Apply explicit runtime override (highest priority)
+        if runtime_override:
+            override_python = runtime_override.get("python_runtime")
+            if override_python is not None:
+                if override_python == "__system__" or override_python == "":
+                    eff_python = None
+                    python_source = "__system__"
+                else:
+                    eff_python = override_python
+                    python_source = "card_override"
+            override_r = runtime_override.get("r_runtime")
+            if override_r is not None:
+                if override_r == "__system__" or override_r == "":
+                    eff_r = None
+                    r_source = "__system__"
+                else:
+                    eff_r = override_r
+                    r_source = "card_override"
 
         return eff_python, eff_r, python_source, r_source
 
