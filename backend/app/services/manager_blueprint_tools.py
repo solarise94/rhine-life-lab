@@ -1054,7 +1054,6 @@ class ManagerBlueprintTools:
             runtime=runtime,
             tags=tags,
             top_k=top_k,
-            minimal=True,
         )
         result["project_id"] = project_id
         return result
@@ -1070,7 +1069,6 @@ class ManagerBlueprintTools:
             runtime=runtime,
             tags=tags,
             top_k=top_k,
-            minimal=True,
         )
         result["project_id"] = project_id
         return result

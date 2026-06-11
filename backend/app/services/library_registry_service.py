@@ -65,18 +65,29 @@ class LibraryRegistryService:
     ) -> dict[str, Any]:
         registry = self._ensure_registry(kind)
         compact_query = self._normalize_text(query)
+        query_terms = compact_query.split() if compact_query else []
         tag_filters = {self._normalize_text(item) for item in (tags or []) if self._normalize_text(item)}
         runtime_filter = self._normalize_text(runtime or "")
         scored: list[tuple[float, LibraryEntry]] = []
+        match_reasons: dict[str, str] = {}
         for entry in registry.items:
             score = self._score_entry(entry, compact_query, runtime_filter, tag_filters)
             if score <= 0:
                 continue
             scored.append((score, entry))
+            match_reasons[entry.id] = self._build_match_reason(
+                entry, query_terms, runtime_filter, tag_filters
+            )
         scored.sort(key=lambda item: (-item[0], item[1].name.lower()))
         items = [
             {
-                **(self._serialize_minimal_entry(entry) if minimal else self._serialize_entry(entry)),
+                **(
+                    self._serialize_minimal_entry(entry)
+                    if minimal
+                    else self._serialize_search_entry(
+                        entry, match_reason=match_reasons.get(entry.id, "broad match")
+                    )
+                ),
                 "score": round(score, 4),
             }
             for score, entry in scored[: max(1, min(top_k, 20))]
@@ -98,7 +109,7 @@ class LibraryRegistryService:
             raise ValueError(f"{kind} library item not found: {entry_id}")
         return {
             "kind": kind,
-            "item": self._serialize_entry(item),
+            "item": self._serialize_detail_entry(item),
             "updated_at": registry.updated_at,
         }
 
@@ -580,6 +591,70 @@ class LibraryRegistryService:
     def _normalize_text(value: str) -> str:
         return " ".join(WORD_RE.findall(value.lower()))
 
+    @staticmethod
+    def _build_match_reason(
+        entry: LibraryEntry,
+        query_terms: list[str],
+        runtime_filter: str,
+        tag_filters: set[str],
+    ) -> str:
+        """Build a human-readable match reason from query/filter hits."""
+        norm = LibraryRegistryService._normalize_text
+        parts: list[str] = []
+        norm_name = norm(entry.name)
+        name_hits = [t for t in query_terms if t in norm_name]
+        if name_hits:
+            parts.append(f"name: {', '.join(name_hits)}")
+        norm_aliases = " ".join(entry.aliases).lower()
+        alias_hits = [t for t in query_terms if t in norm_aliases]
+        if alias_hits:
+            parts.append(f"aliases: {', '.join(alias_hits)}")
+        norm_summary = norm(entry.summary_short or "")
+        summary_hits = [t for t in query_terms if t in norm_summary]
+        if summary_hits:
+            parts.append(f"summary: {', '.join(summary_hits)}")
+        entry_tag_norms = {norm(t) for t in entry.tags}
+        tag_hits = tag_filters & entry_tag_norms
+        if tag_hits:
+            parts.append(f"tags: {', '.join(tag_hits)}")
+        if runtime_filter:
+            runtime_norms = {
+                norm(r)
+                for r in [*entry.supported_runtimes, *entry.runtime_requirements]
+                if norm(r)
+            }
+            if runtime_filter in runtime_norms:
+                parts.append(f"runtime: {runtime_filter}")
+        return "; ".join(parts) if parts else "broad match"
+
+    @staticmethod
+    def _serialize_search_entry(item: LibraryEntry, *, match_reason: str = "broad match") -> dict[str, Any]:
+        return {
+            "id": item.id,
+            "kind": item.kind,
+            "name": item.name,
+            "summary_short": item.summary_short,
+            "match_reason": match_reason,
+            "supported_runtimes": list(item.supported_runtimes),
+            "enabled": item.enabled,
+        }
+
+    @staticmethod
+    def _serialize_detail_entry(item: LibraryEntry) -> dict[str, Any]:
+        return {
+            "id": item.id,
+            "kind": item.kind,
+            "name": item.name,
+            "summary_short": item.summary_short,
+            "summary_long": item.summary_long,
+            "use_cases": list(item.use_cases),
+            "compatibility_notes": list(item.compatibility_notes),
+            "supported_runtimes": list(item.supported_runtimes),
+            "runtime_requirements": list(item.runtime_requirements),
+            "launch_hint": item.launch_hint,
+            "enabled": item.enabled,
+        }
+
     def _score_entry(
         self,
         entry: LibraryEntry,
@@ -595,6 +670,7 @@ class LibraryRegistryService:
                 entry.summary_long.lower(),
                 " ".join(entry.tags).lower(),
                 " ".join(entry.use_cases).lower(),
+                " ".join(entry.aliases).lower(),
             ]
         )
         if compact_query:
@@ -603,10 +679,16 @@ class LibraryRegistryService:
             for term in query_terms:
                 if term in haystack:
                     matched += 1
-            score += matched * 1.4
+            # Also check aliases (not in haystack to avoid inflating phrase-match)
+            alias_haystack = " ".join(entry.aliases).lower()
+            alias_matched = 0
+            for term in query_terms:
+                if term in alias_haystack:
+                    alias_matched += 1
+            score += matched * 1.4 + alias_matched * 1.2
             if compact_query in haystack:
                 score += 1.8
-            if matched == 0:
+            if matched == 0 and alias_matched == 0:
                 return 0.0
         if runtime_filter:
             runtime_terms = {
