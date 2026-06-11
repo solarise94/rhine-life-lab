@@ -25,6 +25,8 @@ class RuntimeBindings(BaseModel):
     container_image: str | None = None
     working_dir: str = "."
     env: dict[str, str] = Field(default_factory=dict)
+    runtime_source: str | None = None
+    """Where the effective runtime came from: app_recent_default, project_default, card_override, package_requirement."""
 
 
 class ExecutorScriptAssetRequirement(BaseModel):

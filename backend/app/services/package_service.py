@@ -6,17 +6,22 @@ import re
 import zipfile
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from app.core.config import Settings, get_settings
+from app.models.cards import Card, CardAssetRef, CardStatus, CardType
+from app.models.executor import ExecutorContext, RuntimeBindings
 from app.models.packages import (
     PackageCompatibility,
     PackageImportResult,
     PackageImportStatus,
     PackageIndexEntry,
+    PackageInstantiationResult,
     PackageManifest,
     PortableCardPackage,
 )
 from app.services.library_registry_service import LibraryRegistryService
+from app.services.project_service import ProjectService
 from app.services.utils import atomic_write_json, read_json, utc_now
 
 
@@ -69,9 +74,11 @@ class PackageService:
     def __init__(
         self,
         library_registry_service: LibraryRegistryService,
+        project_service: ProjectService,
         settings: Settings | None = None,
     ) -> None:
         self.library_registry_service = library_registry_service
+        self.project_service = project_service
         self.settings = settings or get_settings()
         self.packages_root = Path(self.settings.data_root) / "_system" / "packages"
 
@@ -180,6 +187,126 @@ class PackageService:
             status=status,
             package_id=manifest.package_id,
             version=manifest.version,
+            warnings=warnings,
+        )
+
+    def instantiate_package(
+        self,
+        package_id: str,
+        project_id: str,
+        *,
+        input_bindings: dict[str, str] | None = None,
+        parameter_bindings: dict[str, Any] | None = None,
+        runtime_override: dict[str, str] | None = None,
+        version: str | None = None,
+    ) -> PackageInstantiationResult:
+        """Instantiate a package into a project card."""
+        package = self.get_package(package_id, version)
+        if package is None:
+            return PackageInstantiationResult(
+                card_id="",
+                project_id=project_id,
+                package_id=package_id,
+                version=version or "",
+                blockers=[f"Package {package_id} not found."],
+            )
+
+        manifest = package.manifest
+
+        # Get project runtime preferences
+        try:
+            proj_prefs = self.project_service.get_project_runtime_preferences(project_id)
+        except Exception as exc:
+            return PackageInstantiationResult(
+                card_id="",
+                project_id=project_id,
+                package_id=package_id,
+                version=manifest.version,
+                blockers=[f"Failed to read project runtime preferences: {exc}"],
+            )
+
+        # Resolve runtime
+        (
+            eff_python,
+            eff_r,
+            python_source,
+            r_source,
+        ) = self._resolve_runtime_for_package(manifest, proj_prefs, runtime_override)
+
+        # Build inputs
+        inputs: list[CardAssetRef] = []
+        input_bindings = input_bindings or {}
+        for inp in manifest.inputs_schema:
+            asset_id = input_bindings.get(inp.slot)
+            inputs.append(
+                CardAssetRef(
+                    label=inp.label,
+                    asset_id=asset_id,
+                    status="bound" if asset_id else "pending",
+                )
+            )
+
+        # Build executor context
+        runtime_bindings = RuntimeBindings(
+            conda_env=eff_python,
+            r_env=eff_r,
+            runtime_source=python_source if eff_python else r_source,
+        )
+        executor_context = ExecutorContext(
+            skills=list(manifest.executor.skills),
+            mcp_servers=list(manifest.executor.mcp_servers),
+            script_preference=manifest.executor.script_preference,
+            instruction_blocks=list(manifest.executor.instruction_blocks),
+            runtime_bindings=runtime_bindings,
+        )
+
+        # Create card
+        card_id = str(uuid4())
+        card = Card(
+            card_id=card_id,
+            card_type="module",
+            title=manifest.title,
+            status="proposed",
+            summary=manifest.summary,
+            why=manifest.description,
+            inputs=inputs,
+            executor_context=executor_context,
+        )
+
+        # Save card to project graph
+        try:
+            store = self.project_service.graph_store(project_id)
+            cards = store.load_cards()
+            cards.append(card)
+            store.save_cards(cards)
+        except Exception as exc:
+            return PackageInstantiationResult(
+                card_id=card_id,
+                project_id=project_id,
+                package_id=package_id,
+                version=manifest.version,
+                blockers=[f"Failed to save card to project: {exc}"],
+            )
+
+        # Copy bundle files into project (optional, for reference)
+        warnings: list[str] = []
+        if package.bundle_files:
+            try:
+                self._copy_bundle_into_project(project_id, card_id, package.bundle_files)
+            except Exception as exc:
+                warnings.append(f"Bundle files not copied into project: {exc}")
+
+        # Determine unified runtime source for reporting
+        runtime_source = python_source if eff_python else (r_source if eff_r else "project_default")
+
+        return PackageInstantiationResult(
+            card_id=card_id,
+            project_id=project_id,
+            package_id=package_id,
+            version=manifest.version,
+            effective_python_runtime=eff_python,
+            effective_r_runtime=eff_r,
+            runtime_source=runtime_source,
             warnings=warnings,
         )
 
@@ -443,6 +570,74 @@ class PackageService:
         index["entries"] = entries
         index["updated_at"] = utc_now()
         self._write_index(index)
+
+    def _resolve_runtime_for_package(
+        self,
+        manifest: PackageManifest,
+        proj_prefs: Any,
+        runtime_override: dict[str, str] | None,
+    ) -> tuple[str | None, str | None, str, str]:
+        """Resolve effective runtime for a package instance.
+
+        Returns (eff_python, eff_r, python_source, r_source).
+        """
+        pkg_python = manifest.executor.runtime_requirements.python_runtime
+        pkg_r = manifest.executor.runtime_requirements.r_runtime
+        proj_python = getattr(proj_prefs, "python_runtime", None)
+        proj_r = getattr(proj_prefs, "r_runtime", None)
+
+        # Apply explicit runtime override if provided
+        if runtime_override:
+            if "python_runtime" in runtime_override:
+                proj_python = runtime_override["python_runtime"] or None
+            if "r_runtime" in runtime_override:
+                proj_r = runtime_override["r_runtime"] or None
+
+        eff_python = proj_python
+        eff_r = proj_r
+        python_source = "project_default"
+        r_source = "project_default"
+
+        # Python runtime resolution
+        if pkg_python == "__system__":
+            eff_python = None
+            python_source = "__system__"
+        elif pkg_python:
+            if proj_python == pkg_python:
+                # Project default already satisfies → follow project default
+                pass
+            else:
+                # Project default doesn't match → card override from package requirement
+                eff_python = pkg_python
+                python_source = "package_requirement"
+
+        # R runtime resolution
+        if pkg_r == "__system__":
+            eff_r = None
+            r_source = "__system__"
+        elif pkg_r:
+            if proj_r == pkg_r:
+                pass
+            else:
+                eff_r = pkg_r
+                r_source = "package_requirement"
+
+        return eff_python, eff_r, python_source, r_source
+
+    def _copy_bundle_into_project(
+        self,
+        project_id: str,
+        card_id: str,
+        bundle_files: dict[str, str],
+    ) -> None:
+        """Copy package bundle files into the project for reference."""
+        project_root = self.project_service.project_path(project_id)
+        dest_dir = project_root / "scripts" / "curated" / "packages" / card_id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for rel_path, content in bundle_files.items():
+            file_path = dest_dir / rel_path
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(content, encoding="utf-8")
 
     @staticmethod
     def _normalize_text(value: str) -> str:

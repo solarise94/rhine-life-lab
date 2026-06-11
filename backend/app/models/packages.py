@@ -114,3 +114,17 @@ class PackageImportResult(BaseModel):
     version: str
     warnings: list[str] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
+
+
+class PackageInstantiationResult(BaseModel):
+    """Result of instantiating a package into a project card."""
+
+    card_id: str
+    project_id: str
+    package_id: str
+    version: str
+    effective_python_runtime: str | None = None
+    effective_r_runtime: str | None = None
+    runtime_source: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
