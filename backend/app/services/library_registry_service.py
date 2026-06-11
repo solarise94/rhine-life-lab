@@ -744,17 +744,63 @@ class LibraryRegistryService:
         selected_runtime: str | None,
         runtimes_by_name: dict[str, dict[str, Any]],
     ) -> dict[str, Any] | None:
-        if item.id != "omicverse":
-            return None
-        runtime = runtimes_by_name.get(selected_runtime or "omicverse", {})
-        python_path = runtime.get("path")
-        if not python_path:
-            return None
-        return {
-            "mcpServers": {
-                item.id: {
-                    "command": python_path,
-                    "args": ["-m", "omicverse.mcp", "--phase", "P0"],
+        """Build MCP config from manifest.json/server.json or fallback to runtime profile."""
+        # 1. Try to read manifest.json / server.json from source directory
+        manifest_data: dict[str, Any] | None = None
+        if item.source_path:
+            source_path = Path(item.source_path)
+            for manifest_name in ("manifest.json", "server.json"):
+                candidate = source_path.parent / manifest_name
+                if candidate.exists():
+                    try:
+                        manifest_data = json.loads(candidate.read_text(encoding="utf-8"))
+                        break
+                    except (OSError, json.JSONDecodeError):
+                        continue
+
+        # 2. If manifest found, parse generic fields
+        if manifest_data:
+            # Some manifests nest under "mcpServers"; unwrap if present
+            if "mcpServers" in manifest_data and isinstance(manifest_data["mcpServers"], dict):
+                # If manifest has nested mcpServers, extract the first server config
+                servers = manifest_data["mcpServers"]
+                first_key = next(iter(servers), None)
+                if first_key:
+                    manifest_data = servers[first_key]
+
+            command = str(manifest_data.get("command") or "").strip()
+            args = list(manifest_data.get("args") or [])
+            env = dict(manifest_data.get("env") or {})
+
+            if not command:
+                # Manifest exists but lacks a valid command; continue to fallback
+                manifest_data = None
+            else:
+                # Resolve Python runtime path when command is a generic Python interpreter
+                if command in {"python", "python3", "py"}:
+                    runtime = runtimes_by_name.get(selected_runtime or "", {})
+                    python_path = runtime.get("path")
+                    if python_path:
+                        command = python_path
+
+                server_config: dict[str, Any] = {"command": command, "args": args}
+                if env:
+                    server_config["env"] = env
+                return {"mcpServers": {item.id: server_config}}
+
+        # 3. Fallback to omicverse runtime profile special case
+        if item.id == "omicverse":
+            runtime = runtimes_by_name.get(selected_runtime or "omicverse", {})
+            python_path = runtime.get("path")
+            if not python_path:
+                return None
+            return {
+                "mcpServers": {
+                    item.id: {
+                        "command": python_path,
+                        "args": ["-m", "omicverse.mcp", "--phase", "P0"],
+                    }
                 }
             }
-        }
+
+        return None
