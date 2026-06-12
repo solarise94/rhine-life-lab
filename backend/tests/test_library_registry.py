@@ -8,6 +8,7 @@ Covers:
 """
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -169,6 +170,67 @@ class TestLibraryRegistryInstallAndRegister(unittest.TestCase):
         entries = service.list_entries("mcp")["items"]
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["id"], "installed-mcp")
+
+    def test_install_mcp_from_directory_mcp_json_is_scanned_and_resolvable(self):
+        service = self._service()
+        source = self.data_root / "mcp-json-source"
+        source.mkdir()
+        (source / "mcp.json").write_text(
+            '{"name": "MCP JSON Server", "type": "http", "url": "http://127.0.0.1:2/sse"}',
+            encoding="utf-8",
+        )
+        result = service.install_mcp_from_directory(source, target_id="mcp-json")
+        self.assertEqual(result["installed_name"], "MCP JSON Server")
+
+        # A later full refresh must still discover the entry.
+        service.refresh_entries("mcp", force=True)
+        entry = service.get_entry("mcp", "mcp-json")["item"]
+        self.assertEqual(entry["name"], "MCP JSON Server")
+
+        # resolve_mcp_bindings must be able to render its config.
+        with patch.object(service.project_service, "get_project_snapshot", return_value={"python_runtimes": []}):
+            bindings = service.resolve_mcp_bindings("test-project", ["mcp-json"])
+        self.assertEqual(len(bindings), 1)
+        self.assertEqual(bindings[0]["config"]["mcpServers"]["mcp-json"]["url"], "http://127.0.0.1:2/sse")
+
+    def test_register_mcp_atomic_keeps_old_on_write_failure(self):
+        service = self._service()
+        service.register_mcp_server(
+            server_id="my-mcp",
+            name="Old",
+            transport="http",
+            url="http://127.0.0.1:1/sse",
+        )
+        old_server_json = self.data_root / "_system" / "capabilities" / "mcp" / "my-mcp" / "server.json"
+        self.assertTrue(old_server_json.exists())
+
+        with patch.object(Path, "write_text", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                service.register_mcp_server(
+                    server_id="my-mcp",
+                    name="New",
+                    transport="http",
+                    url="http://127.0.0.1:2/sse",
+                    overwrite=True,
+                )
+
+        # Old installation must still be intact.
+        self.assertTrue(old_server_json.exists())
+        self.assertIn("Old", old_server_json.read_text(encoding="utf-8"))
+
+    def test_install_skill_atomic_keeps_old_on_copy_failure(self):
+        service = self._service()
+        skill_dir = self._make_skill_dir(self.data_root, "source")
+        service.install_skill_from_directory(skill_dir, target_id="my-skill")
+        old_skill_md = self.data_root / "_system" / "capabilities" / "skills" / "my-skill" / "SKILL.md"
+        self.assertTrue(old_skill_md.exists())
+
+        new_skill_dir = self._make_skill_dir(self.data_root, "new-source")
+        with patch.object(shutil, "copytree", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                service.install_skill_from_directory(new_skill_dir, target_id="my-skill", overwrite=True)
+
+        self.assertTrue(old_skill_md.exists())
 
 
 if __name__ == "__main__":

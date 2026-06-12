@@ -592,7 +592,7 @@ if [[ "${DEPLOY_MODE}" != "restart-only" ]]; then
   fi
 
   # Backend Python dependencies
-  if [[ "${DEPLOY_MODE}" == "full-rebuild" ]] || _marker_changed backend-install backend/pyproject.toml backend/uv.lock; then
+  if [[ "${DEPLOY_MODE}" == "full-rebuild" ]] || [[ ! -x "${ROOT_DIR}/.venv/backend/bin/python" ]] || _marker_changed backend-install backend/pyproject.toml backend/uv.lock; then
     "${PYTHON_BIN}" -m venv "${ROOT_DIR}/.venv/backend"
     "${ROOT_DIR}/.venv/backend/bin/pip" install --upgrade pip
     "${ROOT_DIR}/.venv/backend/bin/pip" install -e "${ROOT_DIR}/backend"
@@ -696,7 +696,7 @@ BACKEND_PROXY_TARGET=http://127.0.0.1:18001
 EOF
 
   # Frontend dependencies
-  if [[ "${DEPLOY_MODE}" == "full-rebuild" ]] || _marker_changed frontend-install frontend/package-lock.json; then
+  if [[ "${DEPLOY_MODE}" == "full-rebuild" ]] || [[ ! -d "${ROOT_DIR}/frontend/node_modules" ]] || _marker_changed frontend-install frontend/package-lock.json; then
     pushd "${ROOT_DIR}/frontend" >/dev/null
     if [[ -f package-lock.json ]]; then
       npm ci
@@ -710,7 +710,7 @@ EOF
   fi
 
   # Frontend build
-  if [[ "${DEPLOY_MODE}" == "full-rebuild" ]] || _marker_changed frontend-build frontend/package.json frontend/package-lock.json frontend/next.config.* frontend/tsconfig*.json frontend/app frontend/components frontend/lib frontend/public; then
+  if [[ "${DEPLOY_MODE}" == "full-rebuild" ]] || [[ ! -f "${FRONTEND_RELEASE_DIR}/frontend/server.js" ]] || _marker_changed frontend-build frontend/package.json frontend/package-lock.json frontend/next.config.* frontend/tsconfig*.json frontend/app frontend/components frontend/lib frontend/public; then
     set -a
     source "${APP_ENV_DIR}/frontend.env"
     set +a
@@ -733,7 +733,7 @@ EOF
   fi
 
   # Manager-agent dependencies
-  if [[ "${DEPLOY_MODE}" == "full-rebuild" ]] || _marker_changed manager-install manager-agent/package-lock.json; then
+  if [[ "${DEPLOY_MODE}" == "full-rebuild" ]] || [[ ! -d "${ROOT_DIR}/manager-agent/node_modules" ]] || _marker_changed manager-install manager-agent/package-lock.json; then
     pushd "${ROOT_DIR}/manager-agent" >/dev/null
     if [[ -f package-lock.json ]]; then
       npm ci

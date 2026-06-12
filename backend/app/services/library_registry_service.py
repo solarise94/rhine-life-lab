@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import re
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib import error, request as url_request
@@ -115,7 +117,8 @@ class LibraryRegistryService:
         else:
             items = self._build_mcp_entries(force=force)
         registry = LibraryRegistry(kind=kind, items=items, updated_at=utc_now())
-        self._write_registry(registry)
+        with self._registry_lock(kind):
+            self._write_registry(registry)
         return {
             "kind": kind,
             "refreshed": len(items),
@@ -153,7 +156,8 @@ class LibraryRegistryService:
         if target is None:
             raise ValueError(f"{kind} library item not found: {entry_id}")
         new_registry = LibraryRegistry(kind=kind, items=updated, updated_at=utc_now())
-        self._write_registry(new_registry)
+        with self._registry_lock(kind):
+            self._write_registry(new_registry)
         return {
             "kind": kind,
             "item": self._serialize_entry(target),
@@ -234,6 +238,34 @@ class LibraryRegistryService:
     def _registry_path(self, kind: LibraryKind) -> Path:
         return self.registry_root / f"{kind}s.json"
 
+    @contextmanager
+    def _registry_lock(self, kind: LibraryKind):
+        """Exclusive file lock for the given registry kind (context manager)."""
+        lock_path = self.registry_root / f"{kind}s.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _prepare_temp_dest(dest: Path) -> Path:
+        """Return a temporary path next to dest for atomic install/replace."""
+        import uuid
+        tmp = dest.parent / f".{dest.name}.tmp-{uuid.uuid4().hex}"
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        return tmp
+
+    @staticmethod
+    def _commit_temp_dest(tmp_dest: Path, dest: Path) -> None:
+        """Atomically replace dest with tmp_dest."""
+        if dest.exists():
+            shutil.rmtree(dest)
+        tmp_dest.rename(dest)
+
     @staticmethod
     def _validate_capability_id(value: str) -> str:
         """Return a trimmed id or raise ValueError if it is unsafe."""
@@ -258,11 +290,12 @@ class LibraryRegistryService:
 
     def _add_or_replace_entry(self, kind: LibraryKind, entry: LibraryEntry) -> None:
         """Insert or update a single entry in the registry without re-scanning disk."""
-        items = self._load_registry_items(kind)
-        by_id = {item.id: item for item in items}
-        by_id[entry.id] = entry
-        registry = LibraryRegistry(kind=kind, items=list(by_id.values()), updated_at=utc_now())
-        self._write_registry(registry)
+        with self._registry_lock(kind):
+            items = self._load_registry_items(kind)
+            by_id = {item.id: item for item in items}
+            by_id[entry.id] = entry
+            registry = LibraryRegistry(kind=kind, items=list(by_id.values()), updated_at=utc_now())
+            self._write_registry(registry)
 
     def _build_single_skill_entry(self, skill_dir: Path, installed_id: str) -> LibraryEntry:
         """Build a LibraryEntry for a single installed skill directory."""
@@ -433,11 +466,12 @@ class LibraryRegistryService:
     def _scan_mcp_sources(self) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
         seen: set[str] = set()
+        manifest_names = ("server.json", "manifest.json", "mcp.json")
         for root in self._resolved_mcp_roots():
             for path in sorted(root.rglob("*")):
                 if not path.is_file():
                     continue
-                if path.name.lower() not in {"readme.md", "manifest.json", "server.json"}:
+                if path.name.lower() not in {*manifest_names, "readme.md"}:
                     continue
                 entry_id = path.parent.name
                 if entry_id in seen:
@@ -445,12 +479,15 @@ class LibraryRegistryService:
                 seen.add(entry_id)
                 text = self._read_source_text(path)
 
-                # Prefer a friendly name persisted in server.json/manifest.json
+                # Prefer a friendly name persisted in the canonical manifest
                 display_name = entry_id
-                manifest_path = path.parent / "server.json"
-                if not manifest_path.exists():
-                    manifest_path = path.parent / "manifest.json"
-                if manifest_path.exists():
+                manifest_path: Path | None = None
+                for name in manifest_names:
+                    candidate = path.parent / name
+                    if candidate.exists():
+                        manifest_path = candidate
+                        break
+                if manifest_path is not None:
                     try:
                         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                         if manifest.get("name"):
@@ -897,9 +934,14 @@ class LibraryRegistryService:
         if dest.exists() and not overwrite:
             raise FileExistsError(f"Target already exists: {dest}")
 
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(source_dir, dest)
+        tmp_dest = self._prepare_temp_dest(dest)
+        try:
+            shutil.copytree(source_dir, tmp_dest)
+            self._commit_temp_dest(tmp_dest, dest)
+        except Exception:
+            if tmp_dest.exists():
+                shutil.rmtree(tmp_dest)
+            raise
 
         entry = self._build_single_skill_entry(dest, installed_id)
         self._add_or_replace_entry("skill", entry)
@@ -957,10 +999,17 @@ class LibraryRegistryService:
                 server_config["headers"] = headers
         server_config["name"] = name
 
-        if dest.exists():
-            shutil.rmtree(dest)
-        dest.mkdir(parents=True)
-        (dest / "server.json").write_text(json.dumps(server_config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp_dest = self._prepare_temp_dest(dest)
+        try:
+            tmp_dest.mkdir(parents=True)
+            (tmp_dest / "server.json").write_text(
+                json.dumps(server_config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            self._commit_temp_dest(tmp_dest, dest)
+        except Exception:
+            if tmp_dest.exists():
+                shutil.rmtree(tmp_dest)
+            raise
 
         entry = self._build_single_mcp_entry(dest / "server.json")
         self._add_or_replace_entry("mcp", entry)
@@ -1008,9 +1057,14 @@ class LibraryRegistryService:
         if dest.exists() and not overwrite:
             raise FileExistsError(f"Target already exists: {dest}")
 
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(source_dir, dest)
+        tmp_dest = self._prepare_temp_dest(dest)
+        try:
+            shutil.copytree(source_dir, tmp_dest)
+            self._commit_temp_dest(tmp_dest, dest)
+        except Exception:
+            if tmp_dest.exists():
+                shutil.rmtree(tmp_dest)
+            raise
 
         installed_manifest = next(
             (dest / name for name in manifest_order if (dest / name).exists()),
@@ -1038,11 +1092,11 @@ class LibraryRegistryService:
         runtimes_by_name: dict[str, dict[str, Any]],
     ) -> dict[str, Any] | None:
         """Build MCP config from manifest.json/server.json or fallback to runtime profile."""
-        # 1. Try to read manifest.json / server.json from source directory
+        # 1. Try to read server.json / manifest.json / mcp.json from source directory
         manifest_data: dict[str, Any] | None = None
         if item.source_path:
             source_path = Path(item.source_path)
-            for manifest_name in ("manifest.json", "server.json"):
+            for manifest_name in ("server.json", "manifest.json", "mcp.json"):
                 candidate = source_path.parent / manifest_name
                 if candidate.exists():
                     try:
