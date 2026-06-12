@@ -285,6 +285,28 @@ class TestLibraryRegistryInstallAndRegister(unittest.TestCase):
         self.assertEqual(entries["skill-a"], "新摘要")
         self.assertEqual(entries["skill-b"], "用于补充执行器的专项能力")
 
+    def test_resummarize_entry_rebuilds_missing_registry(self):
+        service = self._service()
+        skill_dir = self._make_skill_dir(self.data_root, "skill-a", frontmatter_name="Skill A")
+        service.install_skill_from_directory(skill_dir, target_id="skill-a")
+
+        # Simulate a lost/corrupted registry file.
+        registry_path = self.data_root / "_system" / "library" / "skills.json"
+        self.assertTrue(registry_path.exists())
+        registry_path.unlink()
+
+        with patch.object(service, "_summarize_entry_text") as mock_summarize:
+            mock_summarize.return_value = LibrarySummaryPayload(
+                summary_short="重建后摘要",
+                summary_long="重建后摘要",
+                tags=["tag"],
+                use_cases=["case"],
+            )
+            service.resummarize_entry("skill", "skill-a")
+
+        entries = {item["id"]: item["summary_short"] for item in service.list_entries("skill")["items"]}
+        self.assertEqual(entries["skill-a"], "重建后摘要")
+
 
 if __name__ == "__main__":
     unittest.main()

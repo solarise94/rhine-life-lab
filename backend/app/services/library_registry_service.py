@@ -129,6 +129,10 @@ class LibraryRegistryService:
         }
 
     def resummarize_entry(self, kind: LibraryKind, entry_id: str) -> dict[str, Any]:
+        # Ensure the registry exists before taking the lock, preserving the
+        # rebuild-on-missing/corrupt behavior of the original _ensure_registry path.
+        self._ensure_registry(kind)
+
         # Hold the lock for the full read-summarize-write cycle so concurrent
         # installs/registers cannot write new entries between our read and write.
         with self._registry_lock(kind):
