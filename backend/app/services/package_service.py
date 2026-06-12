@@ -76,11 +76,13 @@ class PackageService:
         library_registry_service: LibraryRegistryService,
         project_service: ProjectService,
         settings: Settings | None = None,
+        runtime_dependency_resolver: Any | None = None,
     ) -> None:
         self.library_registry_service = library_registry_service
         self.project_service = project_service
         self.settings = settings or get_settings()
         self.packages_root = Path(self.settings.data_root) / "_system" / "packages"
+        self.runtime_dependency_resolver = runtime_dependency_resolver
 
     # ------------------------------------------------------------------
     # Public API
@@ -233,6 +235,28 @@ class PackageService:
             r_source,
         ) = self._resolve_runtime_for_package(manifest, proj_prefs, runtime_override)
 
+        # Resolve declared package dependencies against target runtimes
+        dep_result = self._resolve_dependencies(
+            manifest, project_id, eff_python, eff_r
+        )
+        dep_warnings = list(dep_result.get("warnings") or [])
+
+        # If runtime dependencies cannot be satisfied, block instantiation
+        if not dep_result.get("ok"):
+            return PackageInstantiationResult(
+                card_id="",
+                project_id=project_id,
+                package_id=package_id,
+                version=manifest.version,
+                effective_python_runtime=eff_python,
+                effective_r_runtime=eff_r,
+                runtime_source=python_source if eff_python else (r_source if eff_r else "project_default"),
+                python_runtime_source=python_source,
+                r_runtime_source=r_source,
+                warnings=dep_warnings,
+                blockers=list(dep_result.get("blockers") or []),
+            )
+
         # Build inputs
         inputs: list[CardAssetRef] = []
         input_bindings = input_bindings or {}
@@ -250,7 +274,9 @@ class PackageService:
         runtime_bindings = RuntimeBindings(
             conda_env=eff_python,
             r_env=eff_r,
-            runtime_source=python_source if eff_python else r_source,
+            runtime_source=python_source if eff_python else r_source,  # backward compat
+            python_runtime_source=python_source,
+            r_runtime_source=r_source,
         )
         executor_context = ExecutorContext(
             skills=list(manifest.executor.skills),
@@ -289,14 +315,14 @@ class PackageService:
             )
 
         # Copy bundle files into project (optional, for reference)
-        warnings: list[str] = []
+        warnings: list[str] = list(dep_warnings)
         if package.bundle_files:
             try:
                 self._copy_bundle_into_project(project_id, card_id, package.bundle_files)
             except Exception as exc:
                 warnings.append(f"Bundle files not copied into project: {exc}")
 
-        # Determine unified runtime source for reporting
+        # Determine unified runtime source for backward compat reporting
         runtime_source = python_source if eff_python else (r_source if eff_r else "project_default")
 
         return PackageInstantiationResult(
@@ -307,6 +333,8 @@ class PackageService:
             effective_python_runtime=eff_python,
             effective_r_runtime=eff_r,
             runtime_source=runtime_source,
+            python_runtime_source=python_source,
+            r_runtime_source=r_source,
             warnings=warnings,
         )
 
@@ -350,7 +378,6 @@ class PackageService:
                     "match_reason": self._build_package_match_reason(
                         entry, query_terms, tag_filters, runtime_filter
                     ),
-                    "score": round(score, 4),
                 }
             )
         return results
@@ -404,18 +431,23 @@ class PackageService:
         return None
 
     def _load_bundle_files(self, source: Path, manifest: PackageManifest) -> dict[str, str]:
-        """Load text bundle files from source directory."""
-        files: dict[str, str] = {}
-        if not source.is_dir():
-            return files
+        """Load text bundle files from source directory or zip archive."""
+        if source.is_dir():
+            return self._load_bundle_files_from_dir(source, manifest)
+        if zipfile.is_zipfile(source):
+            return self._load_bundle_files_from_zip(source, manifest)
+        return {}
 
+    def _load_bundle_files_from_dir(self, source: Path, manifest: PackageManifest) -> dict[str, str]:
+        """Load text bundle files from a source directory with path safety checks."""
+        files: dict[str, str] = {}
         bundle_dir = source / "bundle"
         if not bundle_dir.exists():
             return files
 
         for bf in manifest.bundle.files:
-            file_path = bundle_dir / bf.path
-            if not file_path.exists():
+            file_path = self._safe_bundle_path(bundle_dir, bf.path)
+            if file_path is None:
                 continue
             if not file_path.is_file():
                 continue
@@ -432,6 +464,31 @@ class PackageService:
                 continue
         return files
 
+    def _load_bundle_files_from_zip(self, source: Path, manifest: PackageManifest) -> dict[str, str]:
+        """Load text bundle files from a zip archive with path safety checks."""
+        files: dict[str, str] = {}
+        with zipfile.ZipFile(source, "r") as zf:
+            for bf in manifest.bundle.files:
+                zip_path = f"bundle/{bf.path}"
+                safe = self._safe_bundle_path(Path("/"), bf.path)
+                if safe is None:
+                    continue
+                try:
+                    info = zf.getinfo(zip_path)
+                except KeyError:
+                    continue
+                ext = Path(bf.path).suffix.lower()
+                if ext not in _ALLOWED_BUNDLE_EXTENSIONS:
+                    continue
+                if info.file_size > _MAX_BUNDLE_FILE_SIZE_BYTES:
+                    continue
+                try:
+                    content = zf.read(zip_path).decode("utf-8")
+                    files[bf.path] = content
+                except (UnicodeDecodeError, OSError):
+                    continue
+        return files
+
     def _load_stored_bundle_files(self, package_id: str, version: str) -> dict[str, str]:
         """Load bundle files from stored location."""
         files: dict[str, str] = {}
@@ -440,6 +497,11 @@ class PackageService:
             return files
         for file_path in bundle_dir.rglob("*"):
             if not file_path.is_file():
+                continue
+            # Defense-in-depth: verify resolved path stays within bundle_dir
+            try:
+                file_path.resolve().relative_to(bundle_dir.resolve())
+            except ValueError:
                 continue
             ext = file_path.suffix.lower()
             if ext not in _ALLOWED_BUNDLE_EXTENSIONS:
@@ -532,7 +594,9 @@ class PackageService:
         if package.bundle_files:
             bundle_dir.mkdir(parents=True, exist_ok=True)
             for rel_path, content in package.bundle_files.items():
-                file_path = bundle_dir / rel_path
+                file_path = self._safe_bundle_path(bundle_dir, rel_path)
+                if file_path is None:
+                    continue
                 file_path.parent.mkdir(parents=True, exist_ok=True)
                 file_path.write_text(content, encoding="utf-8")
 
@@ -632,6 +696,72 @@ class PackageService:
 
         return eff_python, eff_r, python_source, r_source
 
+    def _resolve_dependencies(
+        self,
+        manifest: PackageManifest,
+        project_id: str,
+        eff_python: str | None,
+        eff_r: str | None,
+    ) -> dict:
+        """Check whether resolved runtimes satisfy package dependencies.
+
+        Uses RuntimeDependencyResolverService if available.
+        Returns {"ok": True} or {"ok": False, "blockers": [...], "warnings": [...]}.
+        """
+        deps = getattr(manifest, "dependencies", None) or []
+        if not deps or self.runtime_dependency_resolver is None:
+            return {"ok": True}
+
+        blockers: list[str] = []
+        warnings: list[str] = []
+
+        for dep in deps:
+            family = str(getattr(dep, "family", "python") or "python").strip()
+            packages = list(getattr(dep, "packages", None) or [])
+            if not packages:
+                continue
+            target_runtime = eff_python if family == "python" else eff_r
+            try:
+                plan = self.runtime_dependency_resolver.resolve(
+                    project_id=project_id,
+                    payload={
+                        "ecosystem": family,
+                        "runtime": target_runtime or "__system__",
+                        "packages": packages,
+                    },
+                )
+                if not plan.ok:
+                    blockers.append(
+                        f"{family}: {plan.message or 'dependency resolution failed'} "
+                        f"(packages: {', '.join(packages)})"
+                    )
+                elif plan.status in ("fully_installable", "resolution_unknown"):
+                    # resolution_unknown: resolver couldn't determine — warn but don't block
+                    if plan.status == "resolution_unknown":
+                        warnings.append(
+                            f"{family}: dependency status uncertain for {', '.join(packages)}"
+                        )
+                elif plan.blocked:
+                    for blk in plan.blocked:
+                        blockers.append(
+                            f"{family}: {getattr(blk, 'package', '?')} — "
+                            f"{getattr(blk, 'reason', 'blocked')}"
+                        )
+                else:
+                    # Other non-terminal statuses → warn, don't block
+                    warnings.append(
+                        f"{family}: {plan.status} for packages {', '.join(packages)}"
+                    )
+            except Exception as exc:
+                # Resolver errors should not block instantiation — warn and continue
+                warnings.append(f"{family}: dependency check failed ({exc})")
+
+        return {
+            "ok": len(blockers) == 0,
+            "blockers": blockers,
+            "warnings": warnings,
+        }
+
     def _copy_bundle_into_project(
         self,
         project_id: str,
@@ -643,13 +773,38 @@ class PackageService:
         dest_dir = project_root / "scripts" / "curated" / "packages" / card_id
         dest_dir.mkdir(parents=True, exist_ok=True)
         for rel_path, content in bundle_files.items():
-            file_path = dest_dir / rel_path
+            file_path = self._safe_bundle_path(dest_dir, rel_path)
+            if file_path is None:
+                continue
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
 
     @staticmethod
     def _normalize_text(value: str) -> str:
         return " ".join(re.findall(r"[a-z0-9_+\-/.]{2,}", value.lower(), re.I))
+
+    @staticmethod
+    def _safe_bundle_path(base_dir: Path, relative: str, *, must_exist: bool = False) -> Path | None:
+        """Resolve a bundle-relative path and verify it stays within base_dir.
+
+        Returns the resolved Path, or None if the path is unsafe.
+        """
+        if not relative:
+            return None
+        # Reject absolute paths and parent traversal in raw form
+        if relative.startswith("/") or relative.startswith("\\"):
+            return None
+        if ".." in Path(relative).parts:
+            return None
+        resolved = (base_dir / relative).resolve()
+        base_resolved = base_dir.resolve()
+        try:
+            resolved.relative_to(base_resolved)
+        except ValueError:
+            return None
+        if must_exist and not resolved.exists():
+            return None
+        return resolved
 
     def _score_index_entry(
         self,

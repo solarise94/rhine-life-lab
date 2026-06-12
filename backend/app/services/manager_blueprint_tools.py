@@ -268,6 +268,7 @@ class ManagerBlueprintTools:
         self.package_service = package_service or PackageService(
             self.library_registry_service,
             project_service,
+            runtime_dependency_resolver=self.runtime_dependency_resolver_service,
         )
         self.result_asset_service = ResultAssetService(project_service)
         self.asset_timeline_service = AssetTimelineService()
@@ -886,7 +887,7 @@ class ManagerBlueprintTools:
                 card_ids = [card_id]
         if not card_ids:
             raise ManagerPlanningError("configure_card_execution requires card_id or card_ids.")
-        runtime_bindings = request.runtime_bindings.model_dump(exclude_none=True) if request.runtime_bindings else {}
+        runtime_bindings = request.runtime_bindings.model_dump(exclude_unset=True) if request.runtime_bindings else {}
         with self.project_service.lock_for(project_id):
             store = self.project_service.graph_store(project_id)
             graph = store.load_graph()
@@ -916,10 +917,23 @@ class ManagerBlueprintTools:
                     context.skills = [str(item).strip() for item in request.skills if str(item).strip()]
                 if request.mcp_servers is not None:
                     context.mcp_servers = [str(item).strip() for item in request.mcp_servers if str(item).strip()]
+                touched_runtime = False
                 if "conda_env" in runtime_bindings:
-                    context.runtime_bindings.conda_env = runtime_bindings.get("conda_env")
+                    val = runtime_bindings.get("conda_env")
+                    context.runtime_bindings.conda_env = val
+                    context.runtime_bindings.python_runtime_source = "card_override" if val else None
+                    touched_runtime = True
                 if "r_env" in runtime_bindings:
-                    context.runtime_bindings.r_env = runtime_bindings.get("r_env")
+                    val = runtime_bindings.get("r_env")
+                    context.runtime_bindings.r_env = val
+                    context.runtime_bindings.r_runtime_source = "card_override" if val else None
+                    touched_runtime = True
+                # Deprecated single-field runtime_source: derive from split sources so that
+                # partial clears (e.g. conda_env=None but r_env still set) don't lose the signal.
+                if touched_runtime:
+                    py_src = context.runtime_bindings.python_runtime_source
+                    r_src = context.runtime_bindings.r_runtime_source
+                    context.runtime_bindings.runtime_source = py_src or r_src
                 if request.instruction_blocks is not None:
                     new_blocks = [str(b).strip() for b in request.instruction_blocks if str(b).strip()]
                     merged = list(context.instruction_blocks or [])
@@ -1170,6 +1184,8 @@ class ManagerBlueprintTools:
             "effective_python_runtime": result.effective_python_runtime,
             "effective_r_runtime": result.effective_r_runtime,
             "runtime_source": result.runtime_source,
+            "python_runtime_source": result.python_runtime_source,
+            "r_runtime_source": result.r_runtime_source,
             "warnings": result.warnings,
         }
 

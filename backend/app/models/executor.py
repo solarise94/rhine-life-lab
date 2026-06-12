@@ -26,7 +26,11 @@ class RuntimeBindings(BaseModel):
     working_dir: str = "."
     env: dict[str, str] = Field(default_factory=dict)
     runtime_source: str | None = None
-    """Where the effective runtime came from: app_recent_default, project_default, card_override, package_requirement."""
+    """DEPRECATED: single-field source, kept for backward compat. Prefer python_runtime_source / r_runtime_source."""
+    python_runtime_source: str | None = None
+    """Source of conda_env: project_default | package_requirement | card_override | __system__"""
+    r_runtime_source: str | None = None
+    """Source of r_env: project_default | package_requirement | card_override | __system__"""
 
 
 class ExecutorScriptAssetRequirement(BaseModel):

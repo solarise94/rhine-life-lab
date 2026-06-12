@@ -161,6 +161,7 @@ def get_package_service() -> PackageService:
     return PackageService(
         get_library_registry_service(),
         get_project_service(),
+        runtime_dependency_resolver=get_runtime_dependency_resolver_service(),
     )
 
 

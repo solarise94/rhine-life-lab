@@ -45,6 +45,14 @@ class PackageRuntimeRequirements(BaseModel):
     r_runtime: str | None = None
 
 
+class PackageDependency(BaseModel):
+    """A declared dependency that must be satisfied in the target runtime."""
+
+    family: str = "python"  # "python" | "r"
+    packages: list[str] = Field(default_factory=list)
+    source: str | None = None  # "conda" | "pip" | "cran" | "bioconductor" | None (auto-detect)
+
+
 class PackageExecutor(BaseModel):
     skills: list[str] = Field(default_factory=list)
     mcp_servers: list[str] = Field(default_factory=list)
@@ -84,6 +92,8 @@ class PackageManifest(BaseModel):
     executor: PackageExecutor = Field(default_factory=PackageExecutor)
     bundle: PackageBundle = Field(default_factory=PackageBundle)
     provenance: PackageProvenance = Field(default_factory=PackageProvenance)
+    dependencies: list[PackageDependency] = Field(default_factory=list)
+    """Optional: declared package-level dependencies that must be satisfied in the target runtime."""
 
 
 class PortableCardPackage(BaseModel):
@@ -126,5 +136,7 @@ class PackageInstantiationResult(BaseModel):
     effective_python_runtime: str | None = None
     effective_r_runtime: str | None = None
     runtime_source: str | None = None
+    python_runtime_source: str | None = None
+    r_runtime_source: str | None = None
     warnings: list[str] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)

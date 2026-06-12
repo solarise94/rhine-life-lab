@@ -99,6 +99,14 @@ export function ModuleCard({
     : null;
   const globalRuntimeLabel = globalPythonRuntime && globalPythonRuntime !== "__system__" ? globalPythonRuntime : "系统默认";
   const globalRRuntimeLabel = globalRRuntime && globalRRuntime !== "__system__" ? globalRRuntime : "系统默认";
+  const cardCtx = card.executor_context as Record<string, unknown> | null | undefined;
+  const cardBindings = cardCtx?.runtime_bindings as { conda_env?: string | null; r_env?: string | null } | undefined;
+  const effectivePythonLabel = cardBindings?.conda_env
+    ? `卡片固定: ${cardBindings.conda_env}`
+    : `项目默认: ${globalRuntimeLabel}`;
+  const effectiveRLabel = cardBindings?.r_env
+    ? `卡片固定: ${cardBindings.r_env}`
+    : `项目默认: ${globalRRuntimeLabel}`;
 
   const pages: CardPage[] = isDormant
     ? ["specialist", "result", "archive"]
@@ -280,13 +288,14 @@ export function ModuleCard({
                       ) : null}
                     </label>
                     <label className="executor-select-label" onClick={(e) => e.stopPropagation()}>
-                      <span>Python runtime</span>
+                      <span>本次运行 Python</span>
+                      <span className="effective-runtime-hint">{effectivePythonLabel}</span>
                       <select
                         value={selectedPythonRuntime ?? "__global__"}
                         onChange={(e) => onSelectPythonRuntime?.(card, e.target.value === "__global__" ? undefined : e.target.value)}
                         disabled={readOnly || !pythonRuntimes.length}
                       >
-                        <option value="__global__">跟随全局 ({globalRuntimeLabel})</option>
+                        <option value="__global__">使用当前生效值</option>
                         {pythonRuntimes.map((item) => (
                           <option key={`${item.manager}:${item.name}`} value={item.name}>
                             {item.label}
@@ -295,13 +304,14 @@ export function ModuleCard({
                       </select>
                     </label>
                     <label className="executor-select-label" onClick={(e) => e.stopPropagation()}>
-                      <span>R runtime</span>
+                      <span>本次运行 R</span>
+                      <span className="effective-runtime-hint">{effectiveRLabel}</span>
                       <select
                         value={selectedRRuntime ?? "__global__"}
                         onChange={(e) => onSelectRRuntime?.(card, e.target.value === "__global__" ? undefined : e.target.value)}
                         disabled={readOnly || !rRuntimes.length}
                       >
-                        <option value="__global__">跟随全局 ({globalRRuntimeLabel})</option>
+                        <option value="__global__">使用当前生效值</option>
                         {rRuntimes.map((item) => (
                           <option key={`${item.manager}:${item.name}`} value={item.name}>
                             {item.label}
