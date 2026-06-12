@@ -112,12 +112,14 @@ class LibraryRegistryService:
         }
 
     def refresh_entries(self, kind: LibraryKind, *, force: bool = False) -> dict[str, Any]:
-        if kind == "skill":
-            items = self._build_skill_entries(force=force)
-        else:
-            items = self._build_mcp_entries(force=force)
-        registry = LibraryRegistry(kind=kind, items=items, updated_at=utc_now())
+        # Hold the lock for the whole scan+write so a concurrent install/register
+        # cannot write a new entry between our scan and our write.
         with self._registry_lock(kind):
+            if kind == "skill":
+                items = self._build_skill_entries(force=force)
+            else:
+                items = self._build_mcp_entries(force=force)
+            registry = LibraryRegistry(kind=kind, items=items, updated_at=utc_now())
             self._write_registry(registry)
         return {
             "kind": kind,
@@ -254,6 +256,17 @@ class LibraryRegistryService:
     def _prepare_temp_dest(dest: Path) -> Path:
         """Return a temporary path next to dest for atomic install/replace."""
         import uuid
+        # Clean up stale temp/backup siblings left by interrupted installs.
+        if dest.parent.exists():
+            for sibling in dest.parent.iterdir():
+                if sibling.name.startswith(f".{dest.name}.") and (
+                    sibling.name.startswith(f".{dest.name}.tmp-") or
+                    sibling.name.startswith(f".{dest.name}.bak-")
+                ):
+                    try:
+                        shutil.rmtree(sibling)
+                    except OSError:
+                        pass
         tmp = dest.parent / f".{dest.name}.tmp-{uuid.uuid4().hex}"
         if tmp.exists():
             shutil.rmtree(tmp)
@@ -261,10 +274,32 @@ class LibraryRegistryService:
 
     @staticmethod
     def _commit_temp_dest(tmp_dest: Path, dest: Path) -> None:
-        """Atomically replace dest with tmp_dest."""
-        if dest.exists():
-            shutil.rmtree(dest)
-        tmp_dest.rename(dest)
+        """Atomically replace dest with tmp_dest.
+
+        Uses a backup directory so that if the final rename fails, the previous
+        installation can be restored. Any leftover backup/temp directories are
+        cleaned up on the next install.
+        """
+        import uuid
+
+        if not dest.exists():
+            tmp_dest.rename(dest)
+            return
+
+        backup = dest.parent / f".{dest.name}.bak-{uuid.uuid4().hex}"
+        dest.rename(backup)
+        try:
+            tmp_dest.rename(dest)
+        except Exception:
+            try:
+                if not dest.exists() and backup.exists():
+                    backup.rename(dest)
+            except OSError:
+                pass
+            raise
+        finally:
+            if backup.exists():
+                shutil.rmtree(backup)
 
     @staticmethod
     def _validate_capability_id(value: str) -> str:

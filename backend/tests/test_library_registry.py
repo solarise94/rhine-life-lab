@@ -232,6 +232,39 @@ class TestLibraryRegistryInstallAndRegister(unittest.TestCase):
 
         self.assertTrue(old_skill_md.exists())
 
+    def test_register_mcp_restores_old_on_rename_failure(self):
+        service = self._service()
+        service.register_mcp_server(
+            server_id="my-mcp",
+            name="Old",
+            transport="http",
+            url="http://127.0.0.1:1/sse",
+        )
+        old_server_json = self.data_root / "_system" / "capabilities" / "mcp" / "my-mcp" / "server.json"
+        self.assertTrue(old_server_json.exists())
+
+        original_rename = Path.rename
+        calls = {"forward": False}
+        def _failing_rename(self, target):
+            # Fail only the tmp -> dest forward rename; allow dest -> backup and backup -> dest.
+            if str(target).endswith("my-mcp") and not calls["forward"]:
+                calls["forward"] = True
+                raise OSError("cross-device link")
+            return original_rename(self, target)
+
+        with patch.object(Path, "rename", _failing_rename):
+            with self.assertRaises(OSError):
+                service.register_mcp_server(
+                    server_id="my-mcp",
+                    name="New",
+                    transport="http",
+                    url="http://127.0.0.1:2/sse",
+                    overwrite=True,
+                )
+
+        self.assertTrue(old_server_json.exists())
+        self.assertIn("Old", old_server_json.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
