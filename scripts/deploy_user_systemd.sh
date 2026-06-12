@@ -109,15 +109,107 @@ find_nginx_bin() {
 }
 
 disable_system_nginx_service() {
+  local system_nginx_active=0
   if [[ "$(id -u)" -eq 0 ]]; then
-    systemctl disable --now nginx 2>/dev/null || true
+    systemctl is-active nginx >/dev/null 2>&1 && system_nginx_active=1
   elif command -v sudo >/dev/null 2>&1; then
-    sudo systemctl disable --now nginx 2>/dev/null || true
+    sudo -n systemctl is-active nginx >/dev/null 2>&1 && system_nginx_active=1
+  fi
+
+  if [[ "${system_nginx_active}" -eq 0 ]]; then
+    return 0
+  fi
+
+  local disabled=0
+  if [[ "$(id -u)" -eq 0 ]]; then
+    systemctl disable --now nginx 2>/dev/null && disabled=1
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo -n systemctl disable --now nginx 2>/dev/null && disabled=1
+  fi
+
+  if [[ "${disabled}" -eq 0 ]]; then
+    warn_deploy "System-level nginx is active but could not be disabled. It may conflict with the Blueprint user-level gateway on port 13001."
   fi
 }
 
 warn_deploy() {
   DEPLOY_WARNINGS+=("$1")
+}
+
+# Print processes listening on a given TCP port, one per line.
+# Falls back to netstat if ss is unavailable.
+_list_port_owners() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -tlnp 2>/dev/null | grep -E ":${port}[[:space:]]" || true
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -tlnp 2>/dev/null | grep -E ":${port}[[:space:]]" || true
+  fi
+}
+
+# Report which of the Blueprint ports are currently listening.
+# Returns 0 if any port is occupied, 1 if all are free.
+_report_port_occupants() {
+  local label="$1"
+  local port
+  local owners
+  local any=0
+  for port in 18001 18002 13001 13002; do
+    owners="$(_list_port_owners "${port}")"
+    if [[ -n "${owners}" ]]; then
+      if [[ "${any}" -eq 0 ]]; then
+        echo "${label}"
+        any=1
+      fi
+      echo "  Port ${port}:"
+      echo "${owners}" | sed 's/^/    /'
+    fi
+  done
+  if [[ "${any}" -eq 1 ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# Check that a URL returns a body containing the expected substring.
+# Prefer curl; fall back to Python urllib.
+_http_body_check() {
+  local url="$1"
+  local expected="$2"
+  local body
+  if command -v curl >/dev/null 2>&1; then
+    body="$(curl -fsS "${url}" 2>/dev/null || true)"
+  elif "${PYTHON_BIN}" -c "import urllib.request" >/dev/null 2>&1; then
+    body="$("${PYTHON_BIN}" -c "import urllib.request; print(urllib.request.urlopen('${url}', timeout=2).read().decode('utf-8'))" 2>/dev/null || true)"
+  else
+    return 1
+  fi
+  [[ -n "${body}" && "${body}" == *"${expected}"* ]]
+}
+
+# Check that a URL's response headers contain the expected substring.
+# Matching is case-insensitive. Prefer curl -I; fall back to Python urllib.
+_http_header_check() {
+  local url="$1"
+  local expected="$2"
+  local headers
+  if command -v curl >/dev/null 2>&1; then
+    headers="$(curl -fsSI "${url}" 2>/dev/null || true)"
+  elif "${PYTHON_BIN}" -c "import urllib.request" >/dev/null 2>&1; then
+    headers="$("${PYTHON_BIN}" -c "
+import urllib.request
+resp = urllib.request.urlopen('${url}', timeout=2)
+print('\\n'.join(f'{k}: {v}' for k, v in resp.headers.items()))
+" 2>/dev/null || true)"
+  else
+    return 1
+  fi
+  [[ -n "${headers}" && "${headers,,}" == *"${expected,,}"* ]]
+}
+
+# Check whether a user-level systemd service is active.
+_is_service_active() {
+  systemctl --user is-active "$1" >/dev/null 2>&1
 }
 
 check_unknown_blueprint_env_keys() {
@@ -284,8 +376,6 @@ install_runtime_dependencies() {
       echo "Missing runtime dependencies from deploy/runtime-dependencies.yml and sudo is unavailable." >&2
       exit 1
     fi
-    # Disable the system-level nginx service so only the user-level gateway is active.
-    disable_system_nginx_service
   else
     echo "Automatic dependency installation currently supports apt-based hosts only." >&2
     echo "Install the required packages from deploy/runtime-dependencies.yml, then rerun this script." >&2
@@ -367,6 +457,8 @@ check_systemd_user() {
 install_runtime_dependencies
 check_runtime_dependencies
 check_language_versions
+# Disable the system-level nginx service so only the user-level gateway is active.
+disable_system_nginx_service
 check_systemd_user
 
 if [[ -f "${ROOT_DIR}/.env" ]]; then
@@ -536,16 +628,62 @@ systemctl --user enable blueprint-re-backend.service
 systemctl --user enable blueprint-re-frontend.service
 systemctl --user enable blueprint-re-nginx.service
 
-# Stop nginx and the frontend before backend restart so Next.js proxy/SSE
-# connections do not keep the old backend process alive during systemd's
-# graceful shutdown, and port 13001 is free for nginx to rebind.
+# Report current port occupants before shutdown so conflicts are visible
+# instead of being hidden behind a blind restart.
+_report_port_occupants "Pre-deploy port occupants:"
+
+# Stop all user-level services before restarting. This is more reliable than
+# only stopping nginx/frontend because old backend/manager processes may also
+# hold ports or long-running connections.
 systemctl --user stop blueprint-re-nginx.service || true
 systemctl --user stop blueprint-re-frontend.service || true
-systemctl --user restart blueprint-re-manager-agent.service
-systemctl --user restart blueprint-re-backend.service
+systemctl --user stop blueprint-re-backend.service || true
+systemctl --user stop blueprint-re-manager-agent.service || true
+sleep 2
+
+# Confirm ports were released. If something outside this systemd set is still
+# listening, warn but continue; the user can then decide whether to kill it.
+if _report_port_occupants "Port occupants after stop:"; then
+  warn_deploy "Some Blueprint ports are still occupied after stopping services."
+fi
+
+# Start in dependency order: manager-agent -> backend -> frontend -> nginx.
+systemctl --user start blueprint-re-manager-agent.service
+systemctl --user start blueprint-re-backend.service
 systemctl --user start blueprint-re-frontend.service
 systemctl --user start blueprint-re-nginx.service
 
+# Wait for services to settle, then run health checks.
+echo "Running health checks..."
+sleep 3
+HEALTH_OK=1
+
+# Verify each user-level service is active before trusting the HTTP probes.
+for service_name in \
+  blueprint-re-manager-agent.service \
+  blueprint-re-backend.service \
+  blueprint-re-frontend.service \
+  blueprint-re-nginx.service; do
+  if ! _is_service_active "${service_name}"; then
+    warn_deploy "Service ${service_name} is not active"
+    HEALTH_OK=0
+  fi
+done
+
+# Verify the backend response content, not just that the port speaks HTTP.
+if ! _http_body_check http://127.0.0.1:18001/healthz '"status":"ok"'; then
+  warn_deploy "Backend health check failed (expected {\"status\":\"ok\"} at http://127.0.0.1:18001/healthz)"
+  HEALTH_OK=0
+fi
+
+# Verify the nginx gateway is actually proxying the Next.js frontend.
+if ! _http_header_check http://127.0.0.1:13001 "location: /projects" && \
+   ! _http_header_check http://127.0.0.1:13001 "X-Powered-By: Next.js"; then
+  warn_deploy "nginx gateway check failed (expected Next.js redirect at http://127.0.0.1:13001)"
+  HEALTH_OK=0
+fi
+
+echo ""
 echo "Blueprint RE deployed."
 echo "Frontend: http://127.0.0.1:13001  (nginx gateway)"
 echo "Backend:  http://127.0.0.1:18001"
@@ -565,3 +703,15 @@ if [[ "${#DEPLOY_WARNINGS[@]}" -gt 0 ]]; then
     echo "  - ${warning}"
   done
 fi
+if [[ "${HEALTH_OK}" -eq 0 ]]; then
+  echo ""
+  echo "WARNING: One or more health checks failed. Check service status with:"
+  echo "  systemctl --user status blueprint-re-backend.service"
+  echo "  systemctl --user status blueprint-re-manager-agent.service"
+  echo "  systemctl --user status blueprint-re-frontend.service"
+  echo "  systemctl --user status blueprint-re-nginx.service"
+  exit 1
+fi
+
+echo ""
+echo "Deploy complete."

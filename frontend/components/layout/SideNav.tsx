@@ -11,6 +11,7 @@ import {
   Beaker,
   MessageSquareText,
   Plus,
+  Puzzle,
   Trash2,
   Settings2,
 } from "lucide-react";
@@ -41,6 +42,7 @@ const ARTIFACT_VIEWS = new Set(["results", "files", "report"]);
 
 const primary = [
   { href: "results", label: "文件管理", icon: Package },
+  { href: "capabilities", label: "能力中心", icon: Puzzle },
   { href: "settings", label: "工作台设置", icon: Settings2 },
 ];
 

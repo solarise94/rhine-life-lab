@@ -67,14 +67,19 @@ const SettingsPanels = dynamic(
   () => import("@/components/settings/SettingsPanels").then((m) => m.SettingsPanels),
   { ssr: false },
 );
+const CapabilitiesPanel = dynamic(
+  () => import("@/components/capabilities/CapabilitiesPanel").then((m) => m.CapabilitiesPanel),
+  { ssr: false },
+);
 
-type View = "tasks" | "results" | "files" | "report" | "advanced" | "settings";
+type View = "tasks" | "results" | "files" | "report" | "advanced" | "capabilities" | "settings";
 const EMPTY_CARD_INTERACTION_ORDER: string[] = [];
 
 const PAGE_INTRO: Record<Exclude<View, "tasks">, string> = {
   results: "查看和管理项目文件：数据资产、执行结果和报告导出。",
   files: "查看和管理项目文件：数据资产、执行结果和报告导出。",
   report: "查看和管理项目文件：数据资产、执行结果和报告导出。",
+  capabilities: "浏览项目已安装的 Skill 与 MCP 能力，或从本地路径安装新的能力。",
   settings: "配置项目运行时偏好、API 供应商、角色绑定和诊断选项。",
   advanced: "查看项目图结构、Git 历史、运行时诊断和卡片详情。",
 };
@@ -809,6 +814,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             title={
               view === "results" || view === "files" || view === "report"
                 ? "文件管理"
+                : view === "capabilities"
+                ? "能力中心"
                 : view === "settings"
                 ? "工作台设置"
                 : "技术详情"
@@ -923,7 +930,9 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               ) : null}
             </div>
           ) : null}
-          {view === "settings" ? (
+          {view === "capabilities" ? (
+            <CapabilitiesPanel projectId={projectId} />
+          ) : view === "settings" ? (
             <SettingsPanels
               projectId={projectId}
               project={snapshot.project}
@@ -1062,7 +1071,9 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   ) : null}
                 </>
               ) : null}
-              {view === "settings" ? (
+              {view === "capabilities" ? (
+                <CapabilitiesPanel projectId={projectId} />
+              ) : view === "settings" ? (
                 <SettingsPanels
                   projectId={projectId}
                   project={snapshot.project}

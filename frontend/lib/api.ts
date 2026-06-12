@@ -752,6 +752,27 @@ export const api = {
   getMcpLibrary(projectId: string) {
     return request<LibraryListResponse>(`/projects/${projectId}/mcp-library`);
   },
+  installProjectCapability(
+    projectId: string,
+    payload: {
+      kind: "skill" | "mcp";
+      source_type: string;
+      source: string;
+      overwrite?: boolean;
+    },
+  ) {
+    return request<{
+      ok: boolean;
+      kind: string;
+      installed_id: string;
+      installed_name: string;
+      summary: string;
+      warnings: string[];
+    }>(`/projects/${projectId}/capabilities/install`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
   getResultAssetContentUrl(projectId: string, assetId: string) {
     return `${API_BASE}/projects/${projectId}/results/${assetId}/content`;
   },

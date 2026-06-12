@@ -80,17 +80,12 @@ class LibraryRegistryService:
             )
         scored.sort(key=lambda item: (-item[0], item[1].name.lower()))
         items = [
-            {
-                **(
-                    self._serialize_minimal_entry(entry)
-                    if minimal
-                    else self._serialize_search_entry(
-                        entry, match_reason=match_reasons.get(entry.id, "broad match")
-                    )
-                ),
-                "score": round(score, 4),
-            }
-            for score, entry in scored[: max(1, min(top_k, 20))]
+            self._serialize_minimal_entry(entry)
+            if minimal
+            else self._serialize_search_entry(
+                entry, match_reason=match_reasons.get(entry.id, "broad match")
+            )
+            for _score, entry in scored[: max(1, min(top_k, 20))]
         ]
         return {
             "kind": kind,
@@ -399,17 +394,28 @@ class LibraryRegistryService:
             return []
         return registry.items if registry.kind == kind else []
 
+    def _app_installed_capabilities_root(self, kind: LibraryKind) -> Path:
+        return Path(self.settings.data_root) / "_system" / "capabilities" / ("skills" if kind == "skill" else "mcp")
+
     def _resolved_skill_roots(self) -> list[Path]:
         if self.skill_roots is not None:
-            return [path for path in self.skill_roots if path.exists()]
-        roots = [Path.home() / ".codex" / "skills", Path.home() / ".agents" / "skills"]
-        return [path for path in roots if path.exists()]
+            roots = [path for path in self.skill_roots if path.exists()]
+        else:
+            roots = [path for path in [Path.home() / ".codex" / "skills", Path.home() / ".agents" / "skills"] if path.exists()]
+        app_installed = self._app_installed_capabilities_root("skill")
+        if app_installed.exists() and app_installed not in roots:
+            roots.append(app_installed)
+        return roots
 
     def _resolved_mcp_roots(self) -> list[Path]:
         if self.mcp_roots is not None:
-            return [path for path in self.mcp_roots if path.exists()]
-        roots = [Path.home() / ".codex" / "mcp", Path.home() / ".agents" / "mcp"]
-        return [path for path in roots if path.exists()]
+            roots = [path for path in self.mcp_roots if path.exists()]
+        else:
+            roots = [path for path in [Path.home() / ".codex" / "mcp", Path.home() / ".agents" / "mcp"] if path.exists()]
+        app_installed = self._app_installed_capabilities_root("mcp")
+        if app_installed.exists() and app_installed not in roots:
+            roots.append(app_installed)
+        return roots
 
     @staticmethod
     def _read_source_text(path: Path) -> str:
@@ -653,7 +659,19 @@ class LibraryRegistryService:
             "runtime_requirements": list(item.runtime_requirements),
             "launch_hint": item.launch_hint,
             "enabled": item.enabled,
+            "source_kind": LibraryRegistryService._compute_source_kind(item),
         }
+
+    @staticmethod
+    def _compute_source_kind(item: LibraryEntry) -> str:
+        sp = item.source_path or ""
+        if "/_system/capabilities/" in sp:
+            return "app-installed"
+        if "/.codex/" in sp or "/.agents/" in sp:
+            return "system"
+        if sp:
+            return "system"
+        return "system"
 
     def _score_entry(
         self,
@@ -712,7 +730,13 @@ class LibraryRegistryService:
     def _serialize_entry(item: LibraryEntry) -> dict[str, Any]:
         payload = item.model_dump()
         payload["summary"] = item.summary_short
-        payload["source"] = item.source_path
+        payload["source_kind"] = LibraryRegistryService._compute_source_kind(item)
+        # Do not expose raw host path via source field
+        payload.pop("source_path", None)
+        payload.pop("source_hash", None)
+        payload.pop("generated_by", None)
+        payload.pop("generated_at", None)
+        payload.pop("metadata", None)
         return payload
 
     @staticmethod

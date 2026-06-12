@@ -27,6 +27,35 @@ export function useLibrary(kind: "skill" | "mcp") {
   });
 }
 
+export function useProjectSkillLibrary(projectId: string) {
+  return useQuery({
+    queryKey: queryKeys.projectSkillLibrary(projectId),
+    queryFn: () => api.getSkillLibrary(projectId),
+  });
+}
+
+export function useProjectMcpLibrary(projectId: string) {
+  return useQuery({
+    queryKey: queryKeys.projectMcpLibrary(projectId),
+    queryFn: () => api.getMcpLibrary(projectId),
+  });
+}
+
+export function useInstallCapabilityMutation(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: Parameters<typeof api.installProjectCapability>[1]) =>
+      api.installProjectCapability(projectId, payload),
+    onSuccess: async (_data, variables) => {
+      if (variables.kind === "skill") {
+        await queryClient.invalidateQueries({ queryKey: queryKeys.projectSkillLibrary(projectId) });
+      } else {
+        await queryClient.invalidateQueries({ queryKey: queryKeys.projectMcpLibrary(projectId) });
+      }
+    },
+  });
+}
+
 export function useUpdateAppSettingsMutation() {
   const queryClient = useQueryClient();
   return useMutation({

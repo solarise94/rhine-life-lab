@@ -4,7 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Literal
 
+import shutil
+from pathlib import Path
+
 from app.api.deps import get_flow_service, get_library_registry_service, get_manager_auto_service, get_project_service, get_worker_service
+from app.core.config import get_settings
 from app.services.flow_service import FlowService
 from app.services.library_registry_service import LibraryRegistryService
 from app.services.manager_auto_service import ManagerAutoService
@@ -174,6 +178,91 @@ def get_mcp_library(project_id: str, library_service: LibraryRegistryService = D
     payload = library_service.list_entries("mcp")
     payload["project_id"] = project_id
     return payload
+
+
+class InstallCapabilityRequest(BaseModel):
+    kind: str  # "skill" | "mcp"
+    source_type: str = "local_path"  # "local_path" | "repo"
+    source: str
+    overwrite: bool = False
+
+
+@router.post("/{project_id}/capabilities/install")
+def install_capability(
+    project_id: str,
+    request: InstallCapabilityRequest,
+    library_service: LibraryRegistryService = Depends(get_library_registry_service),
+) -> dict:
+    kind = request.kind.strip()
+    if kind not in ("skill", "mcp"):
+        raise HTTPException(status_code=422, detail="kind must be 'skill' or 'mcp'")
+
+    if request.source_type not in ("local_path",):
+        raise HTTPException(status_code=422, detail="source_type 'repo' is not yet supported; use 'local_path'")
+
+    source = Path(request.source.strip())
+    if not source.is_absolute():
+        source = Path.cwd() / source
+    source = source.resolve()
+    if not source.exists():
+        raise HTTPException(status_code=422, detail=f"Source path does not exist: {source}")
+    if not source.is_dir():
+        raise HTTPException(status_code=422, detail="Source must be a directory")
+
+    # Structural validation: verify the source looks like a valid capability
+    if kind == "skill" and not (source / "SKILL.md").exists():
+        raise HTTPException(status_code=422, detail="Skill source must contain a SKILL.md file")
+    if kind == "mcp":
+        has_entry = (source / "manifest.json").exists() or (source / "server.json").exists() or (source / "mcp.json").exists()
+        if not has_entry:
+            raise HTTPException(status_code=422, detail="MCP source must contain at least one of: manifest.json, server.json, mcp.json")
+
+    settings = get_settings()
+    cap_root = Path(settings.data_root) / "_system" / "capabilities" / ("skills" if kind == "skill" else "mcp")
+    dest = cap_root / source.name
+
+    if dest.exists() and not request.overwrite:
+        raise HTTPException(status_code=409, detail=f"Target already exists: {dest}. Set overwrite=true to replace.")
+
+    warnings: list[str] = []
+
+    # Copy source into app-installed capabilities directory
+    try:
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(source, dest)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to copy capability: {exc}") from exc
+
+    # Rebuild registry so the new entry is discovered
+    try:
+        result = library_service.refresh_entries(kind, force=True)  # type: ignore[arg-type]
+        if result.get("refreshed", 0) == 0:
+            warnings.append("Registry rebuild completed but no entries were discovered.")
+    except Exception as exc:
+        warnings.append(f"Post-install registry refresh failed: {exc}")
+
+    # Find the installed entry id
+    installed_id = source.name
+    installed_name = installed_id
+
+    # Look it up in the refreshed registry for a friendly name
+    try:
+        for item in (library_service.list_entries(kind).get("items") or []):  # type: ignore[arg-type]
+            if isinstance(item, dict) and item.get("id") == installed_id:
+                installed_name = item.get("name", installed_id)
+                break
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "kind": kind,
+        "installed_id": installed_id,
+        "installed_name": installed_name,
+        "summary": f"{'Skill' if kind == 'skill' else 'MCP'} '{installed_name}' installed and available.",
+        "warnings": warnings,
+    }
 
 
 @router.get("/{project_id}/cards")
