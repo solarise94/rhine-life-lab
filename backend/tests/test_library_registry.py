@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 from app.core.config import Settings, get_settings
 from app.services.app_config_service import AppConfigService
-from app.services.library_registry_service import LibraryRegistryService
+from app.services.library_registry_service import LibraryRegistryService, LibrarySummaryPayload
 from app.services.project_service import ProjectService
 
 
@@ -264,6 +264,26 @@ class TestLibraryRegistryInstallAndRegister(unittest.TestCase):
 
         self.assertTrue(old_server_json.exists())
         self.assertIn("Old", old_server_json.read_text(encoding="utf-8"))
+
+    def test_resummarize_entry_does_not_overwrite_other_entries(self):
+        service = self._service()
+        skill_a = self._make_skill_dir(self.data_root, "skill-a", frontmatter_name="Skill A")
+        skill_b = self._make_skill_dir(self.data_root, "skill-b", frontmatter_name="Skill B")
+        service.install_skill_from_directory(skill_a, target_id="skill-a")
+        service.install_skill_from_directory(skill_b, target_id="skill-b")
+
+        with patch.object(service, "_summarize_entry_text") as mock_summarize:
+            mock_summarize.return_value = LibrarySummaryPayload(
+                summary_short="新摘要",
+                summary_long="新摘要",
+                tags=["tag"],
+                use_cases=["case"],
+            )
+            service.resummarize_entry("skill", "skill-a")
+
+        entries = {item["id"]: item["summary_short"] for item in service.list_entries("skill")["items"]}
+        self.assertEqual(entries["skill-a"], "新摘要")
+        self.assertEqual(entries["skill-b"], "用于补充执行器的专项能力")
 
 
 if __name__ == "__main__":

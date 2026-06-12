@@ -129,36 +129,37 @@ class LibraryRegistryService:
         }
 
     def resummarize_entry(self, kind: LibraryKind, entry_id: str) -> dict[str, Any]:
-        registry = self._ensure_registry(kind)
-        updated: list[LibraryEntry] = []
-        target: LibraryEntry | None = None
-        for item in registry.items:
-            if item.id != entry_id:
-                updated.append(item)
-                continue
-            target = item
-            summary = self._summarize_entry_text(
-                kind,
-                name=item.name,
-                source_text=self._entry_source_text(item),
-                fallback_summary=item.summary_short,
-            )
-            refreshed = item.model_copy(
-                update={
-                    "summary_short": summary.summary_short,
-                    "summary_long": summary.summary_long,
-                    "tags": summary.tags,
-                    "use_cases": summary.use_cases,
-                    "generated_by": self.settings.library_summarizer_model,
-                    "generated_at": utc_now(),
-                }
-            )
-            updated.append(refreshed)
-            target = refreshed
-        if target is None:
-            raise ValueError(f"{kind} library item not found: {entry_id}")
-        new_registry = LibraryRegistry(kind=kind, items=updated, updated_at=utc_now())
+        # Hold the lock for the full read-summarize-write cycle so concurrent
+        # installs/registers cannot write new entries between our read and write.
         with self._registry_lock(kind):
+            items = self._load_registry_items(kind)
+            updated: list[LibraryEntry] = []
+            target: LibraryEntry | None = None
+            for item in items:
+                if item.id != entry_id:
+                    updated.append(item)
+                    continue
+                summary = self._summarize_entry_text(
+                    kind,
+                    name=item.name,
+                    source_text=self._entry_source_text(item),
+                    fallback_summary=item.summary_short,
+                )
+                refreshed = item.model_copy(
+                    update={
+                        "summary_short": summary.summary_short,
+                        "summary_long": summary.summary_long,
+                        "tags": summary.tags,
+                        "use_cases": summary.use_cases,
+                        "generated_by": self.settings.library_summarizer_model,
+                        "generated_at": utc_now(),
+                    }
+                )
+                updated.append(refreshed)
+                target = refreshed
+            if target is None:
+                raise ValueError(f"{kind} library item not found: {entry_id}")
+            new_registry = LibraryRegistry(kind=kind, items=updated, updated_at=utc_now())
             self._write_registry(new_registry)
         return {
             "kind": kind,
@@ -244,6 +245,18 @@ class LibraryRegistryService:
     def _registry_lock(self, kind: LibraryKind):
         """Exclusive file lock for the given registry kind (context manager)."""
         lock_path = self.registry_root / f"{kind}s.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def _install_lock(self, kind: LibraryKind, entry_id: str):
+        """Exclusive file lock for installing/registering a specific capability id."""
+        lock_path = self.registry_root / f"{kind}-{entry_id}.install.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
@@ -962,24 +975,25 @@ class LibraryRegistryService:
             raise ValueError("Skill source must contain a SKILL.md file")
 
         installed_id = self._validate_capability_id(target_id or source_dir.name)
-        cap_root = self._app_installed_capabilities_root("skill")
-        dest = cap_root / installed_id
-        self._assert_within_root(dest, cap_root)
+        with self._install_lock("skill", installed_id):
+            cap_root = self._app_installed_capabilities_root("skill")
+            dest = cap_root / installed_id
+            self._assert_within_root(dest, cap_root)
 
-        if dest.exists() and not overwrite:
-            raise FileExistsError(f"Target already exists: {dest}")
+            if dest.exists() and not overwrite:
+                raise FileExistsError(f"Target already exists: {dest}")
 
-        tmp_dest = self._prepare_temp_dest(dest)
-        try:
-            shutil.copytree(source_dir, tmp_dest)
-            self._commit_temp_dest(tmp_dest, dest)
-        except Exception:
-            if tmp_dest.exists():
-                shutil.rmtree(tmp_dest)
-            raise
+            tmp_dest = self._prepare_temp_dest(dest)
+            try:
+                shutil.copytree(source_dir, tmp_dest)
+                self._commit_temp_dest(tmp_dest, dest)
+            except Exception:
+                if tmp_dest.exists():
+                    shutil.rmtree(tmp_dest)
+                raise
 
-        entry = self._build_single_skill_entry(dest, installed_id)
-        self._add_or_replace_entry("skill", entry)
+            entry = self._build_single_skill_entry(dest, installed_id)
+            self._add_or_replace_entry("skill", entry)
 
         return {
             "ok": True,
@@ -1014,40 +1028,41 @@ class LibraryRegistryService:
                 raise ValueError("url is required for http/sse transport")
 
         server_id = self._validate_capability_id(server_id)
-        cap_root = self._app_installed_capabilities_root("mcp")
-        dest = cap_root / server_id
-        self._assert_within_root(dest, cap_root)
+        with self._install_lock("mcp", server_id):
+            cap_root = self._app_installed_capabilities_root("mcp")
+            dest = cap_root / server_id
+            self._assert_within_root(dest, cap_root)
 
-        if dest.exists() and not overwrite:
-            raise FileExistsError(f"Target already exists: {dest}")
+            if dest.exists() and not overwrite:
+                raise FileExistsError(f"Target already exists: {dest}")
 
-        server_config: dict[str, Any]
-        if transport == "stdio":
-            server_config = {"command": command}
-            if args:
-                server_config["args"] = args
-            if env:
-                server_config["env"] = env
-        else:
-            server_config = {"type": transport, "url": url}
-            if headers:
-                server_config["headers"] = headers
-        server_config["name"] = name
+            server_config: dict[str, Any]
+            if transport == "stdio":
+                server_config = {"command": command}
+                if args:
+                    server_config["args"] = args
+                if env:
+                    server_config["env"] = env
+            else:
+                server_config = {"type": transport, "url": url}
+                if headers:
+                    server_config["headers"] = headers
+            server_config["name"] = name
 
-        tmp_dest = self._prepare_temp_dest(dest)
-        try:
-            tmp_dest.mkdir(parents=True)
-            (tmp_dest / "server.json").write_text(
-                json.dumps(server_config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-            )
-            self._commit_temp_dest(tmp_dest, dest)
-        except Exception:
-            if tmp_dest.exists():
-                shutil.rmtree(tmp_dest)
-            raise
+            tmp_dest = self._prepare_temp_dest(dest)
+            try:
+                tmp_dest.mkdir(parents=True)
+                (tmp_dest / "server.json").write_text(
+                    json.dumps(server_config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+                )
+                self._commit_temp_dest(tmp_dest, dest)
+            except Exception:
+                if tmp_dest.exists():
+                    shutil.rmtree(tmp_dest)
+                raise
 
-        entry = self._build_single_mcp_entry(dest / "server.json")
-        self._add_or_replace_entry("mcp", entry)
+            entry = self._build_single_mcp_entry(dest / "server.json")
+            self._add_or_replace_entry("mcp", entry)
 
         return {
             "ok": True,
@@ -1085,31 +1100,32 @@ class LibraryRegistryService:
             )
 
         installed_id = self._validate_capability_id(target_id or source_dir.name)
-        cap_root = self._app_installed_capabilities_root("mcp")
-        dest = cap_root / installed_id
-        self._assert_within_root(dest, cap_root)
+        with self._install_lock("mcp", installed_id):
+            cap_root = self._app_installed_capabilities_root("mcp")
+            dest = cap_root / installed_id
+            self._assert_within_root(dest, cap_root)
 
-        if dest.exists() and not overwrite:
-            raise FileExistsError(f"Target already exists: {dest}")
+            if dest.exists() and not overwrite:
+                raise FileExistsError(f"Target already exists: {dest}")
 
-        tmp_dest = self._prepare_temp_dest(dest)
-        try:
-            shutil.copytree(source_dir, tmp_dest)
-            self._commit_temp_dest(tmp_dest, dest)
-        except Exception:
-            if tmp_dest.exists():
-                shutil.rmtree(tmp_dest)
-            raise
+            tmp_dest = self._prepare_temp_dest(dest)
+            try:
+                shutil.copytree(source_dir, tmp_dest)
+                self._commit_temp_dest(tmp_dest, dest)
+            except Exception:
+                if tmp_dest.exists():
+                    shutil.rmtree(tmp_dest)
+                raise
 
-        installed_manifest = next(
-            (dest / name for name in manifest_order if (dest / name).exists()),
-            dest / manifest_order[0],
-        )
-        entry = self._build_single_mcp_entry(installed_manifest)
-        entry.id = installed_id
-        if entry.name == manifest_path.parent.name:
-            entry.name = installed_id
-        self._add_or_replace_entry("mcp", entry)
+            installed_manifest = next(
+                (dest / name for name in manifest_order if (dest / name).exists()),
+                dest / manifest_order[0],
+            )
+            entry = self._build_single_mcp_entry(installed_manifest)
+            entry.id = installed_id
+            if entry.name == manifest_path.parent.name:
+                entry.name = installed_id
+            self._add_or_replace_entry("mcp", entry)
 
         return {
             "ok": True,
