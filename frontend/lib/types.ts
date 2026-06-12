@@ -661,6 +661,7 @@ export interface UpdateProjectRuntimePreferencesPayload {
   script_preference?: "auto" | "prefer_python" | "prefer_r" | "prefer_mixed" | null;
   python_runtime?: string | null;
   r_runtime?: string | null;
+  /** @deprecated Internal only — no longer exposed in user-facing Settings UI. */
   execution_mode?: "guarded" | "workspace_write" | null;
 }
 
@@ -668,6 +669,7 @@ export interface ProjectRuntimePreferences {
   script_preference: "auto" | "prefer_python" | "prefer_r" | "prefer_mixed";
   python_runtime?: string | null;
   r_runtime?: string | null;
+  /** @deprecated Internal only — no longer exposed in user-facing Settings UI. */
   execution_mode?: "guarded" | "workspace_write";
 }
 

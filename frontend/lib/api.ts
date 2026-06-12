@@ -746,18 +746,6 @@ export const api = {
   getLibraryItem(kind: "skill" | "mcp", entryId: string) {
     return request<LibraryDetailResponse>(`/library/${kind === "skill" ? "skills" : "mcp"}/${encodeURIComponent(entryId)}`);
   },
-  refreshLibrary(kind: "skill" | "mcp", force = false) {
-    const suffix = force ? "?force=true" : "";
-    return request<LibraryListResponse>(`/library/${kind === "skill" ? "skills" : "mcp"}/refresh${suffix}`, {
-      method: "POST",
-    });
-  },
-  resummarizeLibraryItem(kind: "skill" | "mcp", entryId: string) {
-    return request<LibraryDetailResponse>(
-      `/library/${kind === "skill" ? "skills" : "mcp"}/${encodeURIComponent(entryId)}/resummarize`,
-      { method: "POST" },
-    );
-  },
   getSkillLibrary(projectId: string) {
     return request<LibraryListResponse>(`/projects/${projectId}/skill-library`);
   },

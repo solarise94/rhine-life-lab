@@ -70,26 +70,6 @@ export function useDeleteExecutorProfileMutation() {
   });
 }
 
-export function useRefreshLibraryMutation(kind: "skill" | "mcp") {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ force }: { force?: boolean } = {}) => api.refreshLibrary(kind, force ?? false),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.library(kind) });
-    },
-  });
-}
-
-export function useResummarizeLibraryItemMutation(kind: "skill" | "mcp") {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (entryId: string) => api.resummarizeLibraryItem(kind, entryId),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.library(kind) });
-    },
-  });
-}
-
 export function useCreateProjectMutation() {
   const queryClient = useQueryClient();
   return useMutation({
