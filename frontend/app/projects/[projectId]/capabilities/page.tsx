@@ -1,11 +1,6 @@
-"use client";
+import { ProjectWorkspace } from "@/components/layout/ProjectWorkspace";
 
-import { useParams } from "next/navigation";
-import { CapabilitiesPanel } from "@/components/capabilities/CapabilitiesPanel";
-
-export default function CapabilitiesPage() {
-  const params = useParams<{ projectId: string }>();
-  const projectId = params?.projectId ?? "";
-
-  return <CapabilitiesPanel projectId={projectId} />;
+export default async function CapabilitiesPage({ params }: { params: Promise<{ projectId: string }> }) {
+  const { projectId } = await params;
+  return <ProjectWorkspace projectId={projectId} view="capabilities" />;
 }

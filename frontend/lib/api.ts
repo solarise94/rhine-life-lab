@@ -773,6 +773,56 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
+  async uploadProjectSkill(projectId: string, file: File, overwrite?: boolean) {
+    const formData = new FormData();
+    formData.append("file", file);
+    if (overwrite !== undefined) {
+      formData.append("overwrite", String(overwrite));
+    }
+    const response = await fetch(uploadUrl(`/projects/${projectId}/capabilities/skills/upload`), {
+      method: "POST",
+      body: formData,
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `Upload failed: ${response.status}`);
+    }
+    return response.json() as Promise<{
+      ok: boolean;
+      kind: string;
+      installed_id: string;
+      installed_name: string;
+      summary: string;
+      warnings: string[];
+    }>;
+  },
+  registerProjectMcpServer(
+    projectId: string,
+    payload: {
+      id: string;
+      name: string;
+      transport: "stdio" | "http" | "sse";
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      url?: string;
+      headers?: Record<string, string>;
+      overwrite?: boolean;
+    },
+  ) {
+    return request<{
+      ok: boolean;
+      kind: string;
+      installed_id: string;
+      installed_name: string;
+      summary: string;
+      warnings: string[];
+    }>(`/projects/${projectId}/capabilities/mcp/register`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
   getResultAssetContentUrl(projectId: string, assetId: string) {
     return `${API_BASE}/projects/${projectId}/results/${assetId}/content`;
   },

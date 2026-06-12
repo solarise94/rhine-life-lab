@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 from urllib import error, request as url_request
@@ -762,6 +763,118 @@ class LibraryRegistryService:
                 return runtime
         return item.supported_runtimes[0] if item.supported_runtimes else requested_runtime
 
+    def install_skill_from_directory(
+        self,
+        source_dir: Path,
+        *,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Install a skill from a local directory into the app-managed capabilities root."""
+        source_dir = source_dir.resolve()
+        if not source_dir.exists():
+            raise ValueError(f"Source path does not exist: {source_dir}")
+        if not source_dir.is_dir():
+            raise ValueError("Source must be a directory")
+        if not (source_dir / "SKILL.md").exists():
+            raise ValueError("Skill source must contain a SKILL.md file")
+
+        cap_root = self._app_installed_capabilities_root("skill")
+        dest = cap_root / source_dir.name
+
+        if dest.exists() and not overwrite:
+            raise FileExistsError(f"Target already exists: {dest}")
+
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(source_dir, dest)
+
+        warnings: list[str] = []
+        try:
+            result = self.refresh_entries("skill", force=True)
+            if result.get("refreshed", 0) == 0:
+                warnings.append("Registry rebuild completed but no entries were discovered.")
+        except Exception as exc:
+            warnings.append(f"Post-install registry refresh failed: {exc}")
+
+        installed_id = source_dir.name
+        installed_name = installed_id
+        try:
+            for item in self.list_entries("skill").get("items") or []:
+                if isinstance(item, dict) and item.get("id") == installed_id:
+                    installed_name = item.get("name", installed_id)
+                    break
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "kind": "skill",
+            "installed_id": installed_id,
+            "installed_name": installed_name,
+            "summary": f"Skill '{installed_name}' installed and available.",
+            "warnings": warnings,
+        }
+
+    def register_mcp_server(
+        self,
+        server_id: str,
+        name: str,
+        transport: str,
+        *,
+        command: str | None = None,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        url: str | None = None,
+        headers: dict[str, str] | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Register an MCP server by writing a server.json config under the app-managed MCP root."""
+        if transport not in {"stdio", "http", "sse"}:
+            raise ValueError("transport must be 'stdio', 'http', or 'sse'")
+
+        cap_root = self._app_installed_capabilities_root("mcp")
+        dest = cap_root / server_id
+
+        if dest.exists() and not overwrite:
+            raise FileExistsError(f"Target already exists: {dest}")
+
+        dest.mkdir(parents=True, exist_ok=True)
+
+        server_config: dict[str, Any]
+        if transport == "stdio":
+            if not command:
+                raise ValueError("command is required for stdio transport")
+            server_config = {"command": command}
+            if args:
+                server_config["args"] = args
+            if env:
+                server_config["env"] = env
+        else:
+            if not url:
+                raise ValueError("url is required for http/sse transport")
+            server_config = {"type": transport, "url": url}
+            if headers:
+                server_config["headers"] = headers
+
+        (dest / "server.json").write_text(json.dumps(server_config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        warnings: list[str] = []
+        try:
+            result = self.refresh_entries("mcp", force=True)
+            if result.get("refreshed", 0) == 0:
+                warnings.append("Registry rebuild completed but no entries were discovered.")
+        except Exception as exc:
+            warnings.append(f"Post-register registry refresh failed: {exc}")
+
+        return {
+            "ok": True,
+            "kind": "mcp",
+            "installed_id": server_id,
+            "installed_name": name,
+            "summary": f"MCP server '{name}' registered and available.",
+            "warnings": warnings,
+        }
+
     @staticmethod
     def _build_mcp_config(
         item: LibraryEntry,
@@ -792,6 +905,17 @@ class LibraryRegistryService:
                 if first_key:
                     manifest_data = servers[first_key]
 
+            # 2a. Remote transport: url-based config
+            server_type = str(manifest_data.get("type") or "").strip().lower()
+            url = str(manifest_data.get("url") or "").strip()
+            headers = dict(manifest_data.get("headers") or {})
+            if server_type in {"http", "sse"} and url:
+                server_config: dict[str, Any] = {"url": url}
+                if headers:
+                    server_config["headers"] = headers
+                return {"mcpServers": {item.id: server_config}}
+
+            # 2b. Stdio transport: command-based config
             command = str(manifest_data.get("command") or "").strip()
             args = list(manifest_data.get("args") or [])
             env = dict(manifest_data.get("env") or {})
@@ -807,7 +931,7 @@ class LibraryRegistryService:
                     if python_path:
                         command = python_path
 
-                server_config: dict[str, Any] = {"command": command, "args": args}
+                server_config = {"command": command, "args": args}
                 if env:
                     server_config["env"] = env
                 return {"mcpServers": {item.id: server_config}}

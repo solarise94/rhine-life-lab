@@ -648,6 +648,70 @@ button {
   border: 1px solid var(--line);
 }
 
+.settings-field textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.settings-kv-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.settings-kv-row input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+
+.capability-install-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+
+.capability-install-tab {
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.capability-install-tab:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.capability-install-tab.active {
+  color: var(--text);
+  background: var(--panel-solid);
+  border-color: var(--line);
+}
+
 .settings-status {
   color: var(--muted);
   font-size: 12px;

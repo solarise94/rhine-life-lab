@@ -1,11 +1,11 @@
+import shutil
+import tempfile
+import zipfile
 from pathlib import Path
-
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 from typing import Literal
 
-import shutil
-from pathlib import Path
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 
 from app.api.deps import get_flow_service, get_library_registry_service, get_manager_auto_service, get_project_service, get_worker_service
 from app.core.config import get_settings
@@ -217,8 +217,17 @@ def install_capability(
         if not has_entry:
             raise HTTPException(status_code=422, detail="MCP source must contain at least one of: manifest.json, server.json, mcp.json")
 
+    if kind == "skill":
+        try:
+            return library_service.install_skill_from_directory(source, overwrite=request.overwrite)
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Legacy MCP local-path install
     settings = get_settings()
-    cap_root = Path(settings.data_root) / "_system" / "capabilities" / ("skills" if kind == "skill" else "mcp")
+    cap_root = Path(settings.data_root) / "_system" / "capabilities" / "mcp"
     dest = cap_root / source.name
 
     if dest.exists() and not request.overwrite:
@@ -226,7 +235,6 @@ def install_capability(
 
     warnings: list[str] = []
 
-    # Copy source into app-installed capabilities directory
     try:
         if dest.exists():
             shutil.rmtree(dest)
@@ -234,21 +242,17 @@ def install_capability(
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to copy capability: {exc}") from exc
 
-    # Rebuild registry so the new entry is discovered
     try:
-        result = library_service.refresh_entries(kind, force=True)  # type: ignore[arg-type]
+        result = library_service.refresh_entries("mcp", force=True)
         if result.get("refreshed", 0) == 0:
             warnings.append("Registry rebuild completed but no entries were discovered.")
     except Exception as exc:
         warnings.append(f"Post-install registry refresh failed: {exc}")
 
-    # Find the installed entry id
     installed_id = source.name
     installed_name = installed_id
-
-    # Look it up in the refreshed registry for a friendly name
     try:
-        for item in (library_service.list_entries(kind).get("items") or []):  # type: ignore[arg-type]
+        for item in library_service.list_entries("mcp").get("items") or []:
             if isinstance(item, dict) and item.get("id") == installed_id:
                 installed_name = item.get("name", installed_id)
                 break
@@ -257,12 +261,98 @@ def install_capability(
 
     return {
         "ok": True,
-        "kind": kind,
+        "kind": "mcp",
         "installed_id": installed_id,
         "installed_name": installed_name,
-        "summary": f"{'Skill' if kind == 'skill' else 'MCP'} '{installed_name}' installed and available.",
+        "summary": f"MCP '{installed_name}' installed and available.",
         "warnings": warnings,
     }
+
+
+@router.post("/{project_id}/capabilities/skills/upload")
+async def upload_skill(
+    project_id: str,
+    file: UploadFile = File(...),
+    overwrite: bool = Form(False),
+    library_service: LibraryRegistryService = Depends(get_library_registry_service),
+) -> dict:
+    if not file.filename:
+        raise HTTPException(status_code=422, detail="Filename is required")
+
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in {".skill", ".zip"}:
+        raise HTTPException(status_code=422, detail="File must be a .skill or .zip archive")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        archive_path = tmp_path / f"upload{suffix}"
+        try:
+            content = await file.read()
+            archive_path.write_bytes(content)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to read uploaded file: {exc}") from exc
+
+        try:
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                archive.extractall(tmp_path / "extracted")
+        except zipfile.BadZipFile as exc:
+            raise HTTPException(status_code=422, detail="Invalid zip archive") from exc
+
+        extracted = tmp_path / "extracted"
+        members = [p for p in extracted.iterdir() if p.is_dir()]
+        if not members:
+            raise HTTPException(status_code=422, detail="Archive does not contain a skill directory")
+        if len(members) == 1 and (members[0] / "SKILL.md").exists():
+            source_dir = members[0]
+        else:
+            # Archive root itself is the skill directory
+            source_dir = extracted
+
+        if not (source_dir / "SKILL.md").exists():
+            raise HTTPException(status_code=422, detail="Skill archive must contain a SKILL.md file")
+
+        try:
+            return library_service.install_skill_from_directory(source_dir, overwrite=overwrite)
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class RegisterMcpServerRequest(BaseModel):
+    id: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+    transport: Literal["stdio", "http", "sse"]
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    url: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    overwrite: bool = False
+
+
+@router.post("/{project_id}/capabilities/mcp/register")
+def register_mcp_server(
+    project_id: str,
+    request: RegisterMcpServerRequest,
+    library_service: LibraryRegistryService = Depends(get_library_registry_service),
+) -> dict:
+    try:
+        return library_service.register_mcp_server(
+            server_id=request.id.strip(),
+            name=request.name.strip(),
+            transport=request.transport,
+            command=request.command,
+            args=request.args,
+            env=request.env,
+            url=request.url,
+            headers=request.headers,
+            overwrite=request.overwrite,
+        )
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/{project_id}/cards")

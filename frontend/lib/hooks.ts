@@ -56,6 +56,28 @@ export function useInstallCapabilityMutation(projectId: string) {
   });
 }
 
+export function useUploadSkillMutation(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ file, overwrite }: { file: File; overwrite?: boolean }) =>
+      api.uploadProjectSkill(projectId, file, overwrite),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectSkillLibrary(projectId) });
+    },
+  });
+}
+
+export function useRegisterMcpServerMutation(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: Parameters<typeof api.registerProjectMcpServer>[1]) =>
+      api.registerProjectMcpServer(projectId, payload),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectMcpLibrary(projectId) });
+    },
+  });
+}
+
 export function useUpdateAppSettingsMutation() {
   const queryClient = useQueryClient();
   return useMutation({
