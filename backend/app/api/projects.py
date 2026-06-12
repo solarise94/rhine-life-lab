@@ -226,47 +226,12 @@ def install_capability(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # Legacy MCP local-path install
-    settings = get_settings()
-    cap_root = Path(settings.data_root) / "_system" / "capabilities" / "mcp"
-    dest = cap_root / source.name
-
-    if dest.exists() and not request.overwrite:
-        raise HTTPException(status_code=409, detail=f"Target already exists: {dest}. Set overwrite=true to replace.")
-
-    warnings: list[str] = []
-
     try:
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(source, dest)
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to copy capability: {exc}") from exc
-
-    try:
-        result = library_service.refresh_entries("mcp", force=True)
-        if result.get("refreshed", 0) == 0:
-            warnings.append("Registry rebuild completed but no entries were discovered.")
-    except Exception as exc:
-        warnings.append(f"Post-install registry refresh failed: {exc}")
-
-    installed_id = source.name
-    installed_name = installed_id
-    try:
-        for item in library_service.list_entries("mcp").get("items") or []:
-            if isinstance(item, dict) and item.get("id") == installed_id:
-                installed_name = item.get("name", installed_id)
-                break
-    except Exception:
-        pass
-
-    return {
-        "ok": True,
-        "kind": "mcp",
-        "installed_id": installed_id,
-        "installed_name": installed_name,
-        "summary": f"MCP '{installed_name}' installed and available.",
-        "warnings": warnings,
-    }
+        return library_service.install_mcp_from_directory(source, overwrite=request.overwrite)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _safe_extract_zip(archive: zipfile.ZipFile, target_dir: Path) -> None:
@@ -304,12 +269,17 @@ async def upload_skill(
     if not target_id:
         raise HTTPException(status_code=422, detail="Invalid filename")
 
+    try:
+        target_id = library_service._validate_capability_id(target_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
         archive_path = tmp_path / f"upload{suffix}"
         try:
-            content = await file.read()
-            archive_path.write_bytes(content)
+            with archive_path.open("wb") as dst:
+                shutil.copyfileobj(file.file, dst)
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Failed to read uploaded file: {exc}") from exc
 
@@ -324,16 +294,13 @@ async def upload_skill(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         members = [p for p in extracted.iterdir() if p.is_dir()]
-        if not members:
-            raise HTTPException(status_code=422, detail="Archive does not contain a skill directory")
         if len(members) == 1 and (members[0] / "SKILL.md").exists():
             source_dir = members[0]
-        else:
+        elif (extracted / "SKILL.md").exists():
             # Archive root itself is the skill directory
             source_dir = extracted
-
-        if not (source_dir / "SKILL.md").exists():
-            raise HTTPException(status_code=422, detail="Skill archive must contain a SKILL.md file")
+        else:
+            raise HTTPException(status_code=422, detail="Archive does not contain a valid skill directory")
 
         try:
             return library_service.install_skill_from_directory(

@@ -234,6 +234,102 @@ class LibraryRegistryService:
     def _registry_path(self, kind: LibraryKind) -> Path:
         return self.registry_root / f"{kind}s.json"
 
+    @staticmethod
+    def _validate_capability_id(value: str) -> str:
+        """Return a trimmed id or raise ValueError if it is unsafe."""
+        entry_id = value.strip()
+        if not entry_id or entry_id in {".", ".."}:
+            raise ValueError("Invalid capability id")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", entry_id):
+            raise ValueError("Capability id contains illegal characters")
+        if entry_id.startswith(".") or entry_id.endswith("."):
+            raise ValueError("Capability id cannot start or end with a dot")
+        return entry_id
+
+    @staticmethod
+    def _assert_within_root(dest: Path, root: Path) -> None:
+        """Raise ValueError if dest resolves outside root."""
+        root = root.resolve()
+        dest = dest.resolve()
+        try:
+            dest.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("Target path escapes capabilities root") from exc
+
+    def _add_or_replace_entry(self, kind: LibraryKind, entry: LibraryEntry) -> None:
+        """Insert or update a single entry in the registry without re-scanning disk."""
+        items = self._load_registry_items(kind)
+        by_id = {item.id: item for item in items}
+        by_id[entry.id] = entry
+        registry = LibraryRegistry(kind=kind, items=list(by_id.values()), updated_at=utc_now())
+        self._write_registry(registry)
+
+    def _build_single_skill_entry(self, skill_dir: Path, installed_id: str) -> LibraryEntry:
+        """Build a LibraryEntry for a single installed skill directory."""
+        skill_md = skill_dir / "SKILL.md"
+        source_text = self._read_source_text(skill_md)
+        source_hash = sha256_file(skill_md)
+        frontmatter = self._parse_frontmatter(source_text)
+        display_name = str(frontmatter.get("name") or installed_id)
+        fallback_summary = self._heuristic_summary("skill", display_name, source_text)
+        tags = self._heuristic_tags(display_name, source_text)
+        return LibraryEntry(
+            id=installed_id,
+            kind="skill",
+            name=display_name,
+            summary_short=fallback_summary,
+            summary_long=fallback_summary,
+            tags=self._merged_tags(["skill", skill_dir.parent.name.lstrip(".")], tags),
+            use_cases=tags[:4],
+            source_path=str(skill_md),
+            source_hash=source_hash,
+            enabled=True,
+            runtime_requirements=[],
+            compatibility_notes=[],
+            supported_runtimes=[],
+            launch_hint=None,
+            generated_by=self.settings.library_summarizer_model,
+            generated_at=utc_now(),
+            metadata={
+                "root": str(skill_dir.parent),
+                "source": str(skill_md.relative_to(skill_dir.parent)),
+            },
+        )
+
+    def _build_single_mcp_entry(self, manifest_path: Path) -> LibraryEntry:
+        """Build a LibraryEntry from a single MCP manifest/server.json path."""
+        entry_id = manifest_path.parent.name
+        text = self._read_source_text(manifest_path)
+        source_hash = sha256_file(manifest_path)
+        display_name = entry_id
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest.get("name"):
+                display_name = str(manifest["name"])
+        except Exception:
+            pass
+        fallback_summary = self._heuristic_summary("mcp", display_name, text)
+        tags = self._heuristic_tags(display_name, text)
+        return LibraryEntry(
+            id=entry_id,
+            kind="mcp",
+            name=display_name,
+            summary_short=fallback_summary,
+            summary_long=fallback_summary,
+            tags=self._merged_tags(["mcp"], tags),
+            use_cases=tags[:4],
+            source_path=str(manifest_path),
+            source_hash=source_hash,
+            enabled=True,
+            runtime_requirements=[],
+            compatibility_notes=[],
+            supported_runtimes=[],
+            launch_hint="see source manifest",
+            generated_by=self.settings.library_summarizer_model,
+            generated_at=utc_now(),
+            metadata={"root": str(manifest_path.parent)},
+        )
+
     def _build_skill_entries(self, *, force: bool) -> list[LibraryEntry]:
         previous = self._load_registry_items("skill")
         previous_by_id = {item.id: item for item in previous}
@@ -793,9 +889,10 @@ class LibraryRegistryService:
         if not (source_dir / "SKILL.md").exists():
             raise ValueError("Skill source must contain a SKILL.md file")
 
-        installed_id = target_id or source_dir.name
+        installed_id = self._validate_capability_id(target_id or source_dir.name)
         cap_root = self._app_installed_capabilities_root("skill")
         dest = cap_root / installed_id
+        self._assert_within_root(dest, cap_root)
 
         if dest.exists() and not overwrite:
             raise FileExistsError(f"Target already exists: {dest}")
@@ -804,30 +901,16 @@ class LibraryRegistryService:
             shutil.rmtree(dest)
         shutil.copytree(source_dir, dest)
 
-        warnings: list[str] = []
-        try:
-            result = self.refresh_entries("skill", force=True)
-            if result.get("refreshed", 0) == 0:
-                warnings.append("Registry rebuild completed but no entries were discovered.")
-        except Exception as exc:
-            warnings.append(f"Post-install registry refresh failed: {exc}")
-
-        installed_name = installed_id
-        try:
-            for item in self.list_entries("skill").get("items") or []:
-                if isinstance(item, dict) and item.get("id") == installed_id:
-                    installed_name = item.get("name", installed_id)
-                    break
-        except Exception:
-            pass
+        entry = self._build_single_skill_entry(dest, installed_id)
+        self._add_or_replace_entry("skill", entry)
 
         return {
             "ok": True,
             "kind": "skill",
             "installed_id": installed_id,
-            "installed_name": installed_name,
-            "summary": f"Skill '{installed_name}' installed and available.",
-            "warnings": warnings,
+            "installed_name": entry.name,
+            "summary": f"Skill '{entry.name}' installed and available.",
+            "warnings": [],
         }
 
     def register_mcp_server(
@@ -846,50 +929,106 @@ class LibraryRegistryService:
         """Register an MCP server by writing a server.json config under the app-managed MCP root."""
         if transport not in {"stdio", "http", "sse"}:
             raise ValueError("transport must be 'stdio', 'http', or 'sse'")
+        if transport == "stdio":
+            if not command:
+                raise ValueError("command is required for stdio transport")
+        else:
+            if not url:
+                raise ValueError("url is required for http/sse transport")
 
+        server_id = self._validate_capability_id(server_id)
         cap_root = self._app_installed_capabilities_root("mcp")
         dest = cap_root / server_id
+        self._assert_within_root(dest, cap_root)
 
         if dest.exists() and not overwrite:
             raise FileExistsError(f"Target already exists: {dest}")
 
-        dest.mkdir(parents=True, exist_ok=True)
-
         server_config: dict[str, Any]
         if transport == "stdio":
-            if not command:
-                raise ValueError("command is required for stdio transport")
             server_config = {"command": command}
             if args:
                 server_config["args"] = args
             if env:
                 server_config["env"] = env
         else:
-            if not url:
-                raise ValueError("url is required for http/sse transport")
             server_config = {"type": transport, "url": url}
             if headers:
                 server_config["headers"] = headers
-
         server_config["name"] = name
 
+        if dest.exists():
+            shutil.rmtree(dest)
+        dest.mkdir(parents=True)
         (dest / "server.json").write_text(json.dumps(server_config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-        warnings: list[str] = []
-        try:
-            result = self.refresh_entries("mcp", force=True)
-            if result.get("refreshed", 0) == 0:
-                warnings.append("Registry rebuild completed but no entries were discovered.")
-        except Exception as exc:
-            warnings.append(f"Post-register registry refresh failed: {exc}")
+        entry = self._build_single_mcp_entry(dest / "server.json")
+        self._add_or_replace_entry("mcp", entry)
 
         return {
             "ok": True,
             "kind": "mcp",
             "installed_id": server_id,
-            "installed_name": name,
-            "summary": f"MCP server '{name}' registered and available.",
-            "warnings": warnings,
+            "installed_name": entry.name,
+            "summary": f"MCP server '{entry.name}' registered and available.",
+            "warnings": [],
+        }
+
+    def install_mcp_from_directory(
+        self,
+        source_dir: Path,
+        *,
+        target_id: str | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Install an MCP server from a local directory into the app-managed capabilities root."""
+        source_dir = source_dir.resolve()
+        if not source_dir.exists():
+            raise ValueError(f"Source path does not exist: {source_dir}")
+        if not source_dir.is_dir():
+            raise ValueError("Source must be a directory")
+
+        manifest_order = ["server.json", "manifest.json", "mcp.json"]
+        manifest_path: Path | None = None
+        for name in manifest_order:
+            candidate = source_dir / name
+            if candidate.exists():
+                manifest_path = candidate
+                break
+        if manifest_path is None:
+            raise ValueError(
+                "MCP source must contain at least one of: server.json, manifest.json, mcp.json"
+            )
+
+        installed_id = self._validate_capability_id(target_id or source_dir.name)
+        cap_root = self._app_installed_capabilities_root("mcp")
+        dest = cap_root / installed_id
+        self._assert_within_root(dest, cap_root)
+
+        if dest.exists() and not overwrite:
+            raise FileExistsError(f"Target already exists: {dest}")
+
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(source_dir, dest)
+
+        installed_manifest = next(
+            (dest / name for name in manifest_order if (dest / name).exists()),
+            dest / manifest_order[0],
+        )
+        entry = self._build_single_mcp_entry(installed_manifest)
+        entry.id = installed_id
+        if entry.name == manifest_path.parent.name:
+            entry.name = installed_id
+        self._add_or_replace_entry("mcp", entry)
+
+        return {
+            "ok": True,
+            "kind": "mcp",
+            "installed_id": installed_id,
+            "installed_name": entry.name,
+            "summary": f"MCP '{entry.name}' installed and available.",
+            "warnings": [],
         }
 
     @staticmethod
