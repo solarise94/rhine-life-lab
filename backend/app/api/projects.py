@@ -269,6 +269,23 @@ def install_capability(
     }
 
 
+def _safe_extract_zip(archive: zipfile.ZipFile, target_dir: Path) -> None:
+    """Extract zip members while preventing Zip Slip attacks."""
+    target_dir = target_dir.resolve()
+    for member in archive.infolist():
+        if member.is_dir():
+            continue
+        member_path = Path(member.filename)
+        if member_path.is_absolute() or ".." in member_path.parts:
+            raise ValueError(f"Unsafe archive path: {member.filename}")
+        dest = (target_dir / member_path).resolve()
+        if not str(dest).startswith(str(target_dir) + "/"):
+            raise ValueError(f"Archive path escapes target directory: {member.filename}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(member) as src, dest.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+
 @router.post("/{project_id}/capabilities/skills/upload")
 async def upload_skill(
     project_id: str,
@@ -283,6 +300,10 @@ async def upload_skill(
     if suffix not in {".skill", ".zip"}:
         raise HTTPException(status_code=422, detail="File must be a .skill or .zip archive")
 
+    target_id = Path(file.filename).stem
+    if not target_id:
+        raise HTTPException(status_code=422, detail="Invalid filename")
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
         archive_path = tmp_path / f"upload{suffix}"
@@ -292,13 +313,16 @@ async def upload_skill(
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Failed to read uploaded file: {exc}") from exc
 
+        extracted = tmp_path / "extracted"
+        extracted.mkdir()
         try:
             with zipfile.ZipFile(archive_path, "r") as archive:
-                archive.extractall(tmp_path / "extracted")
+                _safe_extract_zip(archive, extracted)
         except zipfile.BadZipFile as exc:
             raise HTTPException(status_code=422, detail="Invalid zip archive") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        extracted = tmp_path / "extracted"
         members = [p for p in extracted.iterdir() if p.is_dir()]
         if not members:
             raise HTTPException(status_code=422, detail="Archive does not contain a skill directory")
@@ -312,7 +336,9 @@ async def upload_skill(
             raise HTTPException(status_code=422, detail="Skill archive must contain a SKILL.md file")
 
         try:
-            return library_service.install_skill_from_directory(source_dir, overwrite=overwrite)
+            return library_service.install_skill_from_directory(
+                source_dir, target_id=target_id, overwrite=overwrite
+            )
         except FileExistsError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (ValueError, OSError) as exc:

@@ -348,10 +348,24 @@ class LibraryRegistryService:
                     continue
                 seen.add(entry_id)
                 text = self._read_source_text(path)
+
+                # Prefer a friendly name persisted in server.json/manifest.json
+                display_name = entry_id
+                manifest_path = path.parent / "server.json"
+                if not manifest_path.exists():
+                    manifest_path = path.parent / "manifest.json"
+                if manifest_path.exists():
+                    try:
+                        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        if manifest.get("name"):
+                            display_name = str(manifest["name"])
+                    except Exception:
+                        pass
+
                 candidates.append(
                     {
                         "id": entry_id,
-                        "name": entry_id,
+                        "name": display_name,
                         "source_path": str(path),
                         "source_hash": sha256_file(path),
                         "source_text": text,
@@ -767,6 +781,7 @@ class LibraryRegistryService:
         self,
         source_dir: Path,
         *,
+        target_id: str | None = None,
         overwrite: bool = False,
     ) -> dict[str, Any]:
         """Install a skill from a local directory into the app-managed capabilities root."""
@@ -778,8 +793,9 @@ class LibraryRegistryService:
         if not (source_dir / "SKILL.md").exists():
             raise ValueError("Skill source must contain a SKILL.md file")
 
+        installed_id = target_id or source_dir.name
         cap_root = self._app_installed_capabilities_root("skill")
-        dest = cap_root / source_dir.name
+        dest = cap_root / installed_id
 
         if dest.exists() and not overwrite:
             raise FileExistsError(f"Target already exists: {dest}")
@@ -796,7 +812,6 @@ class LibraryRegistryService:
         except Exception as exc:
             warnings.append(f"Post-install registry refresh failed: {exc}")
 
-        installed_id = source_dir.name
         installed_name = installed_id
         try:
             for item in self.list_entries("skill").get("items") or []:
@@ -855,6 +870,8 @@ class LibraryRegistryService:
             server_config = {"type": transport, "url": url}
             if headers:
                 server_config["headers"] = headers
+
+        server_config["name"] = name
 
         (dest / "server.json").write_text(json.dumps(server_config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
