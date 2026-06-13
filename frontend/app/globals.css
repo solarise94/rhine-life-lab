@@ -1604,6 +1604,24 @@ button {
   height: 100vh;
 }
 
+.task-workspace.has-detail {
+  grid-template-columns: minmax(320px, 0.32fr) minmax(0, 1fr) 360px;
+}
+
+.task-workspace .task-card-detail-panel-shell {
+  height: 100vh;
+  min-height: 100vh;
+  border-left: 1px solid var(--line);
+  background: var(--panel-solid);
+}
+
+.task-workspace .task-card-detail-panel-shell .card-detail-panel {
+  border-radius: 0;
+  border: 0;
+  box-shadow: none;
+  height: 100vh;
+}
+
 /* ─── Panels ─── */
 .panel {
   border: 1px solid var(--line);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useEffect } from "react";
+import { useMemo, useRef, useEffect, useState } from "react";
 import {
   CheckCircle2,
   Files,
@@ -11,6 +11,8 @@ import {
   Sparkles,
   Archive,
   TriangleAlert,
+  Bookmark,
+  Loader2,
 } from "lucide-react";
 import { Card, PythonRuntime, RRuntime, WorkerCapability, ExecutorProfile, WorkItem } from "@/lib/types";
 import { CardStatusBadge } from "./CardStatusBadge";
@@ -18,6 +20,7 @@ import { SpecialistAvatar } from "./SpecialistAvatar";
 import { FileBag } from "./FileBag";
 import { CardPage, EMPTY_CARD_PAGE_BY_ID, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 import { latestManagerReview } from "@/lib/card-review";
+import { useSaveCardToLibrary } from "@/lib/hooks";
 
 function preferredExecutorProfile(profiles: ExecutorProfile[], workerType?: string) {
   if (!workerType) return profiles[0];
@@ -82,6 +85,9 @@ export function ModuleCard({
   const storedPage = cardPages[card.card_id];
   const fileCount = card.outputs.filter((o) => o.asset_id).length;
   const visibleManagerReview = latestManagerReview(card.manager_review);
+
+  const saveMutation = useSaveCardToLibrary();
+  const [saveToast, setSaveToast] = useState<string | null>(null);
 
   const isGhost = card.status === "proposed";
   const isRunning = card.status === "running" || card.status === "reviewing";
@@ -170,6 +176,27 @@ export function ModuleCard({
     onAskManager?.(text);
   }
 
+  function handleSaveToLibrary(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (saveMutation.isPending) return;
+    saveMutation.mutate(
+      { projectId, cardId: card.card_id },
+      {
+        onSuccess: (result) => {
+          const msg = result.warnings.length
+            ? `已存入牌库（${result.warnings.length} 条警告）`
+            : "已存入牌库";
+          setSaveToast(msg);
+          setTimeout(() => setSaveToast(null), 3000);
+        },
+        onError: () => {
+          setSaveToast("存入牌库失败");
+          setTimeout(() => setSaveToast(null), 3000);
+        },
+      },
+    );
+  }
+
   return (
     <div
       className={`task-specialist-card ${active ? "active" : ""} ${isGhost ? "ghost" : ""} ${isRunning ? "running" : ""} ${isDormant ? "dormant" : ""}`}
@@ -234,6 +261,18 @@ export function ModuleCard({
                   <div className="badge-stat"><span>📤</span> {card.outputs.length} outputs</div>
                 </div>
 
+                {saveToast && (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      fontSize: 11,
+                      fontWeight: 500,
+                      color: saveToast.includes("失败") ? "var(--red)" : "var(--green)",
+                    }}
+                  >
+                    {saveToast}
+                  </div>
+                )}
                 <div className="inline-actions" style={{ marginTop: 12 }}>
                   {onAskManager && (
                     <button className="btn secondary" style={{ fontSize: 10, padding: "4px 8px", flex: 1 }} onClick={(e) => sendToManager(`请解释 ${card.title} 的运行情况和当前状态`, e)}>
@@ -250,6 +289,16 @@ export function ModuleCard({
                       <RotateCcw size={12} /> 恢复
                     </button>
                   ) : null}
+                  <button
+                    className="btn secondary"
+                    style={{ fontSize: 10, padding: "4px 8px", flex: 1 }}
+                    onClick={handleSaveToLibrary}
+                    disabled={saveMutation.isPending}
+                    title="存入牌库"
+                  >
+                    {saveMutation.isPending ? <Loader2 size={12} className="spin" /> : <Bookmark size={12} />}
+                    存入牌库
+                  </button>
                 </div>
 
                 {card.status === "planned" ? (

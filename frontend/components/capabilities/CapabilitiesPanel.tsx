@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { SkillHubPanel } from "./SkillHubPanel";
 import { McpHubPanel } from "./McpHubPanel";
 import { CapabilityInstallPanel } from "./CapabilityInstallPanel";
@@ -23,10 +24,20 @@ interface CapabilitiesPanelProps {
   assets?: Asset[];
 }
 
+const VALID_TABS = new Set<Tab>(["skills", "mcp", "install", "deck"]);
+
 export function CapabilitiesPanel({ projectId, pythonRuntimes, rRuntimes, assets }: CapabilitiesPanelProps) {
+  const searchParams = useSearchParams();
   const [activeTab, setActiveTab] = useState<Tab>("skills");
   const [focusSkillId, setFocusSkillId] = useState<string | null>(null);
   const [focusMcpId, setFocusMcpId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const tab = searchParams.get("tab");
+    if (tab && VALID_TABS.has(tab as Tab)) {
+      setActiveTab(tab as Tab);
+    }
+  }, [searchParams]);
 
   function handleInstalled(kind: "skill" | "mcp", installedId: string) {
     if (kind === "skill") {
