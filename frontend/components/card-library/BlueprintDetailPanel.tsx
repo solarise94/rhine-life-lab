@@ -14,15 +14,16 @@ export interface BlueprintDetailPanelProps {
   entry?: CardBlueprintIndexEntry | CardBlueprintDraftIndexEntry;
   review?: BlueprintReviewResult | null;
   actions?: React.ReactNode;
+  className?: string;
 }
 
-export function BlueprintDetailPanel({ blueprint, entry, review, actions }: BlueprintDetailPanelProps) {
+export function BlueprintDetailPanel({ blueprint, entry, review, actions, className }: BlueprintDetailPanelProps) {
   if (!blueprint) {
-    return <div className="card-library-detail empty"><p>选择一张牌查看详情</p></div>;
+    return <div className={`card-library-detail empty ${className ?? ""}`.trim()}><p>选择一张牌查看详情</p></div>;
   }
 
   return (
-    <div className="card-library-detail">
+    <div className={`card-library-detail ${className ?? ""}`.trim()}>
       <div className="card-library-detail-header">
         <div>
           <h3 style={{ margin: "0 0 4px" }}>{blueprint.title}</h3>

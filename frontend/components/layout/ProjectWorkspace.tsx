@@ -42,10 +42,14 @@ import { ProjectHeader } from "./ProjectHeader";
 import { DependencyJobChip } from "@/components/dependency/DependencyJobChip";
 import { ManagerChatPanel } from "@/components/manager-chat/ManagerChatPanel";
 import { CardStream } from "@/components/cards/CardStream";
-import { CardDetailPanel } from "@/components/detail/CardDetailPanel";
+import { BlueprintDetailPanel } from "@/components/card-library/BlueprintDetailPanel";
 import { ResultsGrid } from "@/components/results/ResultsGrid";
 import { ReportBuilder } from "@/components/report/ReportBuilder";
 import { FilesPanel } from "@/components/files/FilesPanel";
+import { useAddCardToProjectLibrary } from "@/lib/hooks";
+import { cardToBlueprintPreview } from "@/lib/card-to-blueprint";
+import { Bookmark, Loader2 } from "lucide-react";
+import { useRouter } from "next/navigation";
 
 const ResultsOverviewChart = dynamic(
   () => import("@/components/results/ResultsOverviewChart").then((m) => m.ResultsOverviewChart),
@@ -120,6 +124,33 @@ function preferredExecutorProfile(profiles: ExecutorProfile[], workerType?: stri
   const candidates = workerType ? profiles.filter((profile) => profile.worker_type === workerType) : profiles;
   const preferredAuthMode = workerType === "pi" || workerType === "opencode" ? "project_api" : "cli_native";
   return candidates.find((profile) => profile.auth_mode === preferredAuthMode) ?? candidates[0];
+}
+
+function AddCardToLibraryAction({ projectId, card }: { projectId: string; card: Card }) {
+  const saveMutation = useAddCardToProjectLibrary();
+  const router = useRouter();
+  return (
+    <button
+      type="button"
+      className="btn secondary"
+      style={{ fontSize: 12, padding: "4px 10px", gap: 4 }}
+      onClick={() => {
+        saveMutation.mutate(
+          { projectId, cardId: card.card_id },
+          {
+            onSuccess: (result) => {
+              router.push(`/projects/${projectId}/card-library?draft=${result.draft_id}`);
+            },
+          },
+        );
+      }}
+      disabled={saveMutation.isPending}
+      title="加入项目牌库"
+    >
+      {saveMutation.isPending ? <Loader2 size={12} className="spin" /> : <Bookmark size={12} />}
+      加入项目牌库
+    </button>
+  );
 }
 
 export function ProjectWorkspace({ projectId, view }: { projectId: string; view: View }) {
@@ -211,7 +242,6 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
       : snapshot?.cards.find((item) => item.card_id === selectedCardId) ?? defaultTaskCard;
   const selectedRunId = selectedCard?.linked_runs.at(-1);
   const selectedRun = snapshot?.graph.runs.find((item) => item.run_id === selectedRunId);
-  const selectedWorkItem = workOrderQuery.data?.work_items.find((item) => item.card_id === selectedCard?.card_id);
   const configuredWorkers = useMemo(
     () => (environmentQuery.data?.worker_capabilities ?? []).filter((item) => item.configured),
     [environmentQuery.data?.worker_capabilities],
@@ -773,11 +803,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
         />
         {selectedCard ? (
           <div className="card-detail-panel-shell task-card-detail-panel-shell">
-            <CardDetailPanel
-              card={selectedCard}
-              summary={snapshot.summary}
-              workItem={selectedWorkItem}
-              projectId={projectId}
+            <BlueprintDetailPanel
+              className="card-library-detail-inline"
+              blueprint={cardToBlueprintPreview(selectedCard, projectId)}
+              actions={<AddCardToLibraryAction projectId={projectId} card={selectedCard} />}
             />
           </div>
         ) : null}
@@ -942,11 +971,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               />
               {selectedCard ? (
                 <div className="card-detail-panel-shell">
-                  <CardDetailPanel
-                    card={selectedCard}
-                    summary={snapshot.summary}
-                    workItem={selectedWorkItem}
-                    projectId={projectId}
+                  <BlueprintDetailPanel
+                    className="card-library-detail-inline"
+                    blueprint={cardToBlueprintPreview(selectedCard, projectId)}
+                    actions={<AddCardToLibraryAction projectId={projectId} card={selectedCard} />}
                   />
                 </div>
               ) : null}
@@ -1086,11 +1114,10 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   />
                   {selectedCard ? (
                     <div className="card-detail-panel-shell">
-                      <CardDetailPanel
-                        card={selectedCard}
-                        summary={snapshot.summary}
-                        workItem={selectedWorkItem}
-                        projectId={projectId}
+                      <BlueprintDetailPanel
+                        className="card-library-detail-inline"
+                        blueprint={cardToBlueprintPreview(selectedCard, projectId)}
+                        actions={<AddCardToLibraryAction projectId={projectId} card={selectedCard} />}
                       />
                     </div>
                   ) : null}
