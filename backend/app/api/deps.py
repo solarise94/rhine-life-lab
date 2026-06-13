@@ -23,6 +23,7 @@ from app.services.report_service import ReportService
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
 from app.services.runtime_dependency_resolver_service import RuntimeDependencyResolverService
 from app.services.runtime_approval_service import RuntimeApprovalService
+from app.services.card_library_service import CardLibraryService
 from app.services.worker_service import WorkerService
 
 
@@ -199,6 +200,15 @@ def get_background_task_service() -> BackgroundTaskService:
 @lru_cache
 def get_background_workboard_service() -> BackgroundWorkboardService:
     return BackgroundWorkboardService(get_project_service(), get_background_task_service())
+
+
+@lru_cache
+def get_card_library_service() -> CardLibraryService:
+    return CardLibraryService(
+        get_project_service(),
+        library_registry_service=get_library_registry_service(),
+        runtime_dependency_resolver_service=get_runtime_dependency_resolver_service(),
+    )
 
 
 @lru_cache
