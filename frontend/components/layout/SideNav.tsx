@@ -276,13 +276,6 @@ export function SideNav({
         ) : null}
       </div>
 
-      <div style={{ padding: "4px 10px 8px" }}>
-        <Link href="/card-library" className="btn secondary" style={{ width: "100%", justifyContent: "center", fontSize: 12, gap: 6 }}>
-          <Layers size={14} />
-          牌库
-        </Link>
-      </div>
-
       <div className="nav-section-label nav-session-label">
         <span>会话</span>
         <button
@@ -396,6 +389,13 @@ export function SideNav({
         >
           <FolderGit2 size={16} />
           <span>技术详情</span>
+        </Link>
+        <Link
+          href="/card-library"
+          className="nav-link"
+        >
+          <Layers size={16} />
+          <span>全局牌库管理</span>
         </Link>
       </div>
 
