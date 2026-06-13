@@ -925,13 +925,14 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     card={selectedCard}
                     summary={snapshot.summary}
                     workItem={selectedWorkItem}
+                    projectId={projectId}
                   />
                 </div>
               ) : null}
             </div>
           ) : null}
           {view === "capabilities" ? (
-            <CapabilitiesPanel projectId={projectId} />
+            <CapabilitiesPanel projectId={projectId} pythonRuntimes={environmentQuery.data?.python_runtimes ?? []} rRuntimes={environmentQuery.data?.r_runtimes ?? []} assets={snapshot.graph.assets} />
           ) : view === "settings" ? (
             <SettingsPanels
               projectId={projectId}
@@ -1066,13 +1067,14 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                         card={selectedCard}
                         summary={snapshot.summary}
                         workItem={selectedWorkItem}
+                        projectId={projectId}
                       />
                     </div>
                   ) : null}
                 </>
               ) : null}
               {view === "capabilities" ? (
-                <CapabilitiesPanel projectId={projectId} />
+                <CapabilitiesPanel projectId={projectId} pythonRuntimes={environmentQuery.data?.python_runtimes ?? []} rRuntimes={environmentQuery.data?.r_runtimes ?? []} assets={snapshot.graph.assets} />
               ) : view === "settings" ? (
                 <SettingsPanels
                   projectId={projectId}

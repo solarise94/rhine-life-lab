@@ -7,6 +7,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown,
   FolderGit2,
+  Layers,
   Package,
   Beaker,
   MessageSquareText,
@@ -272,6 +273,13 @@ export function SideNav({
             </Link>
           </div>
         ) : null}
+      </div>
+
+      <div style={{ padding: "4px 10px 8px" }}>
+        <Link href="/card-library" className="btn secondary" style={{ width: "100%", justifyContent: "center", fontSize: 12, gap: 6 }}>
+          <Layers size={14} />
+          牌库
+        </Link>
       </div>
 
       <div className="nav-section-label nav-session-label">

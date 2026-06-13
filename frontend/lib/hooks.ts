@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { CreateProjectPayload } from "@/lib/types";
+import { CreateProjectPayload, InstantiateBlueprintRequest } from "@/lib/types";
 
 export function useProjects() {
   return useQuery({
@@ -293,6 +293,57 @@ export function useRuntimeApprovals(projectId: string, runId?: string, runStatus
     queryFn: () => api.getRuntimeApprovals(projectId, runId!),
     enabled: Boolean(runId),
     refetchInterval: runStatus && ["success", "failed", "cancelled", "reviewed"].includes(runStatus) ? false : 4_000,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Card Library
+// ---------------------------------------------------------------------------
+
+export function useCardLibrary() {
+  return useQuery({
+    queryKey: queryKeys.cardLibrary,
+    queryFn: () => api.getCardLibrary(),
+  });
+}
+
+export function useCardBlueprint(blueprintId: string | null) {
+  return useQuery({
+    queryKey: queryKeys.cardBlueprint(blueprintId ?? ""),
+    queryFn: () => api.getCardBlueprint(blueprintId!),
+    enabled: Boolean(blueprintId),
+  });
+}
+
+export function useSaveCardToLibrary() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ projectId, cardId }: { projectId: string; cardId: string }) =>
+      api.saveCardToLibrary(projectId, cardId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.cardLibrary });
+    },
+  });
+}
+
+export function useDeleteCardBlueprint() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (blueprintId: string) => api.deleteCardBlueprint(blueprintId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.cardLibrary });
+    },
+  });
+}
+
+export function useInstantiateCardBlueprint(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ blueprintId, payload }: { blueprintId: string; payload: InstantiateBlueprintRequest }) =>
+      api.instantiateCardBlueprint(projectId, blueprintId, payload),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.project(projectId) });
+    },
   });
 }
 

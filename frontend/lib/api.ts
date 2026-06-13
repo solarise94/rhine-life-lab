@@ -39,6 +39,13 @@ import {
   RuntimeApprovalDecision,
   WorkOrder,
   RuntimeDependencyResolverPlan,
+  CardLibraryListResponse,
+  CardLibrarySearchResponse,
+  CardBlueprintResponse,
+  CardBlueprint,
+  SaveToLibraryResponse,
+  InstantiateBlueprintResponse,
+  InstantiateBlueprintRequest,
 } from "./types";
 import type { ChatTokenUsage } from "./types";
 
@@ -841,5 +848,57 @@ export const api = {
     base.pathname = `${base.pathname.replace(/\/$/, "")}/projects/${projectId}/runs/${runId}/ws`;
     base.search = "";
     return base.toString();
+  },
+
+  // -----------------------------------------------------------------------
+  // Card Library / Blueprint Deck
+  // -----------------------------------------------------------------------
+
+  getCardLibrary() {
+    return request<CardLibraryListResponse>("/card-library");
+  },
+  searchCardLibrary(params: { query?: string; tags?: string[]; domain?: string; runtime?: string; top_k?: number }) {
+    const sp = new URLSearchParams();
+    if (params.query) sp.set("query", params.query);
+    (params.tags ?? []).forEach((t) => sp.append("tags", t));
+    if (params.domain) sp.set("domain", params.domain);
+    if (params.runtime) sp.set("runtime", params.runtime);
+    if (params.top_k) sp.set("top_k", String(params.top_k));
+    return request<CardLibrarySearchResponse>(`/card-library/search?${sp.toString()}`);
+  },
+  getCardBlueprint(blueprintId: string) {
+    return request<CardBlueprintResponse>(`/card-library/${blueprintId}`);
+  },
+  saveCardToLibrary(projectId: string, cardId: string) {
+    return request<SaveToLibraryResponse>("/card-library", {
+      method: "POST",
+      body: JSON.stringify({ project_id: projectId, card_id: cardId }),
+    });
+  },
+  importCardBlueprint(blueprint: CardBlueprint) {
+    return request<SaveToLibraryResponse>("/card-library/import", {
+      method: "POST",
+      body: JSON.stringify(blueprint),
+    });
+  },
+  updateCardBlueprint(blueprintId: string, updates: { title?: string; summary?: string; tags?: string[]; domain?: string }) {
+    return request<CardBlueprintResponse>(`/card-library/${blueprintId}`, {
+      method: "PUT",
+      body: JSON.stringify(updates),
+    });
+  },
+  deleteCardBlueprint(blueprintId: string) {
+    return request<{ ok: boolean; blueprint_id: string }>(`/card-library/${blueprintId}`, {
+      method: "DELETE",
+    });
+  },
+  exportCardBlueprint(blueprintId: string) {
+    return request<CardBlueprintResponse>(`/card-library/${blueprintId}/export`);
+  },
+  instantiateCardBlueprint(projectId: string, blueprintId: string, payload: InstantiateBlueprintRequest) {
+    return request<InstantiateBlueprintResponse>(
+      `/projects/${projectId}/card-library/${blueprintId}/instantiate`,
+      { method: "POST", body: JSON.stringify(payload) },
+    );
   },
 };

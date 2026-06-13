@@ -1,9 +1,12 @@
 "use client";
 
+import { useState } from "react";
+import { Bookmark, Check, Loader2 } from "lucide-react";
 import { Card, ProjectSummary, RunEvent, RunRecord, WorkItem } from "@/lib/types";
 import { CardStatusBadge } from "@/components/cards/CardStatusBadge";
 import { SpecialistAvatar } from "@/components/cards/SpecialistAvatar";
 import { latestManagerReview } from "@/lib/card-review";
+import { useSaveCardToLibrary } from "@/lib/hooks";
 
 export function CardDetailPanel({
   card,
@@ -11,13 +14,19 @@ export function CardDetailPanel({
   workItem,
   run,
   latestEvent,
+  projectId,
 }: {
   card?: Card;
   summary: ProjectSummary;
   workItem?: WorkItem;
   run?: RunRecord;
   latestEvent?: RunEvent;
+  projectId?: string;
 }) {
+  // Hooks must be called before any conditional return (Rules of Hooks).
+  const saveMutation = useSaveCardToLibrary();
+  const [saveToast, setSaveToast] = useState<string | null>(null);
+
   if (!card) {
     return (
       <section className="panel card-detail-panel">
@@ -31,6 +40,26 @@ export function CardDetailPanel({
   }
   const visibleManagerReview = latestManagerReview(card.manager_review);
 
+  function handleSaveToLibrary() {
+    if (!projectId || !card) return;
+    saveMutation.mutate(
+      { projectId, cardId: card.card_id },
+      {
+        onSuccess: (result) => {
+          const msg = result.warnings.length
+            ? `已存入牌库（${result.warnings.length} 条警告）`
+            : "已存入牌库";
+          setSaveToast(msg);
+          setTimeout(() => setSaveToast(null), 3000);
+        },
+        onError: () => {
+          setSaveToast("存入牌库失败");
+          setTimeout(() => setSaveToast(null), 3000);
+        },
+      },
+    );
+  }
+
   return (
     <section className="panel card-detail-panel">
       <div className="panel-header">
@@ -41,7 +70,28 @@ export function CardDetailPanel({
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{card.card_type}</div>
           </div>
         </div>
-        <CardStatusBadge status={card.status} />
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {saveToast && (
+            <span style={{ fontSize: 12, color: saveToast.includes("失败") ? "var(--red)" : "var(--green)", fontWeight: 500 }}>
+              {saveToast.includes("失败") ? null : <Check size={12} style={{ display: "inline", verticalAlign: -1 }} />}
+              {" "}{saveToast}
+            </span>
+          )}
+          {projectId && (
+            <button
+              type="button"
+              className="btn secondary"
+              style={{ fontSize: 12, padding: "4px 10px", gap: 4 }}
+              onClick={handleSaveToLibrary}
+              disabled={saveMutation.isPending}
+              title="存入牌库"
+            >
+              {saveMutation.isPending ? <Loader2 size={12} className="spin" /> : <Bookmark size={12} />}
+              存入牌库
+            </button>
+          )}
+          <CardStatusBadge status={card.status} />
+        </div>
       </div>
       <div className="panel-body card-detail-panel-body meta-grid">
         <div className="meta-block">
