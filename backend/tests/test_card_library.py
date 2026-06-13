@@ -828,6 +828,40 @@ class TestProjectDraftFlow(_Base):
             )
         self.assertIn("Published", str(ctx.exception))
 
+    def test_publish_global_write_failure_rolls_back(self):
+        ps = self._create_project("proj-draft")
+        svc = self._service(ps)
+        self._create_card_with_runtime("proj-draft", "card-001", "Clean Card")
+
+        created = svc.create_project_draft("proj-draft", "card-001")
+        svc.review_project_draft("proj-draft", created.draft_id)
+
+        original_add = svc._add_to_index
+        failing_id: list[str] = []
+
+        def _failing_add(bp):
+            failing_id.append(bp.blueprint_id)
+            raise RuntimeError("index write failed")
+
+        svc._add_to_index = _failing_add
+        with self.assertRaises(ValueError) as ctx:
+            svc.publish_project_draft("proj-draft", created.draft_id)
+        self.assertIn("Failed to write global blueprint", str(ctx.exception))
+
+        # Restore for verification.
+        svc._add_to_index = original_add
+
+        # No orphan blueprint directory and no index entry.
+        self.assertEqual(len(failing_id), 1)
+        orphan_dir = svc._blueprint_dir(failing_id[0])
+        self.assertFalse(orphan_dir.exists())
+        entries = svc.list_blueprints()
+        self.assertNotIn(failing_id[0], [e.get("blueprint_id") for e in entries])
+
+        # Project draft should still be approved, not published.
+        draft = svc.get_project_draft("proj-draft", created.draft_id)
+        self.assertEqual(draft["status"], "approved")
+
 
 if __name__ == "__main__":
     unittest.main()

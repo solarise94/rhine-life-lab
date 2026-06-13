@@ -272,7 +272,6 @@ class CardBlueprintDraftIndexEntry(BaseModel):
 
 
 class CreateProjectDraftRequest(BaseModel):
-    project_id: str
     card_id: str
 
 

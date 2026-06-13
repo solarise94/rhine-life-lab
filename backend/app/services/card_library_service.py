@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import threading
 from pathlib import Path
 from typing import Any
@@ -587,6 +588,7 @@ class CardLibraryService:
             if draft.status != "approved":
                 raise ValueError("Draft must be approved before publishing")
 
+            global_blueprint_id = ""
             with self._lock:
                 self._ensure_dirs()
                 global_blueprint_id = self._generate_blueprint_id(draft.blueprint.title)
@@ -604,9 +606,20 @@ class CardLibraryService:
                 })
 
                 bp_dir = self._blueprint_dir(global_blueprint_id)
-                bp_dir.mkdir(parents=True, exist_ok=True)
-                atomic_write_json(bp_dir / "blueprint.json", bp.model_dump())
-                self._add_to_index(bp)
+                try:
+                    bp_dir.mkdir(parents=True, exist_ok=True)
+                    atomic_write_json(bp_dir / "blueprint.json", bp.model_dump())
+                    self._add_to_index(bp)
+                except Exception as exc:
+                    # Roll back anything we may have written to the global library.
+                    try:
+                        if bp_dir.exists():
+                            shutil.rmtree(bp_dir)
+                        if global_blueprint_id:
+                            self._remove_from_index(global_blueprint_id)
+                    except Exception:
+                        pass
+                    raise ValueError(f"Failed to write global blueprint: {exc}") from exc
 
             try:
                 draft.status = "published"
@@ -637,7 +650,6 @@ class CardLibraryService:
                     try:
                         orphan_dir = self._blueprint_dir(global_blueprint_id)
                         if orphan_dir.exists():
-                            import shutil
                             shutil.rmtree(orphan_dir)
                         self._remove_from_index(global_blueprint_id)
                     except Exception:
