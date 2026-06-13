@@ -18,7 +18,7 @@ export function cardToBlueprintPreview(card: Card, projectId: string): CardBluep
     label: input.label,
     accepted_formats: [],
     required: true,
-    description: input.asset_id ? `资产: ${input.asset_id}` : null,
+    description: null,
   }));
 
   const outputsSchema: BlueprintOutputSchema[] = card.outputs.map((output, index) => ({
@@ -28,13 +28,13 @@ export function cardToBlueprintPreview(card: Card, projectId: string): CardBluep
     accepted_formats: output.accepted_formats ?? [],
     preferred_format: output.preferred_format ?? null,
     required: output.required ?? true,
-    description: output.asset_id ? `资产: ${output.asset_id}` : null,
+    description: null,
   }));
 
   return {
     blueprint_id: `preview-${card.card_id}`,
     version: "1.0.0",
-    schema_version: "card_library.v1",
+    schema_version: "card_blueprint.v1",
     title: card.title,
     summary: card.summary || card.why || "等待执行",
     tags: [],
