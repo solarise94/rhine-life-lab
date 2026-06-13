@@ -7,6 +7,7 @@ import { Search, X, Trash2, Layers, ArrowLeft, Filter } from "lucide-react";
 import { useCardLibrary, useDeleteCardBlueprint, useCardBlueprint } from "@/lib/hooks";
 import { BlueprintCard } from "./BlueprintCard";
 import { BlueprintDetailPanel } from "./BlueprintDetailPanel";
+import { BlueprintDetailModal } from "./BlueprintDetailModal";
 
 // ---------------------------------------------------------------------------
 // Page
@@ -144,11 +145,12 @@ export function CardLibraryPage() {
         )}
       </div>
 
-      {selectedEntry && (
-        <BlueprintDetailPanel
-          blueprint={detailData?.blueprint ?? null}
-          entry={selectedEntry}
-          actions={
+      <BlueprintDetailModal
+        open={Boolean(selectedEntry)}
+        title={selectedEntry?.title}
+        onClose={() => setSelectedId(null)}
+        actions={
+          selectedEntry ? (
             <button
               type="button"
               className="btn secondary"
@@ -162,9 +164,15 @@ export function CardLibraryPage() {
             >
               <Trash2 size={14} /> {deleteMutation.isPending ? "删除中…" : "删除"}
             </button>
-          }
+          ) : null
+        }
+      >
+        <BlueprintDetailPanel
+          className="card-library-detail-modal"
+          blueprint={detailData?.blueprint ?? null}
+          entry={selectedEntry ?? undefined}
         />
-      )}
+      </BlueprintDetailModal>
     </div>
   );
 }

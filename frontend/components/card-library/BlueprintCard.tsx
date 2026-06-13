@@ -1,6 +1,6 @@
 "use client";
 
-import { Layers, Wrench, Radio, Tag, Clock } from "lucide-react";
+import { Layers, Wrench, Radio, Tag, Clock, Globe } from "lucide-react";
 
 import { CardBlueprintIndexEntry, CardBlueprintDraftIndexEntry, DraftStatus } from "@/lib/types";
 
@@ -47,6 +47,9 @@ export function BlueprintCard({ entry, isSelected, onSelect, status }: Blueprint
   const isDraft = "draft_id" in entry;
   const statusStyle = status ? STATUS_STYLE[status] : null;
 
+  const visibleTags = entry.tags.slice(0, 4);
+  const hiddenTagCount = entry.tags.length - visibleTags.length;
+
   return (
     <button
       type="button"
@@ -55,28 +58,54 @@ export function BlueprintCard({ entry, isSelected, onSelect, status }: Blueprint
       onClick={onSelect}
     >
       <div className="card-library-cover">
-        <Layers size={28} style={{ color: "var(--muted)" }} />
+        <Layers size={32} style={{ color: "var(--muted)" }} />
+        {entry.domain ? (
+          <span className="card-library-domain">
+            <Globe size={10} /> {entry.domain}
+          </span>
+        ) : null}
       </div>
       <div className="card-library-body">
         <strong className="card-library-title">{entry.title}</strong>
         <p className="card-library-summary">{entry.summary || "暂无摘要"}</p>
-        {entry.tags.length > 0 && (
-          <div className="card-library-tags">
-            {entry.tags.slice(0, 3).map((tag) => (
-              <span key={tag} className="pill" style={{ fontSize: 11 }}>{tag}</span>
+
+        {(entry.skills.length > 0 || entry.mcp_servers.length > 0) && (
+          <div className="card-library-capabilities">
+            {entry.skills.slice(0, 2).map((s) => (
+              <span key={s} className="capability-chip skill" title={`Skill: ${s}`}>
+                <Wrench size={10} /> {s}
+              </span>
             ))}
-            {entry.tags.length > 3 && <span className="pill" style={{ fontSize: 11 }}>+{entry.tags.length - 3}</span>}
+            {entry.skills.length > 2 && (
+              <span className="capability-chip more">+{entry.skills.length - 2}</span>
+            )}
+            {entry.mcp_servers.slice(0, 2).map((s) => (
+              <span key={s} className="capability-chip mcp" title={`MCP: ${s}`}>
+                <Radio size={10} /> {s}
+              </span>
+            ))}
+            {entry.mcp_servers.length > 2 && (
+              <span className="capability-chip more">+{entry.mcp_servers.length - 2}</span>
+            )}
           </div>
         )}
+
+        {entry.tags.length > 0 && (
+          <div className="card-library-tags">
+            {visibleTags.map((tag) => (
+              <span key={tag} className="pill" style={{ fontSize: 11 }}>{tag}</span>
+            ))}
+            {hiddenTagCount > 0 && <span className="pill" style={{ fontSize: 11 }}>+{hiddenTagCount}</span>}
+          </div>
+        )}
+
         <div className="card-library-meta">
           {entry.runtime_hints.length > 0 && (
-            <span style={{ background: "var(--blue-bg)", color: "var(--blue-dark)", padding: "1px 5px", borderRadius: 4, fontSize: 10 }}>
+            <span className="runtime-hint" title={entry.runtime_hints.join(", ")}>
               {entry.runtime_hints.join(", ")}
             </span>
           )}
-          {entry.skills.length > 0 && <span title="Skills"><Wrench size={12} /> {entry.skills.length}</span>}
-          {entry.mcp_servers.length > 0 && <span title="MCP Servers"><Radio size={12} /> {entry.mcp_servers.length}</span>}
-          {"use_count" in entry && indexEntry.use_count > 0 && <span><Tag size={12} /> {indexEntry.use_count}次</span>}
+          {"use_count" in entry && indexEntry.use_count > 0 && <span><Tag size={12} /> {indexEntry.use_count} 次</span>}
           {"last_used_at" in entry && indexEntry.last_used_at && <span><Clock size={12} /> {formatDate(indexEntry.last_used_at)}</span>}
           {isDraft && (entry as CardBlueprintDraftIndexEntry).created_at && (
             <span><Clock size={12} /> {formatDate((entry as CardBlueprintDraftIndexEntry).created_at)}</span>
@@ -85,14 +114,8 @@ export function BlueprintCard({ entry, isSelected, onSelect, status }: Blueprint
       </div>
       {status ? (
         <span
+          className="card-library-status"
           style={{
-            position: "absolute",
-            top: 8,
-            right: 8,
-            fontSize: 10,
-            fontWeight: 600,
-            padding: "2px 6px",
-            borderRadius: 4,
             background: statusStyle?.bg,
             color: statusStyle?.color,
           }}

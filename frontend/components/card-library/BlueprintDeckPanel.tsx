@@ -6,6 +6,7 @@ import { Search, Wrench, Radio, X, Layers } from "lucide-react";
 import { useCardLibrary, useCardBlueprint } from "@/lib/hooks";
 import { CardBlueprintIndexEntry } from "@/lib/types";
 import { BlueprintDetailPanel } from "./BlueprintDetailPanel";
+import { BlueprintDetailModal } from "./BlueprintDetailModal";
 
 // ---------------------------------------------------------------------------
 // Deck Item (list row)
@@ -95,12 +96,17 @@ export function BlueprintDeckPanel() {
         />
       ))}
 
-      {selectedEntry && (
+      <BlueprintDetailModal
+        open={Boolean(selectedEntry)}
+        title={selectedEntry?.title}
+        onClose={() => setSelectedId(null)}
+      >
         <BlueprintDetailPanel
+          className="card-library-detail-modal"
           blueprint={detailData?.blueprint ?? null}
-          entry={selectedEntry}
+          entry={selectedEntry ?? undefined}
         />
-      )}
+      </BlueprintDetailModal>
     </div>
   );
 }

@@ -15,6 +15,7 @@ import {
 import { DraftStatus, CardBlueprintDraftIndexEntry, UpdateProjectDraftRequest } from "@/lib/types";
 import { BlueprintCard } from "./BlueprintCard";
 import { BlueprintDetailPanel } from "./BlueprintDetailPanel";
+import { BlueprintDetailModal } from "./BlueprintDetailModal";
 
 const STATUS_OPTIONS: { value: DraftStatus | ""; label: string }[] = [
   { value: "", label: "所有状态" },
@@ -159,7 +160,10 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
   function handlePublish() {
     if (!selectedDraftId) return;
     publishMutation.mutate(selectedDraftId, {
-      onSuccess: () => showToast("已发布到全局牌库", "success"),
+      onSuccess: () => {
+        showToast("已发布到全局牌库", "success");
+        setSelectedDraftId(null);
+      },
       onError: () => showToast("发布失败", "error"),
     });
   }
@@ -173,6 +177,11 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
       },
       onError: () => showToast("删除失败", "error"),
     });
+  }
+
+  function handleClose() {
+    setIsEditing(false);
+    setSelectedDraftId(null);
   }
 
   const anyLoading = reviewMutation.isPending || publishMutation.isPending || deleteMutation.isPending || updateMutation.isPending;
@@ -290,12 +299,12 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
         )}
       </div>
 
-      {selectedEntry && !isEditing && (
-        <BlueprintDetailPanel
-          blueprint={draftQuery.data?.draft.blueprint ?? null}
-          entry={selectedEntry}
-          review={draftQuery.data?.draft.review ?? null}
-          actions={
+      <BlueprintDetailModal
+        open={Boolean(selectedEntry)}
+        title={isEditing ? "修正 draft" : selectedEntry?.title}
+        onClose={handleClose}
+        actions={
+          selectedEntry && !isEditing ? (
             <>
               <button
                 type="button"
@@ -334,15 +343,8 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
                 删除
               </button>
             </>
-          }
-        />
-      )}
-
-      {isEditing && selectedEntry && (
-        <div className="card-library-detail">
-          <div className="card-library-detail-header">
-            <h3 style={{ margin: 0, fontSize: 16 }}>修正 draft</h3>
-            <div style={{ display: "flex", gap: 8 }}>
+          ) : selectedEntry && isEditing ? (
+            <>
               <button
                 type="button"
                 className="btn secondary"
@@ -360,9 +362,18 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
                 {updateMutation.isPending ? <Loader2 size={14} className="spin" /> : <Save size={14} />}
                 保存
               </button>
-            </div>
-          </div>
-
+            </>
+          ) : null
+        }
+      >
+        {selectedEntry && !isEditing ? (
+          <BlueprintDetailPanel
+            className="card-library-detail-modal"
+            blueprint={draftQuery.data?.draft.blueprint ?? null}
+            entry={selectedEntry}
+            review={draftQuery.data?.draft.review ?? null}
+          />
+        ) : selectedEntry && isEditing ? (
           <div className="card-library-detail-section" style={{ display: "grid", gap: 12 }}>
             <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
               <span style={{ fontWeight: 600 }}>标题</span>
@@ -428,8 +439,8 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
               />
             </label>
           </div>
-        </div>
-      )}
+        ) : null}
+      </BlueprintDetailModal>
     </div>
   );
 }
