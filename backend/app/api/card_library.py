@@ -9,6 +9,7 @@ from app.models.card_blueprint import (
     InstantiateRequest,
     SaveFromCardRequest,
     UpdateBlueprintRequest,
+    UpdateProjectDraftRequest,
 )
 from app.services.card_library_service import CardLibraryService
 
@@ -193,6 +194,19 @@ def get_project_draft(
         return {"draft": service.get_project_draft(project_id, draft_id)}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@project_router.put("/{draft_id}")
+def update_project_draft(
+    project_id: str,
+    draft_id: str,
+    body: UpdateProjectDraftRequest,
+    service: CardLibraryService = Depends(_get_service),
+) -> dict:
+    try:
+        return service.update_project_draft(project_id, draft_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @project_router.delete("/{draft_id}")

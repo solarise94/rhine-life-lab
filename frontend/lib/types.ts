@@ -985,3 +985,13 @@ export interface PublishDraftResponse {
   draft_id: string;
   global_blueprint_id: string;
 }
+
+export interface UpdateProjectDraftRequest {
+  title?: string;
+  summary?: string;
+  tags?: string[];
+  domain?: string;
+  instruction_blocks?: string[];
+  python_packages?: string[];
+  r_packages?: string[];
+}

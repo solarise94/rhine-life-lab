@@ -657,7 +657,7 @@ class TestProjectDraftFlow(_Base):
 
         result = svc.create_project_draft("proj-draft", "card-001")
         self.assertTrue(result.draft_id)
-        self.assertIn("规则审查已执行", result.warnings[0])
+        self.assertIn("请执行规则审查后再发布", result.warnings[0])
 
         draft_path = ps.project_path("proj-draft") / "card-library-drafts" / "drafts" / result.draft_id
         self.assertTrue(draft_path.exists())
@@ -763,6 +763,70 @@ class TestProjectDraftFlow(_Base):
 
         with self.assertRaises(ValueError):
             svc.get_project_draft("proj-draft", created.draft_id)
+
+    def test_publish_project_draft_is_idempotent(self):
+        ps = self._create_project("proj-draft")
+        svc = self._service(ps)
+        self._create_card_with_runtime("proj-draft", "card-001", "Clean Card")
+
+        created = svc.create_project_draft("proj-draft", "card-001")
+        svc.review_project_draft("proj-draft", created.draft_id)
+        first = svc.publish_project_draft("proj-draft", created.draft_id)
+        second = svc.publish_project_draft("proj-draft", created.draft_id)
+
+        self.assertEqual(first.global_blueprint_id, second.global_blueprint_id)
+        # Only one global blueprint should exist for this title.
+        entries = svc.list_blueprints()
+        self.assertEqual(len([e for e in entries if e.get("title") == "Clean Card"]), 1)
+
+    def test_update_project_draft_resets_status_and_review(self):
+        ps = self._create_project("proj-draft")
+        svc = self._service(ps)
+        self._create_card_with_runtime("proj-draft", "card-001", "Test Project Analysis")
+
+        created = svc.create_project_draft("proj-draft", "card-001")
+        svc.review_project_draft("proj-draft", created.draft_id)
+        draft = svc.get_project_draft("proj-draft", created.draft_id)
+        self.assertEqual(draft["status"], "rejected")
+        self.assertIsNotNone(draft["review"])
+
+        from app.models.card_blueprint import UpdateProjectDraftRequest
+        result = svc.update_project_draft(
+            "proj-draft",
+            created.draft_id,
+            UpdateProjectDraftRequest(
+                title="Generic Analysis",
+                summary="A reusable analysis template",
+                tags=["analysis"],
+                domain="bioinformatics",
+                instruction_blocks=["Run standard analysis"],
+                python_packages=["scanpy"],
+            ),
+        )
+        updated = result["draft"]
+        self.assertEqual(updated["status"], "draft")
+        self.assertIsNone(updated["review"])
+        self.assertEqual(updated["blueprint"]["title"], "Generic Analysis")
+        self.assertEqual(updated["blueprint"]["tags"], ["analysis"])
+        self.assertEqual(updated["blueprint"]["runtime_requirements"]["python"]["packages"], ["scanpy"])
+
+    def test_update_project_draft_published_fails(self):
+        ps = self._create_project("proj-draft")
+        svc = self._service(ps)
+        self._create_card_with_runtime("proj-draft", "card-001", "Clean Card")
+
+        created = svc.create_project_draft("proj-draft", "card-001")
+        svc.review_project_draft("proj-draft", created.draft_id)
+        svc.publish_project_draft("proj-draft", created.draft_id)
+
+        from app.models.card_blueprint import UpdateProjectDraftRequest
+        with self.assertRaises(ValueError) as ctx:
+            svc.update_project_draft(
+                "proj-draft",
+                created.draft_id,
+                UpdateProjectDraftRequest(title="New Title"),
+            )
+        self.assertIn("Published", str(ctx.exception))
 
 
 if __name__ == "__main__":

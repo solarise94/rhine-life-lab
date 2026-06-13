@@ -25,6 +25,7 @@ from app.models.card_blueprint import (
     PublishDraftResponse,
     SaveResult,
     UpdateBlueprintRequest,
+    UpdateProjectDraftRequest,
 )
 from app.models.cards import Card, CardAssetRef
 from app.models.executor import ExecutorContext, RuntimeBindings
@@ -490,7 +491,7 @@ class CardLibraryService:
 
         return CreateProjectDraftResponse(
             draft_id=draft_id,
-            warnings=["未进行 AI 泛化检查（规则审查已执行）"],
+            warnings=["已加入项目牌库，请执行规则审查后再发布"],
         )
 
     def list_project_drafts(self, project_id: str) -> list[dict[str, Any]]:
@@ -566,44 +567,125 @@ class CardLibraryService:
             }
 
     def publish_project_draft(self, project_id: str, draft_id: str) -> PublishDraftResponse:
-        """Publish an approved project draft to the global card library."""
-        draft_data = self.get_project_draft(project_id, draft_id)
-        draft = CardBlueprintDraft.model_validate(draft_data)
+        """Publish an approved project draft to the global card library.
 
-        if draft.status == "published":
-            return PublishDraftResponse(
-                draft_id=draft_id,
-                global_blueprint_id=draft.global_blueprint_id or "",
-            )
-
-        if draft.status != "approved":
-            raise ValueError("Draft must be approved before publishing")
-
-        with self._lock:
-            self._ensure_dirs()
-            global_blueprint_id = self._generate_blueprint_id(draft.blueprint.title)
-            now = utc_now()
-
-            bp = draft.blueprint.model_copy(update={
-                "blueprint_id": global_blueprint_id,
-                "provenance": BlueprintProvenance(
-                    source_card_id=None,
-                    source_project_id=None,
-                    created_at=now,
-                    created_by="user",
-                    use_count=0,
-                ),
-            })
-
-            bp_dir = self._blueprint_dir(global_blueprint_id)
-            bp_dir.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(bp_dir / "blueprint.json", bp.model_dump())
-            self._add_to_index(bp)
-
+        Lock ordering: project lock first, then global lock. If writing the
+        project draft update fails, the global blueprint/index that was just
+        written is rolled back to avoid a split state.
+        """
         lock = self.project_service.lock_for(project_id)
         with lock:
-            draft.status = "published"
-            draft.global_blueprint_id = global_blueprint_id
+            draft_data = self.get_project_draft(project_id, draft_id)
+            draft = CardBlueprintDraft.model_validate(draft_data)
+
+            if draft.status == "published":
+                return PublishDraftResponse(
+                    draft_id=draft_id,
+                    global_blueprint_id=draft.global_blueprint_id or "",
+                )
+
+            if draft.status != "approved":
+                raise ValueError("Draft must be approved before publishing")
+
+            with self._lock:
+                self._ensure_dirs()
+                global_blueprint_id = self._generate_blueprint_id(draft.blueprint.title)
+                now = utc_now()
+
+                bp = draft.blueprint.model_copy(update={
+                    "blueprint_id": global_blueprint_id,
+                    "provenance": BlueprintProvenance(
+                        source_card_id=None,
+                        source_project_id=None,
+                        created_at=now,
+                        created_by="user",
+                        use_count=0,
+                    ),
+                })
+
+                bp_dir = self._blueprint_dir(global_blueprint_id)
+                bp_dir.mkdir(parents=True, exist_ok=True)
+                atomic_write_json(bp_dir / "blueprint.json", bp.model_dump())
+                self._add_to_index(bp)
+
+            try:
+                draft.status = "published"
+                draft.global_blueprint_id = global_blueprint_id
+                draft.updated_at = now
+
+                draft_dir = self._project_draft_dir(project_id, draft_id)
+                atomic_write_json(draft_dir / "blueprint.json", draft.model_dump())
+
+                index_data = self._read_project_draft_index(project_id)
+                entries = index_data.get("entries", [])
+                for i, entry in enumerate(entries):
+                    if entry.get("draft_id") == draft_id:
+                        entries[i] = self._draft_index_entry_from_blueprint(
+                            draft_id=draft_id,
+                            status="published",
+                            blueprint=draft.blueprint,
+                            global_blueprint_id=global_blueprint_id,
+                            created_at=draft.created_at,
+                            updated_at=draft.updated_at,
+                        )
+                        break
+                index_data["entries"] = entries
+                self._write_project_draft_index(project_id, index_data)
+            except Exception as exc:
+                # Roll back the global write so we don't leave an orphan blueprint.
+                with self._lock:
+                    try:
+                        orphan_dir = self._blueprint_dir(global_blueprint_id)
+                        if orphan_dir.exists():
+                            import shutil
+                            shutil.rmtree(orphan_dir)
+                        self._remove_from_index(global_blueprint_id)
+                    except Exception:
+                        pass
+                raise ValueError(f"Failed to update project draft after publishing: {exc}") from exc
+
+        return PublishDraftResponse(draft_id=draft_id, global_blueprint_id=global_blueprint_id)
+
+    def update_project_draft(
+        self,
+        project_id: str,
+        draft_id: str,
+        updates: UpdateProjectDraftRequest,
+    ) -> dict[str, Any]:
+        """Update editable fields of a project draft and reset review state.
+
+        After a user edits a draft, it must be reviewed again before publishing.
+        """
+        lock = self.project_service.lock_for(project_id)
+        with lock:
+            draft_data = self.get_project_draft(project_id, draft_id)
+            draft = CardBlueprintDraft.model_validate(draft_data)
+
+            if draft.status == "published":
+                raise ValueError("Published drafts cannot be edited")
+
+            bp = draft.blueprint
+            if updates.title is not None:
+                bp.title = updates.title
+            if updates.summary is not None:
+                bp.summary = updates.summary
+            if updates.tags is not None:
+                bp.tags = updates.tags
+            if updates.domain is not None:
+                bp.domain = updates.domain
+            if updates.instruction_blocks is not None:
+                bp.instruction_blocks = updates.instruction_blocks
+
+            rr = bp.runtime_requirements
+            if updates.python_packages is not None and isinstance(rr.python, BlueprintRuntimeRequirement):
+                rr.python.packages = updates.python_packages
+            if updates.r_packages is not None and isinstance(rr.r, BlueprintRuntimeRequirement):
+                rr.r.packages = updates.r_packages
+
+            now = utc_now()
+            draft.blueprint = bp
+            draft.status = "draft"
+            draft.review = None
             draft.updated_at = now
 
             draft_dir = self._project_draft_dir(project_id, draft_id)
@@ -615,9 +697,9 @@ class CardLibraryService:
                 if entry.get("draft_id") == draft_id:
                     entries[i] = self._draft_index_entry_from_blueprint(
                         draft_id=draft_id,
-                        status="published",
+                        status="draft",
                         blueprint=draft.blueprint,
-                        global_blueprint_id=global_blueprint_id,
+                        global_blueprint_id=draft.global_blueprint_id,
                         created_at=draft.created_at,
                         updated_at=draft.updated_at,
                     )
@@ -625,7 +707,7 @@ class CardLibraryService:
             index_data["entries"] = entries
             self._write_project_draft_index(project_id, index_data)
 
-        return PublishDraftResponse(draft_id=draft_id, global_blueprint_id=global_blueprint_id)
+            return {"draft": draft.model_dump()}
 
     def save_from_import(self, blueprint_data: dict[str, Any]) -> SaveResult:
         """Import a blueprint from raw JSON data."""

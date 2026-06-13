@@ -292,3 +292,13 @@ class ProjectDraftResponse(BaseModel):
 class PublishDraftResponse(BaseModel):
     draft_id: str
     global_blueprint_id: str
+
+
+class UpdateProjectDraftRequest(BaseModel):
+    title: str | None = None
+    summary: str | None = None
+    tags: list[str] | None = None
+    domain: str | None = None
+    instruction_blocks: list[str] | None = None
+    python_packages: list[str] | None = None
+    r_packages: list[str] | None = None

@@ -10,6 +10,7 @@ import {
   ProjectDraftListResponse,
   ProjectDraftResponse,
   BlueprintReviewResult,
+  UpdateProjectDraftRequest,
 } from "@/lib/types";
 
 export function useProjects() {
@@ -397,6 +398,19 @@ export function usePublishProjectCardDraft(projectId: string) {
     onSuccess: async (_data, draftId) => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardLibrary(projectId) });
       await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardDraft(projectId, draftId) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.cardLibrary });
+    },
+  });
+}
+
+export function useUpdateProjectCardDraft(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ draftId, payload }: { draftId: string; payload: UpdateProjectDraftRequest }) =>
+      api.updateProjectCardDraft(projectId, draftId, payload),
+    onSuccess: async (_data, variables) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardLibrary(projectId) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardDraft(projectId, variables.draftId) });
     },
   });
 }

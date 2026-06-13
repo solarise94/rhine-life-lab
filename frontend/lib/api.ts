@@ -52,6 +52,7 @@ import {
   PublishDraftResponse,
   BlueprintReviewResult,
   DraftStatus,
+  UpdateProjectDraftRequest,
 } from "./types";
 import type { ChatTokenUsage } from "./types";
 
@@ -933,6 +934,12 @@ export const api = {
   publishProjectCardDraft(projectId: string, draftId: string) {
     return request<PublishDraftResponse>(`/projects/${projectId}/card-library/${draftId}/publish`, {
       method: "POST",
+    });
+  },
+  updateProjectCardDraft(projectId: string, draftId: string, payload: UpdateProjectDraftRequest) {
+    return request<ProjectDraftResponse>(`/projects/${projectId}/card-library/${draftId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
     });
   },
   deleteProjectCardDraft(projectId: string, draftId: string) {
