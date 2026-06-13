@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Search, X, Layers, Loader2, Trash2, CheckCircle2, AlertCircle, Pencil, Save } from "lucide-react";
 
@@ -15,7 +15,7 @@ import {
 import { DraftStatus, CardBlueprintDraftIndexEntry, UpdateProjectDraftRequest } from "@/lib/types";
 import { BlueprintCard } from "./BlueprintCard";
 import { BlueprintDetailPanel } from "./BlueprintDetailPanel";
-import { BlueprintExpandingCard } from "./BlueprintExpandingCard";
+import { useCardExpansion, useIsomorphicLayoutEffect } from "./useCardExpansion";
 
 const STATUS_OPTIONS: { value: DraftStatus | ""; label: string }[] = [
   { value: "", label: "所有状态" },
@@ -34,8 +34,7 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
   const [runtimeFilter, setRuntimeFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<DraftStatus | "">("");
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
-  const [originRect, setOriginRect] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
-  const cardRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const { cardRefs, snapshot, flip } = useCardExpansion<HTMLDivElement>();
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState<UpdateProjectDraftRequest>({});
   const [toast, setToast] = useState<{ message: string; kind: "success" | "error" } | null>(null);
@@ -120,6 +119,43 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
     setTimeout(() => setToast(null), 3000);
   }
 
+  function collapse() {
+    snapshot();
+    setIsEditing(false);
+    setSelectedDraftId(null);
+  }
+
+  // Clicking empty space in the content area (not on a card) collapses the
+  // open card.
+  function handleContentClick(e: React.MouseEvent) {
+    if (!selectedDraftId) return;
+    if ((e.target as HTMLElement).closest(".bp-card")) return;
+    collapse();
+  }
+
+  function handleSelect(draftId: string) {
+    // Snapshot BEFORE the state change so FLIP can animate the reflow.
+    snapshot();
+    setIsEditing(false);
+    setSelectedDraftId((cur) => (cur === draftId ? null : draftId));
+  }
+
+  // Animate every card the reflow displaced.
+  useIsomorphicLayoutEffect(() => {
+    flip();
+  }, [selectedDraftId, flip]);
+
+  // Escape collapses the open card.
+  useEffect(() => {
+    if (!selectedDraftId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") collapse();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDraftId]);
+
   function handleEditStart() {
     setIsEditing(true);
   }
@@ -164,8 +200,7 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
     publishMutation.mutate(selectedDraftId, {
       onSuccess: () => {
         showToast("已发布到全局牌库", "success");
-        setSelectedDraftId(null);
-        setOriginRect(null);
+        collapse();
       },
       onError: () => showToast("发布失败", "error"),
     });
@@ -175,34 +210,151 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
     if (!selectedDraftId) return;
     deleteMutation.mutate(selectedDraftId, {
       onSuccess: () => {
-        setSelectedDraftId(null);
-        setOriginRect(null);
+        collapse();
         showToast("已删除", "success");
       },
       onError: () => showToast("删除失败", "error"),
     });
   }
 
-  function handleClose() {
-    setIsEditing(false);
-    setSelectedDraftId(null);
-    setOriginRect(null);
-  }
-
-  function handleSelect(draftId: string) {
-    if (selectedDraftId === draftId) {
-      handleClose();
-      return;
-    }
-    const el = cardRefs.current[draftId];
-    if (el) {
-      const rect = el.getBoundingClientRect();
-      setOriginRect({ top: rect.top, left: rect.left, width: rect.width, height: rect.height });
-    }
-    setSelectedDraftId(draftId);
-  }
-
   const anyLoading = reviewMutation.isPending || publishMutation.isPending || deleteMutation.isPending || updateMutation.isPending;
+
+  const expandedContent = selectedEntry ? (
+    isEditing ? (
+      <>
+        <div className="bp-card-toolbar">
+          <button
+            type="button"
+            className="btn secondary"
+            onClick={handleEditCancel}
+            disabled={updateMutation.isPending}
+          >
+            <X size={14} /> 取消
+          </button>
+          <button
+            type="button"
+            className="btn primary"
+            onClick={handleEditSave}
+            disabled={updateMutation.isPending}
+          >
+            {updateMutation.isPending ? <Loader2 size={14} className="spin" /> : <Save size={14} />}
+            保存
+          </button>
+        </div>
+        <div style={{ display: "grid", gap: 12, padding: "16px 18px" }}>
+          <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
+            <span style={{ fontWeight: 600 }}>标题</span>
+            <input
+              type="text"
+              value={editForm.title ?? ""}
+              onChange={(e) => setEditForm((prev) => ({ ...prev, title: e.target.value }))}
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)" }}
+            />
+          </label>
+          <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
+            <span style={{ fontWeight: 600 }}>摘要</span>
+            <textarea
+              value={editForm.summary ?? ""}
+              onChange={(e) => setEditForm((prev) => ({ ...prev, summary: e.target.value }))}
+              rows={3}
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)", resize: "vertical" }}
+            />
+          </label>
+          <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
+            <span style={{ fontWeight: 600 }}>领域</span>
+            <input
+              type="text"
+              value={editForm.domain ?? ""}
+              onChange={(e) => setEditForm((prev) => ({ ...prev, domain: e.target.value }))}
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)" }}
+            />
+          </label>
+          <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
+            <span style={{ fontWeight: 600 }}>标签（逗号分隔）</span>
+            <input
+              type="text"
+              value={editForm.tags?.join(", ") ?? ""}
+              onChange={(e) => setEditForm((prev) => ({ ...prev, tags: e.target.value.split(",").map((t) => t.trim()).filter(Boolean) }))}
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)" }}
+            />
+          </label>
+          <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
+            <span style={{ fontWeight: 600 }}>指令（每行一条）</span>
+            <textarea
+              value={editForm.instruction_blocks?.join("\n") ?? ""}
+              onChange={(e) => setEditForm((prev) => ({ ...prev, instruction_blocks: e.target.value.split("\n").map((t) => t.trim()).filter(Boolean) }))}
+              rows={4}
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)", resize: "vertical" }}
+            />
+          </label>
+          <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
+            <span style={{ fontWeight: 600 }}>Python 包（逗号分隔）</span>
+            <input
+              type="text"
+              value={editForm.python_packages?.join(", ") ?? ""}
+              onChange={(e) => setEditForm((prev) => ({ ...prev, python_packages: e.target.value.split(",").map((t) => t.trim()).filter(Boolean) }))}
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)" }}
+            />
+          </label>
+          <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
+            <span style={{ fontWeight: 600 }}>R 包（逗号分隔）</span>
+            <input
+              type="text"
+              value={editForm.r_packages?.join(", ") ?? ""}
+              onChange={(e) => setEditForm((prev) => ({ ...prev, r_packages: e.target.value.split(",").map((t) => t.trim()).filter(Boolean) }))}
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)" }}
+            />
+          </label>
+        </div>
+      </>
+    ) : (
+      <>
+        <div className="bp-card-toolbar">
+          <button
+            type="button"
+            className="btn secondary"
+            onClick={handleEditStart}
+            disabled={anyLoading || selectedEntry.status === "published"}
+          >
+            <Pencil size={14} /> 修正
+          </button>
+          <button
+            type="button"
+            className="btn secondary"
+            onClick={handleReview}
+            disabled={anyLoading || selectedEntry.status === "published"}
+          >
+            {reviewMutation.isPending ? <Loader2 size={14} className="spin" /> : null}
+            审查
+          </button>
+          <button
+            type="button"
+            className="btn primary"
+            onClick={handlePublish}
+            disabled={anyLoading || selectedEntry.status !== "approved"}
+          >
+            {publishMutation.isPending ? <Loader2 size={14} className="spin" /> : null}
+            发布到全局牌库
+          </button>
+          <button
+            type="button"
+            className="btn secondary"
+            style={{ color: "var(--red)" }}
+            onClick={handleDelete}
+            disabled={anyLoading || selectedEntry.status === "published"}
+          >
+            {deleteMutation.isPending ? <Loader2 size={14} className="spin" /> : <Trash2 size={14} />}
+            删除
+          </button>
+        </div>
+        <BlueprintDetailPanel
+          blueprint={draftQuery.data?.draft.blueprint ?? null}
+          entry={selectedEntry}
+          review={draftQuery.data?.draft.review ?? null}
+        />
+      </>
+    )
+  ) : null;
 
   return (
     <div className="card-library-page">
@@ -293,7 +445,7 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
         </div>
       )}
 
-      <div className="card-library-content">
+      <div className="card-library-content" onClick={handleContentClick}>
         {isLoading && <div className="empty-state">加载项目牌库…</div>}
         {isError && <div className="empty-state" style={{ color: "var(--red)" }}>项目牌库加载失败</div>}
         {!isLoading && !isError && filtered.length === 0 && (
@@ -304,163 +456,23 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
         )}
         {!isLoading && !isError && filtered.length > 0 && (
           <div className="card-library-grid">
-            {filtered.map((entry) => (
-              <BlueprintCard
-                key={entry.draft_id}
-                ref={(el) => { cardRefs.current[entry.draft_id] = el; }}
-                entry={entry}
-                isSelected={selectedDraftId === entry.draft_id}
-                onSelect={() => handleSelect(entry.draft_id)}
-                status={entry.status}
-              />
-            ))}
+            {filtered.map((entry) => {
+              const isExpanded = selectedDraftId === entry.draft_id;
+              return (
+                <BlueprintCard
+                  key={entry.draft_id}
+                  ref={(el) => { cardRefs.current[entry.draft_id] = el; }}
+                  entry={entry}
+                  isExpanded={isExpanded}
+                  onSelect={() => handleSelect(entry.draft_id)}
+                  status={entry.status}
+                  expandedChildren={isExpanded ? expandedContent : undefined}
+                />
+              );
+            })}
           </div>
         )}
       </div>
-
-      <BlueprintExpandingCard
-        open={Boolean(selectedEntry)}
-        originRect={originRect}
-        title={isEditing ? "修正 draft" : selectedEntry?.title}
-        onClose={handleClose}
-        actions={
-          selectedEntry && !isEditing ? (
-            <>
-              <button
-                type="button"
-                className="btn secondary"
-                onClick={handleEditStart}
-                disabled={anyLoading || selectedEntry.status === "published"}
-              >
-                <Pencil size={14} /> 修正
-              </button>
-              <button
-                type="button"
-                className="btn secondary"
-                onClick={handleReview}
-                disabled={anyLoading || selectedEntry.status === "published"}
-              >
-                {reviewMutation.isPending ? <Loader2 size={14} className="spin" /> : null}
-                审查
-              </button>
-              <button
-                type="button"
-                className="btn primary"
-                onClick={handlePublish}
-                disabled={anyLoading || selectedEntry.status !== "approved"}
-              >
-                {publishMutation.isPending ? <Loader2 size={14} className="spin" /> : null}
-                发布到全局牌库
-              </button>
-              <button
-                type="button"
-                className="btn secondary"
-                style={{ color: "var(--red)" }}
-                onClick={handleDelete}
-                disabled={anyLoading || selectedEntry.status === "published"}
-              >
-                {deleteMutation.isPending ? <Loader2 size={14} className="spin" /> : <Trash2 size={14} />}
-                删除
-              </button>
-            </>
-          ) : selectedEntry && isEditing ? (
-            <>
-              <button
-                type="button"
-                className="btn secondary"
-                onClick={handleEditCancel}
-                disabled={updateMutation.isPending}
-              >
-                <X size={14} /> 取消
-              </button>
-              <button
-                type="button"
-                className="btn primary"
-                onClick={handleEditSave}
-                disabled={updateMutation.isPending}
-              >
-                {updateMutation.isPending ? <Loader2 size={14} className="spin" /> : <Save size={14} />}
-                保存
-              </button>
-            </>
-          ) : null
-        }
-      >
-        {selectedEntry && !isEditing ? (
-          <BlueprintDetailPanel
-            className="card-library-detail-modal"
-            blueprint={draftQuery.data?.draft.blueprint ?? null}
-            entry={selectedEntry}
-            review={draftQuery.data?.draft.review ?? null}
-          />
-        ) : selectedEntry && isEditing ? (
-          <div className="card-library-detail-section" style={{ display: "grid", gap: 12 }}>
-            <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
-              <span style={{ fontWeight: 600 }}>标题</span>
-              <input
-                type="text"
-                value={editForm.title ?? ""}
-                onChange={(e) => setEditForm((prev) => ({ ...prev, title: e.target.value }))}
-                style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)" }}
-              />
-            </label>
-            <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
-              <span style={{ fontWeight: 600 }}>摘要</span>
-              <textarea
-                value={editForm.summary ?? ""}
-                onChange={(e) => setEditForm((prev) => ({ ...prev, summary: e.target.value }))}
-                rows={3}
-                style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)", resize: "vertical" }}
-              />
-            </label>
-            <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
-              <span style={{ fontWeight: 600 }}>领域</span>
-              <input
-                type="text"
-                value={editForm.domain ?? ""}
-                onChange={(e) => setEditForm((prev) => ({ ...prev, domain: e.target.value }))}
-                style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)" }}
-              />
-            </label>
-            <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
-              <span style={{ fontWeight: 600 }}>标签（逗号分隔）</span>
-              <input
-                type="text"
-                value={editForm.tags?.join(", ") ?? ""}
-                onChange={(e) => setEditForm((prev) => ({ ...prev, tags: e.target.value.split(",").map((t) => t.trim()).filter(Boolean) }))}
-                style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)" }}
-              />
-            </label>
-            <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
-              <span style={{ fontWeight: 600 }}>指令（每行一条）</span>
-              <textarea
-                value={editForm.instruction_blocks?.join("\n") ?? ""}
-                onChange={(e) => setEditForm((prev) => ({ ...prev, instruction_blocks: e.target.value.split("\n").map((t) => t.trim()).filter(Boolean) }))}
-                rows={4}
-                style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)", resize: "vertical" }}
-              />
-            </label>
-            <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
-              <span style={{ fontWeight: 600 }}>Python 包（逗号分隔）</span>
-              <input
-                type="text"
-                value={editForm.python_packages?.join(", ") ?? ""}
-                onChange={(e) => setEditForm((prev) => ({ ...prev, python_packages: e.target.value.split(",").map((t) => t.trim()).filter(Boolean) }))}
-                style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)" }}
-              />
-            </label>
-            <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
-              <span style={{ fontWeight: 600 }}>R 包（逗号分隔）</span>
-              <input
-                type="text"
-                value={editForm.r_packages?.join(", ") ?? ""}
-                onChange={(e) => setEditForm((prev) => ({ ...prev, r_packages: e.target.value.split(",").map((t) => t.trim()).filter(Boolean) }))}
-                style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)" }}
-              />
-            </label>
-          </div>
-        ) : null}
-      </BlueprintExpandingCard>
     </div>
   );
 }

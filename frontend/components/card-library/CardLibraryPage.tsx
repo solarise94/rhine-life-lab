@@ -1,48 +1,65 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Search, X, Trash2, Layers, ArrowLeft, Filter } from "lucide-react";
+import { Search, X, Trash2, Layers, ArrowLeft } from "lucide-react";
 
 import { useCardLibrary, useDeleteCardBlueprint, useCardBlueprint } from "@/lib/hooks";
 import { BlueprintCard } from "./BlueprintCard";
 import { BlueprintDetailPanel } from "./BlueprintDetailPanel";
-import { BlueprintExpandingCard } from "./BlueprintExpandingCard";
+import { useCardExpansion, useIsomorphicLayoutEffect } from "./useCardExpansion";
 
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
-export function CardLibraryPage() {
+export function CardLibraryPage({ embedded = false }: { embedded?: boolean }) {
   const { data, isLoading, isError } = useCardLibrary();
   const deleteMutation = useDeleteCardBlueprint();
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [originRect, setOriginRect] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
-  const cardRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const { cardRefs, snapshot, flip } = useCardExpansion<HTMLDivElement>();
   const [searchQuery, setSearchQuery] = useState("");
   const [domainFilter, setDomainFilter] = useState("");
   const [runtimeFilter, setRuntimeFilter] = useState("");
 
   const entries = data?.entries ?? [];
-  const selectedEntry = entries.find((e) => e.blueprint_id === selectedId) ?? null;
 
   function handleClose() {
+    snapshot();
     setSelectedId(null);
-    setOriginRect(null);
+  }
+
+  // Clicking empty space in the content area (not on a card) collapses the
+  // open card — restores the "click outside to dismiss" feel without a modal.
+  function handleContentClick(e: React.MouseEvent) {
+    if (!selectedId) return;
+    if ((e.target as HTMLElement).closest(".bp-card")) return;
+    handleClose();
   }
 
   function handleSelect(entryId: string) {
-    if (selectedId === entryId) {
-      handleClose();
-      return;
-    }
-    const el = cardRefs.current[entryId];
-    if (el) {
-      const rect = el.getBoundingClientRect();
-      setOriginRect({ top: rect.top, left: rect.left, width: rect.width, height: rect.height });
-    }
-    setSelectedId(entryId);
+    // Snapshot BEFORE the state change so FLIP can animate the reflow.
+    snapshot();
+    setSelectedId((cur) => (cur === entryId ? null : entryId));
   }
+
+  // Animate every card that the reflow displaced.
+  useIsomorphicLayoutEffect(() => {
+    flip();
+  }, [selectedId, flip]);
+
+  // Escape collapses the open card.
+  useEffect(() => {
+    if (!selectedId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        snapshot();
+        setSelectedId(null);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [selectedId, snapshot]);
 
   // Extract unique domains and runtime hints from entries for filter options
   const allDomains = useMemo(() => {
@@ -80,15 +97,42 @@ export function CardLibraryPage() {
 
   const hasFilters = domainFilter || runtimeFilter;
 
+  const selectedEntry = entries.find((e) => e.blueprint_id === selectedId) ?? null;
   const { data: detailData } = useCardBlueprint(selectedId);
+
+  const expandedContent = selectedEntry ? (
+    <>
+      <div className="bp-card-toolbar">
+        <button
+          type="button"
+          className="btn secondary"
+          style={{ color: "var(--red)" }}
+          onClick={() => {
+            deleteMutation.mutate(selectedEntry.blueprint_id, {
+              onSuccess: () => handleClose(),
+            });
+          }}
+          disabled={deleteMutation.isPending}
+        >
+          <Trash2 size={14} /> {deleteMutation.isPending ? "删除中…" : "删除"}
+        </button>
+      </div>
+      <BlueprintDetailPanel
+        blueprint={detailData?.blueprint ?? null}
+        entry={selectedEntry}
+      />
+    </>
+  ) : null;
 
   return (
     <div className="card-library-page">
       <div className="card-library-header">
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <Link href="/projects" className="btn secondary" style={{ padding: "6px 10px" }}>
-            <ArrowLeft size={16} />
-          </Link>
+          {!embedded ? (
+            <Link href="/projects" className="btn secondary" style={{ padding: "6px 10px" }}>
+              <ArrowLeft size={16} />
+            </Link>
+          ) : null}
           <div>
             <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Card Library</h2>
             <p style={{ margin: 0, color: "var(--muted)", fontSize: 12 }}>牌库 — 浏览和管理可复用的分析配置牌</p>
@@ -142,7 +186,7 @@ export function CardLibraryPage() {
         </div>
       </div>
 
-      <div className="card-library-content">
+      <div className="card-library-content" onClick={handleContentClick}>
         {isLoading && <div className="empty-state">加载牌库…</div>}
         {isError && <div className="empty-state" style={{ color: "var(--red)" }}>牌库加载失败</div>}
         {!isLoading && !isError && filtered.length === 0 && (
@@ -153,48 +197,22 @@ export function CardLibraryPage() {
         )}
         {!isLoading && !isError && filtered.length > 0 && (
           <div className="card-library-grid">
-            {filtered.map((entry) => (
-              <BlueprintCard
-                key={entry.blueprint_id}
-                ref={(el) => { cardRefs.current[entry.blueprint_id] = el; }}
-                entry={entry}
-                isSelected={selectedId === entry.blueprint_id}
-                onSelect={() => handleSelect(entry.blueprint_id)}
-              />
-            ))}
+            {filtered.map((entry) => {
+              const isExpanded = selectedId === entry.blueprint_id;
+              return (
+                <BlueprintCard
+                  key={entry.blueprint_id}
+                  ref={(el) => { cardRefs.current[entry.blueprint_id] = el; }}
+                  entry={entry}
+                  isExpanded={isExpanded}
+                  onSelect={() => handleSelect(entry.blueprint_id)}
+                  expandedChildren={isExpanded ? expandedContent : undefined}
+                />
+              );
+            })}
           </div>
         )}
       </div>
-
-      <BlueprintExpandingCard
-        open={Boolean(selectedEntry)}
-        originRect={originRect}
-        title={selectedEntry?.title}
-        onClose={handleClose}
-        actions={
-          selectedEntry ? (
-            <button
-              type="button"
-              className="btn secondary"
-              style={{ color: "var(--red)" }}
-              onClick={() => {
-                deleteMutation.mutate(selectedEntry.blueprint_id, {
-                  onSuccess: () => handleClose(),
-                });
-              }}
-              disabled={deleteMutation.isPending}
-            >
-              <Trash2 size={14} /> {deleteMutation.isPending ? "删除中…" : "删除"}
-            </button>
-          ) : null
-        }
-      >
-        <BlueprintDetailPanel
-          className="card-library-detail-modal"
-          blueprint={detailData?.blueprint ?? null}
-          entry={selectedEntry ?? undefined}
-        />
-      </BlueprintExpandingCard>
     </div>
   );
 }

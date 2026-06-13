@@ -78,8 +78,12 @@ const ProjectDeckPanel = dynamic(
   () => import("@/components/card-library/ProjectDeckPanel").then((m) => m.ProjectDeckPanel),
   { ssr: false },
 );
+const CardLibraryPage = dynamic(
+  () => import("@/components/card-library/CardLibraryPage").then((m) => m.CardLibraryPage),
+  { ssr: false },
+);
 
-type View = "tasks" | "results" | "files" | "report" | "advanced" | "capabilities" | "settings" | "card-library";
+type View = "tasks" | "results" | "files" | "report" | "advanced" | "capabilities" | "settings" | "card-library" | "global-card-library";
 const EMPTY_CARD_INTERACTION_ORDER: string[] = [];
 
 const PAGE_INTRO: Record<Exclude<View, "tasks">, string> = {
@@ -90,6 +94,7 @@ const PAGE_INTRO: Record<Exclude<View, "tasks">, string> = {
   settings: "配置项目运行时偏好、API 供应商、角色绑定和诊断选项。",
   advanced: "查看项目图结构、Git 历史、运行时诊断和卡片详情。",
   "card-library": "管理项目牌库，审查并把可复用的分析牌发布到全局牌库。",
+  "global-card-library": "浏览和管理全局可复用分析牌，删除或查看详情。",
 };
 
 function useMediaQuery(query: string) {
@@ -827,6 +832,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 ? "工作台设置"
                 : view === "card-library"
                 ? "项目牌库"
+                : view === "global-card-library"
+                ? "全局牌库"
                 : "技术详情"
             }
           />
@@ -942,6 +949,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             />
           ) : view === "card-library" ? (
             <ProjectDeckPanel projectId={projectId} />
+          ) : view === "global-card-library" ? (
+            <CardLibraryPage embedded />
           ) : null}
         </div>
         ) : null}
@@ -1076,6 +1085,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 />
               ) : view === "card-library" ? (
                 <ProjectDeckPanel projectId={projectId} />
+              ) : view === "global-card-library" ? (
+                <CardLibraryPage embedded />
               ) : null}
             </div>
           ) : null}

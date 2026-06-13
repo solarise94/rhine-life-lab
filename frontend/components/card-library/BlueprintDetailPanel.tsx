@@ -1,12 +1,12 @@
 "use client";
 
-import { Wrench, Radio } from "lucide-react";
+import { Wrench, Radio, Globe, AlertCircle, Calendar, Tag, Layers } from "lucide-react";
 
 import { CardBlueprint, CardBlueprintIndexEntry, CardBlueprintDraftIndexEntry, BlueprintReviewResult } from "@/lib/types";
 import { formatDate } from "./BlueprintCard";
 
 // ---------------------------------------------------------------------------
-// Detail Panel
+// Detail Panel (rendered inside the expanded playing card)
 // ---------------------------------------------------------------------------
 
 export interface BlueprintDetailPanelProps {
@@ -17,145 +17,174 @@ export interface BlueprintDetailPanelProps {
   className?: string;
 }
 
+function Section({ title, children, icon }: { title: string; children: React.ReactNode; icon?: React.ReactNode }) {
+  return (
+    <div className="playing-card-detail-section">
+      <div className="playing-card-detail-section-title">
+        {icon ? <span className="section-icon">{icon}</span> : null}
+        {title}
+      </div>
+      {children}
+    </div>
+  );
+}
+
 export function BlueprintDetailPanel({ blueprint, entry, review, actions, className }: BlueprintDetailPanelProps) {
   if (!blueprint) {
-    return <div className={`card-library-detail empty ${className ?? ""}`.trim()}><p>选择一张牌查看详情</p></div>;
+    return (
+      <div className={`playing-card-detail empty ${className ?? ""}`.trim()}>
+        <p>选择一张牌查看详情</p>
+      </div>
+    );
   }
 
+  const runtimePython = typeof blueprint.runtime_requirements.python === "object"
+    ? blueprint.runtime_requirements.python.packages
+    : [];
+  const runtimeR = typeof blueprint.runtime_requirements.r === "object"
+    ? blueprint.runtime_requirements.r.packages
+    : [];
+
+  const useCount = "use_count" in (entry ?? {}) ? (entry as CardBlueprintIndexEntry).use_count : 0;
+
   return (
-    <div className={`card-library-detail ${className ?? ""}`.trim()}>
-      <div className="card-library-detail-header">
-        <div>
-          <h3 style={{ margin: "0 0 4px" }}>{blueprint.title}</h3>
-          <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>{blueprint.summary}</p>
+    <div className={`playing-card-detail ${className ?? ""}`.trim()}>
+      {/* Header */}
+      <div className="playing-card-detail-header">
+        <div className="playing-card-detail-title">
+          <h2>{blueprint.title}</h2>
+          <p>{blueprint.summary}</p>
         </div>
-        {actions ? <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>{actions}</div> : null}
+        {actions ? <div className="playing-card-detail-actions">{actions}</div> : null}
       </div>
 
-      <div className="card-library-detail-section">
-        <h4>标签 & 领域</h4>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {blueprint.domain && <span className="pill" style={{ background: "var(--blue-bg)", color: "var(--blue-dark)" }}>{blueprint.domain}</span>}
-          {blueprint.tags.map((tag) => <span key={tag} className="pill">{tag}</span>)}
-        </div>
-      </div>
-
-      <div className="card-library-detail-section">
-        <h4>Skills & MCP</h4>
-        {blueprint.skills.length > 0 && (
-          <div className="settings-kv-list">
-            {blueprint.skills.map((s) => <div key={s}><span><Wrench size={12} /> Skill</span><strong>{s}</strong></div>)}
-          </div>
+      {/* Meta chips */}
+      <div className="playing-card-detail-meta">
+        {blueprint.domain && (
+          <span className="pill domain-pill">
+            <Globe size={10} /> {blueprint.domain}
+          </span>
         )}
-        {blueprint.mcp_servers.length > 0 && (
-          <div className="settings-kv-list">
-            {blueprint.mcp_servers.map((s) => <div key={s}><span><Radio size={12} /> MCP</span><strong>{s}</strong></div>)}
-          </div>
-        )}
-        {blueprint.skills.length === 0 && blueprint.mcp_servers.length === 0 && <p style={{ color: "var(--muted)" }}>无</p>}
+        {blueprint.tags.map((tag) => (
+          <span key={tag} className="pill">{tag}</span>
+        ))}
       </div>
 
-      {blueprint.inputs_schema.length > 0 && (
-        <div className="card-library-detail-section">
-          <h4>输入</h4>
-          <div className="settings-kv-list">
-            {blueprint.inputs_schema.map((inp) => (
-              <div key={inp.slot}>
-                <span>{inp.label} {inp.required ? "*" : ""}</span>
-                <span style={{ color: "var(--muted)", fontSize: 12 }}>{inp.accepted_formats.join(", ") || "任意"}</span>
-              </div>
+      {/* Capabilities */}
+      {(blueprint.skills.length > 0 || blueprint.mcp_servers.length > 0 || runtimePython.length > 0 || runtimeR.length > 0) && (
+        <Section title="能力 & 依赖" icon={<Layers size={11} />}>
+          <div className="playing-card-detail-chips">
+            {blueprint.skills.map((s) => (
+              <span key={s} className="capability-chip skill">
+                <Wrench size={10} /> {s}
+              </span>
             ))}
+            {blueprint.mcp_servers.map((s) => (
+              <span key={s} className="capability-chip mcp">
+                <Radio size={10} /> {s}
+              </span>
+            ))}
+            {runtimePython.length > 0 && (
+              <span className="capability-chip runtime" title={runtimePython.join(", ")}>
+                Py · {runtimePython.length}
+              </span>
+            )}
+            {runtimeR.length > 0 && (
+              <span className="capability-chip runtime" title={runtimeR.join(", ")}>
+                R · {runtimeR.length}
+              </span>
+            )}
           </div>
-        </div>
+        </Section>
       )}
 
-      {blueprint.outputs_schema.length > 0 && (
-        <div className="card-library-detail-section">
-          <h4>输出</h4>
-          <div className="settings-kv-list">
-            {blueprint.outputs_schema.map((out) => (
-              <div key={out.role}>
-                <span>{out.label}</span>
-                <span style={{ color: "var(--muted)", fontSize: 12 }}>{out.artifact_class} · {out.accepted_formats.join(", ")}</span>
+      {/* Interface (inputs / outputs / parameters) */}
+      {(blueprint.inputs_schema.length > 0 || blueprint.outputs_schema.length > 0 || blueprint.parameters.length > 0) && (
+        <Section title="接口" icon={<Tag size={11} />}>
+          <div className="playing-card-detail-interface">
+            {blueprint.inputs_schema.length > 0 && (
+              <div className="interface-block">
+                <span className="interface-label">输入</span>
+                <div className="interface-list">
+                  {blueprint.inputs_schema.map((inp) => (
+                    <div key={inp.slot} className="interface-row">
+                      <span className="interface-name">{inp.label}{inp.required ? " *" : ""}</span>
+                      <span className="interface-formats">{inp.accepted_formats.join(", ") || "任意"}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
-            ))}
+            )}
+            {blueprint.outputs_schema.length > 0 && (
+              <div className="interface-block">
+                <span className="interface-label">输出</span>
+                <div className="interface-list">
+                  {blueprint.outputs_schema.map((out) => (
+                    <div key={out.role} className="interface-row">
+                      <span className="interface-name">{out.label}</span>
+                      <span className="interface-formats">{out.artifact_class} · {out.accepted_formats.join(", ")}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {blueprint.parameters.length > 0 && (
+              <div className="interface-block">
+                <span className="interface-label">参数</span>
+                <div className="interface-list">
+                  {blueprint.parameters.map((p) => (
+                    <div key={p.name} className="interface-row">
+                      <span className="interface-name">{p.name}{p.required ? " *" : ""}</span>
+                      <span className="interface-formats">{p.type}{p.default != null ? ` · ${String(p.default)}` : ""}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
-        </div>
+        </Section>
       )}
 
-      {blueprint.parameters.length > 0 && (
-        <div className="card-library-detail-section">
-          <h4>参数</h4>
-          <div className="settings-kv-list">
-            {blueprint.parameters.map((p) => (
-              <div key={p.name}>
-                <span>{p.name} {p.required ? "*" : ""}</span>
-                <span style={{ color: "var(--muted)", fontSize: 12 }}>{p.type}{p.default != null ? ` · 默认: ${String(p.default)}` : ""}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
+      {/* Instructions */}
       {blueprint.instruction_blocks.length > 0 && (
-        <div className="card-library-detail-section">
-          <h4>指令</h4>
-          <ul style={{ margin: 0, paddingLeft: 18, color: "var(--text-secondary)", fontSize: 13 }}>
-            {blueprint.instruction_blocks.map((block, i) => <li key={i}>{block}</li>)}
-          </ul>
-        </div>
+        <Section title="执行指令" icon={<Wrench size={11} />}>
+          <ol className="playing-card-detail-instructions">
+            {blueprint.instruction_blocks.map((block, i) => (
+              <li key={i}>{block}</li>
+            ))}
+          </ol>
+        </Section>
       )}
 
+      {/* Review issues */}
       {review && review.issues.length > 0 && (
-        <div className="card-library-detail-section">
-          <h4>审查结果</h4>
-          <p style={{ margin: "0 0 8px", fontSize: 13, color: "var(--muted)" }}>{review.summary}</p>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <Section title="审查结果" icon={<AlertCircle size={11} />}>
+          <p className="review-summary">{review.summary}</p>
+          <div className="review-issues">
             {review.issues.map((issue, i) => (
-              <div
-                key={i}
-                style={{
-                  padding: 8,
-                  borderRadius: 6,
-                  fontSize: 12,
-                  background:
-                    issue.severity === "error"
-                      ? "var(--red-bg)"
-                      : issue.severity === "warning"
-                        ? "var(--amber-bg)"
-                        : "var(--blue-bg)",
-                  color:
-                    issue.severity === "error"
-                      ? "var(--red-dark)"
-                      : issue.severity === "warning"
-                        ? "var(--amber-dark)"
-                        : "var(--blue-dark)",
-                }}
-              >
-                <strong style={{ textTransform: "capitalize" }}>{issue.severity}</strong>
-                <span style={{ marginLeft: 6, fontWeight: 500 }}>{issue.field}</span>
-                <div style={{ marginTop: 4 }}>{issue.message}</div>
+              <div key={i} className={`review-issue ${issue.severity}`}>
+                <div className="review-issue-header">
+                  <AlertCircle size={12} />
+                  <strong>{issue.severity}</strong>
+                  <span>{issue.field}</span>
+                </div>
+                <div className="review-issue-message">{issue.message}</div>
                 {issue.suggested_value ? (
-                  <div style={{ marginTop: 4, opacity: 0.9 }}>建议: {issue.suggested_value}</div>
+                  <div className="review-issue-suggestion">建议: {issue.suggested_value}</div>
                 ) : null}
               </div>
             ))}
           </div>
-        </div>
+        </Section>
       )}
 
-      <div className="card-library-detail-section">
-        <h4>来源</h4>
-        <div className="settings-kv-list">
-          <div><span>创建时间</span><span>{formatDate(blueprint.provenance.created_at) || "未知"}</span></div>
-          {"use_count" in (entry ?? {}) && (
-            <div><span>使用次数</span><span>{(entry as CardBlueprintIndexEntry).use_count}</span></div>
-          )}
-          {blueprint.provenance.last_used_at && <div><span>最近使用</span><span>{formatDate(blueprint.provenance.last_used_at)}</span></div>}
-          {"global_blueprint_id" in (entry ?? {}) && (entry as CardBlueprintDraftIndexEntry).global_blueprint_id && (
-            <div><span>全局牌 ID</span><span>{(entry as CardBlueprintDraftIndexEntry).global_blueprint_id}</span></div>
-          )}
-        </div>
+      {/* Provenance footer */}
+      <div className="playing-card-detail-footer">
+        <span><Calendar size={11} /> {formatDate(blueprint.provenance.created_at) || "未知"}</span>
+        {useCount > 0 && <span><Tag size={11} /> 使用 {useCount} 次</span>}
+        {blueprint.provenance.last_used_at && (
+          <span>最近 {formatDate(blueprint.provenance.last_used_at)}</span>
+        )}
       </div>
     </div>
   );

@@ -1,7 +1,7 @@
 "use client";
 
 import { forwardRef } from "react";
-import { Layers, Wrench, Radio, Tag, Clock, Globe } from "lucide-react";
+import { Globe, Wrench, Radio, Layers } from "lucide-react";
 
 import { CardBlueprintIndexEntry, CardBlueprintDraftIndexEntry, DraftStatus } from "@/lib/types";
 
@@ -17,11 +17,11 @@ export function formatDate(value: string | null | undefined) {
 }
 
 const STATUS_LABEL: Record<DraftStatus, string> = {
-  draft: "草稿",
-  needs_review: "待审查",
-  approved: "已通过",
-  rejected: "已驳回",
-  published: "已发布",
+  draft: "草",
+  needs_review: "审",
+  approved: "过",
+  rejected: "驳",
+  published: "发",
 };
 
 const STATUS_STYLE: Record<DraftStatus, { bg: string; color: string }> = {
@@ -32,101 +32,111 @@ const STATUS_STYLE: Record<DraftStatus, { bg: string; color: string }> = {
   published: { bg: "var(--blue-bg, #dbeafe)", color: "var(--blue-dark, #1e40af)" },
 };
 
+const DOMAIN_ACCENT: Record<string, { icon: React.ReactNode; hue: string }> = {
+  bioinformatics: { icon: <Globe size={13} />, hue: "#22c55e" },
+  genomics: { icon: <Radio size={13} />, hue: "#8b5cf6" },
+  statistics: { icon: <Wrench size={13} />, hue: "#3b82f6" },
+  visualization: { icon: <Layers size={13} />, hue: "#f59e0b" },
+};
+
+function domainAccent(domain: string) {
+  return DOMAIN_ACCENT[domain.toLowerCase()] ?? { icon: <Layers size={13} />, hue: "var(--blue)" };
+}
+
 // ---------------------------------------------------------------------------
-// Blueprint Card (grid item)
+// Blueprint Card — clean modern card.
+//
+// The grid item is a <div> (.bp-card) so that, when expanded, it can host
+// interactive controls (delete / publish / edit buttons, form inputs) inside
+// .bp-card-expanded. The clickable face is a real <button> (.bp-card-face);
+// the FLIP ref is attached to the outer div by the parent grid.
 // ---------------------------------------------------------------------------
 
 export interface BlueprintCardProps {
   entry: CardBlueprintIndexEntry | CardBlueprintDraftIndexEntry;
-  isSelected: boolean;
+  isExpanded?: boolean;
   onSelect: () => void;
   status?: DraftStatus | null;
+  /** Rendered in-flow below the face when expanded (actions + detail). */
+  expandedChildren?: React.ReactNode;
 }
 
-export const BlueprintCard = forwardRef<HTMLButtonElement, BlueprintCardProps>(
-  function BlueprintCard({ entry, isSelected, onSelect, status }, ref) {
+export const BlueprintCard = forwardRef<HTMLDivElement, BlueprintCardProps>(
+  function BlueprintCard({ entry, isExpanded = false, onSelect, status, expandedChildren }, ref) {
     const indexEntry = entry as CardBlueprintIndexEntry;
     const isDraft = "draft_id" in entry;
     const statusStyle = status ? STATUS_STYLE[status] : null;
-
-    const visibleTags = entry.tags.slice(0, 3);
-    const hiddenTagCount = entry.tags.length - visibleTags.length;
+    const accent = domainAccent(entry.domain);
+    const useCount = "use_count" in entry ? indexEntry.use_count : 0;
 
     return (
-      <button
+      <div
         ref={ref}
-        type="button"
-        className={`card-library-item ${isSelected ? "selected" : ""}`}
-        style={{ position: "relative" }}
-        onClick={onSelect}
+        className={`bp-card ${isExpanded ? "expanded" : ""}`}
+        style={{ "--accent": accent.hue } as React.CSSProperties}
       >
-        <div className="card-library-cover">
-          <Layers size={24} style={{ color: "var(--muted)" }} />
-          {entry.domain ? (
-            <span className="card-library-domain">
-              <Globe size={10} /> {entry.domain}
-            </span>
-          ) : null}
-        </div>
-        <div className="card-library-body">
-          <strong className="card-library-title">{entry.title}</strong>
-          <p className="card-library-summary">{entry.summary || "暂无摘要"}</p>
-
-          {(entry.skills.length > 0 || entry.mcp_servers.length > 0) && (
-            <div className="card-library-capabilities">
-              {entry.skills.slice(0, 1).map((s) => (
-                <span key={s} className="capability-chip skill" title={`Skill: ${s}`}>
-                  <Wrench size={10} /> {s}
-                </span>
-              ))}
-              {entry.skills.length > 1 && (
-                <span className="capability-chip more">+{entry.skills.length - 1}</span>
-              )}
-              {entry.mcp_servers.slice(0, 1).map((s) => (
-                <span key={s} className="capability-chip mcp" title={`MCP: ${s}`}>
-                  <Radio size={10} /> {s}
-                </span>
-              ))}
-              {entry.mcp_servers.length > 1 && (
-                <span className="capability-chip more">+{entry.mcp_servers.length - 1}</span>
-              )}
+        <button
+          type="button"
+          className="bp-card-face"
+          onClick={onSelect}
+          aria-expanded={isExpanded}
+          title={isExpanded ? "收起" : "展开详情"}
+        >
+          <div className="bp-card-badge-header">
+            <span className="bp-card-clip" aria-hidden />
+            <div className="bp-card-identity">
+              <span className="bp-card-avatar">{accent.icon}</span>
+              <div className="bp-card-copy">
+                <div className="bp-card-title" title={entry.title}>{entry.title}</div>
+                <div className="bp-card-status-row">
+                  <span className="bp-card-domain-pill" title={entry.domain}>
+                    {entry.domain || "通用"}
+                  </span>
+                  {status && statusStyle ? (
+                    <span
+                      className="bp-card-badge"
+                      style={{ background: statusStyle.bg, color: statusStyle.color }}
+                      title={status}
+                    >
+                      {STATUS_LABEL[status]}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
             </div>
-          )}
-
-          {entry.tags.length > 0 && (
-            <div className="card-library-tags">
-              {visibleTags.map((tag) => (
-                <span key={tag} className="pill" style={{ fontSize: 10 }}>{tag}</span>
-              ))}
-              {hiddenTagCount > 0 && <span className="pill" style={{ fontSize: 10 }}>+{hiddenTagCount}</span>}
-            </div>
-          )}
-
-          <div className="card-library-meta">
-            {entry.runtime_hints.length > 0 && (
-              <span className="runtime-hint" title={entry.runtime_hints.join(", ")}>
-                {entry.runtime_hints.join(", ")}
-              </span>
-            )}
-            {"use_count" in entry && indexEntry.use_count > 0 && <span><Tag size={10} /> {indexEntry.use_count}</span>}
-            {"last_used_at" in entry && indexEntry.last_used_at && <span><Clock size={10} /> {formatDate(indexEntry.last_used_at)}</span>}
-            {isDraft && (entry as CardBlueprintDraftIndexEntry).created_at && (
-              <span><Clock size={10} /> {formatDate((entry as CardBlueprintDraftIndexEntry).created_at)}</span>
-            )}
           </div>
-        </div>
-        {status ? (
-          <span
-            className="card-library-status"
-            style={{
-              background: statusStyle?.bg,
-              color: statusStyle?.color,
-            }}
-          >
-            {STATUS_LABEL[status]}
-          </span>
+
+          <div className="bp-card-body">
+            <p className="bp-card-summary">{entry.summary || "暂无摘要"}</p>
+            <div className="bp-card-meta">
+              {entry.skills.length > 0 && (
+                <span title={`技能: ${entry.skills.join(", ")}`}>
+                  <Wrench size={10} /> {entry.skills.length}
+                </span>
+              )}
+              {entry.mcp_servers.length > 0 && (
+                <span title={`MCP: ${entry.mcp_servers.join(", ")}`}>
+                  <Radio size={10} /> {entry.mcp_servers.length}
+                </span>
+              )}
+              {entry.runtime_hints.length > 0 && (
+                <span title={entry.runtime_hints.join(", ")}>{entry.runtime_hints[0]}</span>
+              )}
+              {isDraft ? (
+                <span>DRAFT</span>
+              ) : useCount > 0 ? (
+                <span>×{useCount}</span>
+              ) : null}
+            </div>
+          </div>
+        </button>
+
+        {isExpanded && expandedChildren ? (
+          <div className="bp-card-expanded" onClick={(e) => e.stopPropagation()}>
+            {expandedChildren}
+          </div>
         ) : null}
-      </button>
+      </div>
     );
   },
 );

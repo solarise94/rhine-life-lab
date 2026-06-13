@@ -1,28 +1,31 @@
 "use client";
 
-import { useMemo, useRef, useState, forwardRef } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { Search, Wrench, Radio, X, Layers } from "lucide-react";
 
 import { useCardLibrary, useCardBlueprint } from "@/lib/hooks";
 import { CardBlueprintIndexEntry } from "@/lib/types";
 import { BlueprintDetailPanel } from "./BlueprintDetailPanel";
-import { BlueprintExpandingCard } from "./BlueprintExpandingCard";
 
 // ---------------------------------------------------------------------------
 // Deck Item (list row)
 // ---------------------------------------------------------------------------
 
-const DeckItem = forwardRef<HTMLButtonElement, {
+function DeckItem({
+  entry,
+  isSelected,
+  onSelect,
+}: {
   entry: CardBlueprintIndexEntry;
   isSelected: boolean;
   onSelect: () => void;
-}>(function DeckItem({ entry, isSelected, onSelect }, ref) {
+}) {
   return (
     <button
-      ref={ref}
       type="button"
       className={`deck-item ${isSelected ? "selected" : ""}`}
       onClick={onSelect}
+      aria-expanded={isSelected}
     >
       <span className="deck-item-title">{entry.title}</span>
       <div className="deck-item-meta">
@@ -32,39 +35,33 @@ const DeckItem = forwardRef<HTMLButtonElement, {
       </div>
     </button>
   );
-});
+}
 
 // ---------------------------------------------------------------------------
-// BlueprintDeckPanel
+// BlueprintDeckPanel — inline accordion list
 // ---------------------------------------------------------------------------
 
 export function BlueprintDeckPanel() {
   const { data, isLoading, isError } = useCardLibrary();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [originRect, setOriginRect] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
-  const cardRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
   const entries = data?.entries ?? [];
   const selectedEntry = selectedId ? entries.find((e) => e.blueprint_id === selectedId) ?? null : null;
 
-  function handleClose() {
-    setSelectedId(null);
-    setOriginRect(null);
+  function handleSelect(entryId: string) {
+    setSelectedId((cur) => (cur === entryId ? null : entryId));
   }
 
-  function handleSelect(entryId: string) {
-    if (selectedId === entryId) {
-      handleClose();
-      return;
-    }
-    const el = cardRefs.current[entryId];
-    if (el) {
-      const rect = el.getBoundingClientRect();
-      setOriginRect({ top: rect.top, left: rect.left, width: rect.width, height: rect.height });
-    }
-    setSelectedId(entryId);
-  }
+  // Escape collapses the open row.
+  useEffect(() => {
+    if (!selectedId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelectedId(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [selectedId]);
 
   // Client-side search
   const filtered = useMemo(() => {
@@ -99,33 +96,29 @@ export function BlueprintDeckPanel() {
       {isLoading && <div style={{ color: "var(--muted)", fontSize: 13, padding: 8 }}>加载牌库…</div>}
       {isError && <div style={{ color: "var(--red)", fontSize: 13, padding: 8 }}>牌库加载失败</div>}
       {!isLoading && !isError && filtered.length === 0 && (
-        <div style={{ color: "var(--muted)", fontSize: 13, padding: 8 }}>
+        <div style={{ color: "var(--muted)", fontSize: 13, padding: 8, display: "flex", alignItems: "center", gap: 8 }}>
+          <Layers size={16} />
           {entries.length === 0 ? "牌库为空。先存入一些牌。" : "没有匹配的牌"}
         </div>
       )}
 
       {filtered.map((entry) => (
-        <DeckItem
-          key={entry.blueprint_id}
-          ref={(el) => { cardRefs.current[entry.blueprint_id] = el; }}
-          entry={entry}
-          isSelected={selectedId === entry.blueprint_id}
-          onSelect={() => handleSelect(entry.blueprint_id)}
-        />
+        <Fragment key={entry.blueprint_id}>
+          <DeckItem
+            entry={entry}
+            isSelected={selectedId === entry.blueprint_id}
+            onSelect={() => handleSelect(entry.blueprint_id)}
+          />
+          {selectedId === entry.blueprint_id && (
+            <div className="deck-item-detail">
+              <BlueprintDetailPanel
+                blueprint={detailData?.blueprint ?? null}
+                entry={selectedEntry ?? undefined}
+              />
+            </div>
+          )}
+        </Fragment>
       ))}
-
-      <BlueprintExpandingCard
-        open={Boolean(selectedEntry)}
-        originRect={originRect}
-        title={selectedEntry?.title}
-        onClose={handleClose}
-      >
-        <BlueprintDetailPanel
-          className="card-library-detail-modal"
-          blueprint={detailData?.blueprint ?? null}
-          entry={selectedEntry ?? undefined}
-        />
-      </BlueprintExpandingCard>
     </div>
   );
 }

@@ -391,8 +391,8 @@ export function SideNav({
           <span>技术详情</span>
         </Link>
         <Link
-          href="/card-library"
-          className="nav-link"
+          href={`/projects/${projectId}/global-card-library`}
+          className={`nav-link ${current === "global-card-library" ? "active" : ""}`}
         >
           <Layers size={16} />
           <span>全局牌库管理</span>
