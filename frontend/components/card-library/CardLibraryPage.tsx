@@ -1,13 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Search, X, Trash2, Layers, ArrowLeft, Filter } from "lucide-react";
 
 import { useCardLibrary, useDeleteCardBlueprint, useCardBlueprint } from "@/lib/hooks";
 import { BlueprintCard } from "./BlueprintCard";
 import { BlueprintDetailPanel } from "./BlueprintDetailPanel";
-import { BlueprintDetailModal } from "./BlueprintDetailModal";
+import { BlueprintExpandingCard } from "./BlueprintExpandingCard";
 
 // ---------------------------------------------------------------------------
 // Page
@@ -17,12 +17,32 @@ export function CardLibraryPage() {
   const { data, isLoading, isError } = useCardLibrary();
   const deleteMutation = useDeleteCardBlueprint();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [originRect, setOriginRect] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
+  const cardRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [searchQuery, setSearchQuery] = useState("");
   const [domainFilter, setDomainFilter] = useState("");
   const [runtimeFilter, setRuntimeFilter] = useState("");
 
   const entries = data?.entries ?? [];
   const selectedEntry = entries.find((e) => e.blueprint_id === selectedId) ?? null;
+
+  function handleClose() {
+    setSelectedId(null);
+    setOriginRect(null);
+  }
+
+  function handleSelect(entryId: string) {
+    if (selectedId === entryId) {
+      handleClose();
+      return;
+    }
+    const el = cardRefs.current[entryId];
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      setOriginRect({ top: rect.top, left: rect.left, width: rect.width, height: rect.height });
+    }
+    setSelectedId(entryId);
+  }
 
   // Extract unique domains and runtime hints from entries for filter options
   const allDomains = useMemo(() => {
@@ -136,19 +156,21 @@ export function CardLibraryPage() {
             {filtered.map((entry) => (
               <BlueprintCard
                 key={entry.blueprint_id}
+                ref={(el) => { cardRefs.current[entry.blueprint_id] = el; }}
                 entry={entry}
                 isSelected={selectedId === entry.blueprint_id}
-                onSelect={() => setSelectedId(selectedId === entry.blueprint_id ? null : entry.blueprint_id)}
+                onSelect={() => handleSelect(entry.blueprint_id)}
               />
             ))}
           </div>
         )}
       </div>
 
-      <BlueprintDetailModal
+      <BlueprintExpandingCard
         open={Boolean(selectedEntry)}
+        originRect={originRect}
         title={selectedEntry?.title}
-        onClose={() => setSelectedId(null)}
+        onClose={handleClose}
         actions={
           selectedEntry ? (
             <button
@@ -157,7 +179,7 @@ export function CardLibraryPage() {
               style={{ color: "var(--red)" }}
               onClick={() => {
                 deleteMutation.mutate(selectedEntry.blueprint_id, {
-                  onSuccess: () => setSelectedId(null),
+                  onSuccess: () => handleClose(),
                 });
               }}
               disabled={deleteMutation.isPending}
@@ -172,7 +194,7 @@ export function CardLibraryPage() {
           blueprint={detailData?.blueprint ?? null}
           entry={selectedEntry ?? undefined}
         />
-      </BlueprintDetailModal>
+      </BlueprintExpandingCard>
     </div>
   );
 }

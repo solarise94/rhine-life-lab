@@ -1,28 +1,25 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState, forwardRef } from "react";
 import { Search, Wrench, Radio, X, Layers } from "lucide-react";
 
 import { useCardLibrary, useCardBlueprint } from "@/lib/hooks";
 import { CardBlueprintIndexEntry } from "@/lib/types";
 import { BlueprintDetailPanel } from "./BlueprintDetailPanel";
-import { BlueprintDetailModal } from "./BlueprintDetailModal";
+import { BlueprintExpandingCard } from "./BlueprintExpandingCard";
 
 // ---------------------------------------------------------------------------
 // Deck Item (list row)
 // ---------------------------------------------------------------------------
 
-function DeckItem({
-  entry,
-  isSelected,
-  onSelect,
-}: {
+const DeckItem = forwardRef<HTMLButtonElement, {
   entry: CardBlueprintIndexEntry;
   isSelected: boolean;
   onSelect: () => void;
-}) {
+}>(function DeckItem({ entry, isSelected, onSelect }, ref) {
   return (
     <button
+      ref={ref}
       type="button"
       className={`deck-item ${isSelected ? "selected" : ""}`}
       onClick={onSelect}
@@ -35,7 +32,7 @@ function DeckItem({
       </div>
     </button>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // BlueprintDeckPanel
@@ -45,9 +42,29 @@ export function BlueprintDeckPanel() {
   const { data, isLoading, isError } = useCardLibrary();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [originRect, setOriginRect] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
+  const cardRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
   const entries = data?.entries ?? [];
   const selectedEntry = selectedId ? entries.find((e) => e.blueprint_id === selectedId) ?? null : null;
+
+  function handleClose() {
+    setSelectedId(null);
+    setOriginRect(null);
+  }
+
+  function handleSelect(entryId: string) {
+    if (selectedId === entryId) {
+      handleClose();
+      return;
+    }
+    const el = cardRefs.current[entryId];
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      setOriginRect({ top: rect.top, left: rect.left, width: rect.width, height: rect.height });
+    }
+    setSelectedId(entryId);
+  }
 
   // Client-side search
   const filtered = useMemo(() => {
@@ -90,23 +107,25 @@ export function BlueprintDeckPanel() {
       {filtered.map((entry) => (
         <DeckItem
           key={entry.blueprint_id}
+          ref={(el) => { cardRefs.current[entry.blueprint_id] = el; }}
           entry={entry}
           isSelected={selectedId === entry.blueprint_id}
-          onSelect={() => setSelectedId(selectedId === entry.blueprint_id ? null : entry.blueprint_id)}
+          onSelect={() => handleSelect(entry.blueprint_id)}
         />
       ))}
 
-      <BlueprintDetailModal
+      <BlueprintExpandingCard
         open={Boolean(selectedEntry)}
+        originRect={originRect}
         title={selectedEntry?.title}
-        onClose={() => setSelectedId(null)}
+        onClose={handleClose}
       >
         <BlueprintDetailPanel
           className="card-library-detail-modal"
           blueprint={detailData?.blueprint ?? null}
           entry={selectedEntry ?? undefined}
         />
-      </BlueprintDetailModal>
+      </BlueprintExpandingCard>
     </div>
   );
 }

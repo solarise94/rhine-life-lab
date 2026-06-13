@@ -4718,11 +4718,12 @@ button {
 }
 
 .card-library-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
   width: 100%;
   max-width: 1200px;
+  align-items: flex-start;
 }
 
 .card-library-item {
@@ -4736,7 +4737,8 @@ button {
   transition: box-shadow 0.15s, border-color 0.15s, transform 0.1s;
   text-align: left;
   padding: 0;
-  width: 100%;
+  flex: 0 0 170px;
+  width: 170px;
 }
 
 .card-library-item:hover {
@@ -4754,22 +4756,23 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 100px;
+  height: 72px;
   background: linear-gradient(135deg, var(--panel) 0%, var(--bg-soft) 100%);
   border-bottom: 1px solid var(--line);
+  position: relative;
 }
 
 .card-library-body {
-  padding: 12px 14px 14px;
+  padding: 10px 12px 12px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 
 .card-library-title {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  line-height: 1.3;
+  line-height: 1.25;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -4777,9 +4780,9 @@ button {
 }
 
 .card-library-summary {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-secondary);
-  line-height: 1.4;
+  line-height: 1.35;
   margin: 0;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -4789,14 +4792,14 @@ button {
 
 .card-library-tags {
   display: flex;
-  gap: 4px;
+  gap: 3px;
   flex-wrap: wrap;
 }
 
 .card-library-meta {
   display: flex;
-  gap: 10px;
-  font-size: 11px;
+  gap: 8px;
+  font-size: 10px;
   color: var(--muted);
   align-items: center;
   margin-top: 2px;
@@ -4972,6 +4975,53 @@ button {
   .blueprint-modal {
     max-height: 90vh;
     border-radius: 12px;
+  }
+}
+
+.blueprint-expand-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.blueprint-expand-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow-xl);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  will-change: top, left, width, height;
+}
+
+.blueprint-expand-card.exiting {
+  opacity: 0.9;
+}
+
+.blueprint-expand-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.blueprint-expand-body {
+  overflow-y: auto;
+  padding: 18px;
+  flex: 1 1 auto;
+}
+
+@media (max-width: 640px) {
+  .card-library-item {
+    flex: 0 0 calc(50% - 7px);
+    width: calc(50% - 7px);
   }
 }
 

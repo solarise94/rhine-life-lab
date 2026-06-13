@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Search, X, Layers, Loader2, Trash2, CheckCircle2, AlertCircle, Pencil, Save } from "lucide-react";
 
@@ -15,7 +15,7 @@ import {
 import { DraftStatus, CardBlueprintDraftIndexEntry, UpdateProjectDraftRequest } from "@/lib/types";
 import { BlueprintCard } from "./BlueprintCard";
 import { BlueprintDetailPanel } from "./BlueprintDetailPanel";
-import { BlueprintDetailModal } from "./BlueprintDetailModal";
+import { BlueprintExpandingCard } from "./BlueprintExpandingCard";
 
 const STATUS_OPTIONS: { value: DraftStatus | ""; label: string }[] = [
   { value: "", label: "所有状态" },
@@ -34,6 +34,8 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
   const [runtimeFilter, setRuntimeFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<DraftStatus | "">("");
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
+  const [originRect, setOriginRect] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
+  const cardRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState<UpdateProjectDraftRequest>({});
   const [toast, setToast] = useState<{ message: string; kind: "success" | "error" } | null>(null);
@@ -163,6 +165,7 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
       onSuccess: () => {
         showToast("已发布到全局牌库", "success");
         setSelectedDraftId(null);
+        setOriginRect(null);
       },
       onError: () => showToast("发布失败", "error"),
     });
@@ -173,6 +176,7 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
     deleteMutation.mutate(selectedDraftId, {
       onSuccess: () => {
         setSelectedDraftId(null);
+        setOriginRect(null);
         showToast("已删除", "success");
       },
       onError: () => showToast("删除失败", "error"),
@@ -182,6 +186,20 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
   function handleClose() {
     setIsEditing(false);
     setSelectedDraftId(null);
+    setOriginRect(null);
+  }
+
+  function handleSelect(draftId: string) {
+    if (selectedDraftId === draftId) {
+      handleClose();
+      return;
+    }
+    const el = cardRefs.current[draftId];
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      setOriginRect({ top: rect.top, left: rect.left, width: rect.width, height: rect.height });
+    }
+    setSelectedDraftId(draftId);
   }
 
   const anyLoading = reviewMutation.isPending || publishMutation.isPending || deleteMutation.isPending || updateMutation.isPending;
@@ -289,9 +307,10 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
             {filtered.map((entry) => (
               <BlueprintCard
                 key={entry.draft_id}
+                ref={(el) => { cardRefs.current[entry.draft_id] = el; }}
                 entry={entry}
                 isSelected={selectedDraftId === entry.draft_id}
-                onSelect={() => setSelectedDraftId(selectedDraftId === entry.draft_id ? null : entry.draft_id)}
+                onSelect={() => handleSelect(entry.draft_id)}
                 status={entry.status}
               />
             ))}
@@ -299,8 +318,9 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
         )}
       </div>
 
-      <BlueprintDetailModal
+      <BlueprintExpandingCard
         open={Boolean(selectedEntry)}
+        originRect={originRect}
         title={isEditing ? "修正 draft" : selectedEntry?.title}
         onClose={handleClose}
         actions={
@@ -440,7 +460,7 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
             </label>
           </div>
         ) : null}
-      </BlueprintDetailModal>
+      </BlueprintExpandingCard>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import { forwardRef } from "react";
 import { Layers, Wrench, Radio, Tag, Clock, Globe } from "lucide-react";
 
 import { CardBlueprintIndexEntry, CardBlueprintDraftIndexEntry, DraftStatus } from "@/lib/types";
@@ -42,87 +43,90 @@ export interface BlueprintCardProps {
   status?: DraftStatus | null;
 }
 
-export function BlueprintCard({ entry, isSelected, onSelect, status }: BlueprintCardProps) {
-  const indexEntry = entry as CardBlueprintIndexEntry;
-  const isDraft = "draft_id" in entry;
-  const statusStyle = status ? STATUS_STYLE[status] : null;
+export const BlueprintCard = forwardRef<HTMLButtonElement, BlueprintCardProps>(
+  function BlueprintCard({ entry, isSelected, onSelect, status }, ref) {
+    const indexEntry = entry as CardBlueprintIndexEntry;
+    const isDraft = "draft_id" in entry;
+    const statusStyle = status ? STATUS_STYLE[status] : null;
 
-  const visibleTags = entry.tags.slice(0, 4);
-  const hiddenTagCount = entry.tags.length - visibleTags.length;
+    const visibleTags = entry.tags.slice(0, 3);
+    const hiddenTagCount = entry.tags.length - visibleTags.length;
 
-  return (
-    <button
-      type="button"
-      className={`card-library-item ${isSelected ? "selected" : ""}`}
-      style={{ position: "relative" }}
-      onClick={onSelect}
-    >
-      <div className="card-library-cover">
-        <Layers size={32} style={{ color: "var(--muted)" }} />
-        {entry.domain ? (
-          <span className="card-library-domain">
-            <Globe size={10} /> {entry.domain}
+    return (
+      <button
+        ref={ref}
+        type="button"
+        className={`card-library-item ${isSelected ? "selected" : ""}`}
+        style={{ position: "relative" }}
+        onClick={onSelect}
+      >
+        <div className="card-library-cover">
+          <Layers size={24} style={{ color: "var(--muted)" }} />
+          {entry.domain ? (
+            <span className="card-library-domain">
+              <Globe size={10} /> {entry.domain}
+            </span>
+          ) : null}
+        </div>
+        <div className="card-library-body">
+          <strong className="card-library-title">{entry.title}</strong>
+          <p className="card-library-summary">{entry.summary || "暂无摘要"}</p>
+
+          {(entry.skills.length > 0 || entry.mcp_servers.length > 0) && (
+            <div className="card-library-capabilities">
+              {entry.skills.slice(0, 1).map((s) => (
+                <span key={s} className="capability-chip skill" title={`Skill: ${s}`}>
+                  <Wrench size={10} /> {s}
+                </span>
+              ))}
+              {entry.skills.length > 1 && (
+                <span className="capability-chip more">+{entry.skills.length - 1}</span>
+              )}
+              {entry.mcp_servers.slice(0, 1).map((s) => (
+                <span key={s} className="capability-chip mcp" title={`MCP: ${s}`}>
+                  <Radio size={10} /> {s}
+                </span>
+              ))}
+              {entry.mcp_servers.length > 1 && (
+                <span className="capability-chip more">+{entry.mcp_servers.length - 1}</span>
+              )}
+            </div>
+          )}
+
+          {entry.tags.length > 0 && (
+            <div className="card-library-tags">
+              {visibleTags.map((tag) => (
+                <span key={tag} className="pill" style={{ fontSize: 10 }}>{tag}</span>
+              ))}
+              {hiddenTagCount > 0 && <span className="pill" style={{ fontSize: 10 }}>+{hiddenTagCount}</span>}
+            </div>
+          )}
+
+          <div className="card-library-meta">
+            {entry.runtime_hints.length > 0 && (
+              <span className="runtime-hint" title={entry.runtime_hints.join(", ")}>
+                {entry.runtime_hints.join(", ")}
+              </span>
+            )}
+            {"use_count" in entry && indexEntry.use_count > 0 && <span><Tag size={10} /> {indexEntry.use_count}</span>}
+            {"last_used_at" in entry && indexEntry.last_used_at && <span><Clock size={10} /> {formatDate(indexEntry.last_used_at)}</span>}
+            {isDraft && (entry as CardBlueprintDraftIndexEntry).created_at && (
+              <span><Clock size={10} /> {formatDate((entry as CardBlueprintDraftIndexEntry).created_at)}</span>
+            )}
+          </div>
+        </div>
+        {status ? (
+          <span
+            className="card-library-status"
+            style={{
+              background: statusStyle?.bg,
+              color: statusStyle?.color,
+            }}
+          >
+            {STATUS_LABEL[status]}
           </span>
         ) : null}
-      </div>
-      <div className="card-library-body">
-        <strong className="card-library-title">{entry.title}</strong>
-        <p className="card-library-summary">{entry.summary || "暂无摘要"}</p>
-
-        {(entry.skills.length > 0 || entry.mcp_servers.length > 0) && (
-          <div className="card-library-capabilities">
-            {entry.skills.slice(0, 2).map((s) => (
-              <span key={s} className="capability-chip skill" title={`Skill: ${s}`}>
-                <Wrench size={10} /> {s}
-              </span>
-            ))}
-            {entry.skills.length > 2 && (
-              <span className="capability-chip more">+{entry.skills.length - 2}</span>
-            )}
-            {entry.mcp_servers.slice(0, 2).map((s) => (
-              <span key={s} className="capability-chip mcp" title={`MCP: ${s}`}>
-                <Radio size={10} /> {s}
-              </span>
-            ))}
-            {entry.mcp_servers.length > 2 && (
-              <span className="capability-chip more">+{entry.mcp_servers.length - 2}</span>
-            )}
-          </div>
-        )}
-
-        {entry.tags.length > 0 && (
-          <div className="card-library-tags">
-            {visibleTags.map((tag) => (
-              <span key={tag} className="pill" style={{ fontSize: 11 }}>{tag}</span>
-            ))}
-            {hiddenTagCount > 0 && <span className="pill" style={{ fontSize: 11 }}>+{hiddenTagCount}</span>}
-          </div>
-        )}
-
-        <div className="card-library-meta">
-          {entry.runtime_hints.length > 0 && (
-            <span className="runtime-hint" title={entry.runtime_hints.join(", ")}>
-              {entry.runtime_hints.join(", ")}
-            </span>
-          )}
-          {"use_count" in entry && indexEntry.use_count > 0 && <span><Tag size={12} /> {indexEntry.use_count} 次</span>}
-          {"last_used_at" in entry && indexEntry.last_used_at && <span><Clock size={12} /> {formatDate(indexEntry.last_used_at)}</span>}
-          {isDraft && (entry as CardBlueprintDraftIndexEntry).created_at && (
-            <span><Clock size={12} /> {formatDate((entry as CardBlueprintDraftIndexEntry).created_at)}</span>
-          )}
-        </div>
-      </div>
-      {status ? (
-        <span
-          className="card-library-status"
-          style={{
-            background: statusStyle?.bg,
-            color: statusStyle?.color,
-          }}
-        >
-          {STATUS_LABEL[status]}
-        </span>
-      ) : null}
-    </button>
-  );
-}
+      </button>
+    );
+  },
+);
