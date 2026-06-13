@@ -6,8 +6,6 @@ import { SkillHubPanel } from "./SkillHubPanel";
 import { McpHubPanel } from "./McpHubPanel";
 import { CapabilityInstallPanel } from "./CapabilityInstallPanel";
 import { BlueprintDeckPanel } from "@/components/card-library/BlueprintDeckPanel";
-import { Asset, PythonRuntime, RRuntime } from "@/lib/types";
-
 type Tab = "skills" | "mcp" | "install" | "deck";
 
 const TABS: { key: Tab; label: string }[] = [
@@ -19,14 +17,11 @@ const TABS: { key: Tab; label: string }[] = [
 
 interface CapabilitiesPanelProps {
   projectId: string;
-  pythonRuntimes?: PythonRuntime[];
-  rRuntimes?: RRuntime[];
-  assets?: Asset[];
 }
 
 const VALID_TABS = new Set<Tab>(["skills", "mcp", "install", "deck"]);
 
-export function CapabilitiesPanel({ projectId, pythonRuntimes, rRuntimes, assets }: CapabilitiesPanelProps) {
+export function CapabilitiesPanel({ projectId }: CapabilitiesPanelProps) {
   const searchParams = useSearchParams();
   const [activeTab, setActiveTab] = useState<Tab>("skills");
   const [focusSkillId, setFocusSkillId] = useState<string | null>(null);
@@ -69,14 +64,7 @@ export function CapabilitiesPanel({ projectId, pythonRuntimes, rRuntimes, assets
       {activeTab === "install" && (
         <CapabilityInstallPanel projectId={projectId} onInstalled={handleInstalled} />
       )}
-      {activeTab === "deck" && (
-        <BlueprintDeckPanel
-          projectId={projectId}
-          pythonRuntimes={pythonRuntimes}
-          rRuntimes={rRuntimes}
-          assets={assets}
-        />
-      )}
+      {activeTab === "deck" && <BlueprintDeckPanel />}
     </div>
   );
 }

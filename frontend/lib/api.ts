@@ -46,6 +46,12 @@ import {
   SaveToLibraryResponse,
   InstantiateBlueprintResponse,
   InstantiateBlueprintRequest,
+  ProjectDraftListResponse,
+  CreateProjectDraftResponse,
+  ProjectDraftResponse,
+  PublishDraftResponse,
+  BlueprintReviewResult,
+  DraftStatus,
 } from "./types";
 import type { ChatTokenUsage } from "./types";
 
@@ -899,6 +905,40 @@ export const api = {
     return request<InstantiateBlueprintResponse>(
       `/projects/${projectId}/card-library/${blueprintId}/instantiate`,
       { method: "POST", body: JSON.stringify(payload) },
+    );
+  },
+
+  // -----------------------------------------------------------------------
+  // Project Card Library / Blueprint Drafts
+  // -----------------------------------------------------------------------
+
+  getProjectCardLibrary(projectId: string) {
+    return request<ProjectDraftListResponse>(`/projects/${projectId}/card-library`);
+  },
+  addCardToProjectLibrary(projectId: string, cardId: string) {
+    return request<CreateProjectDraftResponse>(`/projects/${projectId}/card-library`, {
+      method: "POST",
+      body: JSON.stringify({ card_id: cardId }),
+    });
+  },
+  getProjectCardDraft(projectId: string, draftId: string) {
+    return request<ProjectDraftResponse>(`/projects/${projectId}/card-library/${draftId}`);
+  },
+  reviewProjectCardDraft(projectId: string, draftId: string) {
+    return request<{ draft_id: string; status: DraftStatus; review: BlueprintReviewResult }>(
+      `/projects/${projectId}/card-library/${draftId}/review`,
+      { method: "POST" },
+    );
+  },
+  publishProjectCardDraft(projectId: string, draftId: string) {
+    return request<PublishDraftResponse>(`/projects/${projectId}/card-library/${draftId}/publish`, {
+      method: "POST",
+    });
+  },
+  deleteProjectCardDraft(projectId: string, draftId: string) {
+    return request<{ ok: boolean; draft_id: string }>(
+      `/projects/${projectId}/card-library/${draftId}`,
+      { method: "DELETE" },
     );
   },
 };

@@ -1,0 +1,285 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Search, X, Layers, Loader2, Trash2, CheckCircle2, AlertCircle } from "lucide-react";
+
+import {
+  useProjectCardLibrary,
+  useProjectCardDraft,
+  useReviewProjectCardDraft,
+  usePublishProjectCardDraft,
+  useDeleteProjectCardDraft,
+} from "@/lib/hooks";
+import { DraftStatus, CardBlueprintDraftIndexEntry } from "@/lib/types";
+import { BlueprintCard } from "./BlueprintCard";
+import { BlueprintDetailPanel } from "./BlueprintDetailPanel";
+
+const STATUS_OPTIONS: { value: DraftStatus | ""; label: string }[] = [
+  { value: "", label: "所有状态" },
+  { value: "draft", label: "草稿" },
+  { value: "needs_review", label: "待审查" },
+  { value: "approved", label: "已通过" },
+  { value: "rejected", label: "已驳回" },
+  { value: "published", label: "已发布" },
+];
+
+export function ProjectDeckPanel({ projectId }: { projectId: string }) {
+  const searchParams = useSearchParams();
+  const { data, isLoading, isError } = useProjectCardLibrary(projectId);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [domainFilter, setDomainFilter] = useState("");
+  const [runtimeFilter, setRuntimeFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState<DraftStatus | "">("");
+  const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; kind: "success" | "error" } | null>(null);
+
+  const entries = data?.entries ?? [];
+
+  useEffect(() => {
+    const draftIdFromUrl = searchParams.get("draft");
+    if (draftIdFromUrl && entries.some((e) => e.draft_id === draftIdFromUrl)) {
+      setSelectedDraftId(draftIdFromUrl);
+    }
+  }, [searchParams, entries]);
+
+  const selectedEntry = useMemo(
+    () => entries.find((e) => e.draft_id === selectedDraftId) ?? null,
+    [entries, selectedDraftId],
+  );
+
+  const allDomains = useMemo(() => {
+    const set = new Set<string>();
+    for (const e of entries) if (e.domain) set.add(e.domain);
+    return [...set].sort();
+  }, [entries]);
+
+  const allRuntimeHints = useMemo(() => {
+    const set = new Set<string>();
+    for (const e of entries) for (const h of e.runtime_hints) if (h) set.add(h);
+    return [...set].sort();
+  }, [entries]);
+
+  const filtered = useMemo(() => {
+    let result = entries;
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter(
+        (e) =>
+          e.title.toLowerCase().includes(q) ||
+          e.summary.toLowerCase().includes(q) ||
+          e.tags.some((t) => t.toLowerCase().includes(q)) ||
+          e.domain.toLowerCase().includes(q),
+      );
+    }
+    if (domainFilter) {
+      result = result.filter((e) => e.domain === domainFilter);
+    }
+    if (runtimeFilter) {
+      result = result.filter((e) => e.runtime_hints.includes(runtimeFilter));
+    }
+    if (statusFilter) {
+      result = result.filter((e) => e.status === statusFilter);
+    }
+    return result;
+  }, [entries, searchQuery, domainFilter, runtimeFilter, statusFilter]);
+
+  const hasFilters = domainFilter || runtimeFilter || statusFilter;
+
+  const draftQuery = useProjectCardDraft(projectId, selectedDraftId);
+  const reviewMutation = useReviewProjectCardDraft(projectId);
+  const publishMutation = usePublishProjectCardDraft(projectId);
+  const deleteMutation = useDeleteProjectCardDraft(projectId);
+
+  function showToast(message: string, kind: "success" | "error" = "success") {
+    setToast({ message, kind });
+    setTimeout(() => setToast(null), 3000);
+  }
+
+  function handleReview() {
+    if (!selectedDraftId) return;
+    reviewMutation.mutate(selectedDraftId, {
+      onSuccess: (result) => {
+        const label = result.review.verdict === "fail" ? "审查完成：未通过" : "审查完成";
+        showToast(label, result.review.verdict === "fail" ? "error" : "success");
+      },
+      onError: () => showToast("审查失败", "error"),
+    });
+  }
+
+  function handlePublish() {
+    if (!selectedDraftId) return;
+    publishMutation.mutate(selectedDraftId, {
+      onSuccess: () => showToast("已发布到全局牌库", "success"),
+      onError: () => showToast("发布失败", "error"),
+    });
+  }
+
+  function handleDelete() {
+    if (!selectedDraftId) return;
+    deleteMutation.mutate(selectedDraftId, {
+      onSuccess: () => {
+        setSelectedDraftId(null);
+        showToast("已删除", "success");
+      },
+      onError: () => showToast("删除失败", "error"),
+    });
+  }
+
+  const anyLoading = reviewMutation.isPending || publishMutation.isPending || deleteMutation.isPending;
+
+  return (
+    <div className="card-library-page">
+      <div className="card-library-header">
+        <div>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>项目牌库</h2>
+          <p style={{ margin: 0, color: "var(--muted)", fontSize: 12 }}>把项目 card 泛化审查后发布到全局牌库</p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <div className="search-input-wrap">
+            <Search size={14} style={{ color: "var(--muted)", flexShrink: 0 }} />
+            <input
+              type="text"
+              placeholder="搜索项目牌库…"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+            {searchQuery ? (
+              <button type="button" onClick={() => setSearchQuery("")} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)" }}>
+                <X size={14} />
+              </button>
+            ) : null}
+          </div>
+          {allDomains.length > 0 && (
+            <select
+              value={domainFilter}
+              onChange={(e) => setDomainFilter(e.target.value)}
+              style={{ padding: "6px 8px", border: "1px solid var(--line)", borderRadius: 6, background: "var(--bg)", fontSize: 13, color: "var(--text)" }}
+            >
+              <option value="">所有领域</option>
+              {allDomains.map((d) => (
+                <option key={d} value={d}>{d}</option>
+              ))}
+            </select>
+          )}
+          {allRuntimeHints.length > 0 && (
+            <select
+              value={runtimeFilter}
+              onChange={(e) => setRuntimeFilter(e.target.value)}
+              style={{ padding: "6px 8px", border: "1px solid var(--line)", borderRadius: 6, background: "var(--bg)", fontSize: 13, color: "var(--text)" }}
+            >
+              <option value="">所有 Runtime</option>
+              {allRuntimeHints.map((r) => (
+                <option key={r} value={r}>{r}</option>
+              ))}
+            </select>
+          )}
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as DraftStatus | "")}
+            style={{ padding: "6px 8px", border: "1px solid var(--line)", borderRadius: 6, background: "var(--bg)", fontSize: 13, color: "var(--text)" }}
+          >
+            {STATUS_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+          {hasFilters && (
+            <button
+              type="button"
+              className="btn secondary"
+              style={{ fontSize: 12, padding: "4px 8px" }}
+              onClick={() => {
+                setDomainFilter("");
+                setRuntimeFilter("");
+                setStatusFilter("");
+              }}
+            >
+              <X size={12} /> 清除筛选
+            </button>
+          )}
+        </div>
+      </div>
+
+      {toast && (
+        <div
+          style={{
+            margin: "0 16px",
+            padding: "8px 12px",
+            borderRadius: 6,
+            fontSize: 13,
+            fontWeight: 500,
+            background: toast.kind === "error" ? "var(--red-bg)" : "var(--green-bg)",
+            color: toast.kind === "error" ? "var(--red-dark)" : "var(--green-dark)",
+          }}
+        >
+          {toast.kind === "error" ? <AlertCircle size={14} style={{ verticalAlign: -2 }} /> : <CheckCircle2 size={14} style={{ verticalAlign: -2 }} />}
+          {" "}{toast.message}
+        </div>
+      )}
+
+      <div className="card-library-content">
+        {isLoading && <div className="empty-state">加载项目牌库…</div>}
+        {isError && <div className="empty-state" style={{ color: "var(--red)" }}>项目牌库加载失败</div>}
+        {!isLoading && !isError && filtered.length === 0 && (
+          <div className="empty-state">
+            <Layers size={32} style={{ color: "var(--muted)", marginBottom: 8 }} />
+            <p>{entries.length === 0 ? "项目牌库为空。从卡片详情或模块卡片把 card 加入项目牌库。" : "没有匹配的牌"}</p>
+          </div>
+        )}
+        {!isLoading && !isError && filtered.length > 0 && (
+          <div className="card-library-grid">
+            {filtered.map((entry) => (
+              <BlueprintCard
+                key={entry.draft_id}
+                entry={entry}
+                isSelected={selectedDraftId === entry.draft_id}
+                onSelect={() => setSelectedDraftId(selectedDraftId === entry.draft_id ? null : entry.draft_id)}
+                status={entry.status}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {selectedEntry && (
+        <BlueprintDetailPanel
+          blueprint={draftQuery.data?.draft.blueprint ?? null}
+          entry={selectedEntry}
+          review={draftQuery.data?.draft.review ?? null}
+          actions={
+            <>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={handleReview}
+                disabled={anyLoading || selectedEntry.status === "published"}
+              >
+                {reviewMutation.isPending ? <Loader2 size={14} className="spin" /> : null}
+                审查
+              </button>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={handlePublish}
+                disabled={anyLoading || selectedEntry.status !== "approved"}
+              >
+                {publishMutation.isPending ? <Loader2 size={14} className="spin" /> : null}
+                发布到全局牌库
+              </button>
+              <button
+                type="button"
+                className="btn secondary"
+                style={{ color: "var(--red)" }}
+                onClick={handleDelete}
+                disabled={anyLoading || selectedEntry.status === "published"}
+              >
+                {deleteMutation.isPending ? <Loader2 size={14} className="spin" /> : <Trash2 size={14} />}
+                删除
+              </button>
+            </>
+          }
+        />
+      )}
+    </div>
+  );
+}

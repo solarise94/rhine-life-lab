@@ -6,7 +6,8 @@ import { Card, ProjectSummary, RunEvent, RunRecord, WorkItem } from "@/lib/types
 import { CardStatusBadge } from "@/components/cards/CardStatusBadge";
 import { SpecialistAvatar } from "@/components/cards/SpecialistAvatar";
 import { latestManagerReview } from "@/lib/card-review";
-import { useSaveCardToLibrary } from "@/lib/hooks";
+import { useAddCardToProjectLibrary } from "@/lib/hooks";
+import { useRouter } from "next/navigation";
 
 export function CardDetailPanel({
   card,
@@ -24,7 +25,8 @@ export function CardDetailPanel({
   projectId?: string;
 }) {
   // Hooks must be called before any conditional return (Rules of Hooks).
-  const saveMutation = useSaveCardToLibrary();
+  const saveMutation = useAddCardToProjectLibrary();
+  const router = useRouter();
   const [saveToast, setSaveToast] = useState<string | null>(null);
 
   if (!card) {
@@ -47,13 +49,14 @@ export function CardDetailPanel({
       {
         onSuccess: (result) => {
           const msg = result.warnings.length
-            ? `已存入牌库（${result.warnings.length} 条警告）`
-            : "已存入牌库";
+            ? `已加入项目牌库（${result.warnings.length} 条警告）`
+            : "已加入项目牌库";
           setSaveToast(msg);
-          setTimeout(() => setSaveToast(null), 3000);
+          setTimeout(() => setSaveToast(null), 2000);
+          router.push(`/projects/${projectId}/card-library?draft=${result.draft_id}`);
         },
         onError: () => {
-          setSaveToast("存入牌库失败");
+          setSaveToast("加入项目牌库失败");
           setTimeout(() => setSaveToast(null), 3000);
         },
       },
@@ -84,10 +87,10 @@ export function CardDetailPanel({
               style={{ fontSize: 12, padding: "4px 10px", gap: 4 }}
               onClick={handleSaveToLibrary}
               disabled={saveMutation.isPending}
-              title="存入牌库"
+              title="加入项目牌库"
             >
               {saveMutation.isPending ? <Loader2 size={12} className="spin" /> : <Bookmark size={12} />}
-              存入牌库
+              加入项目牌库
             </button>
           )}
           <CardStatusBadge status={card.status} />

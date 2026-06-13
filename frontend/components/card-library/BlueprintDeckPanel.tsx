@@ -1,10 +1,11 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Search, Wrench, Radio, X, Layers, Loader2, Check } from "lucide-react";
+import { Search, Wrench, Radio, X, Layers } from "lucide-react";
 
-import { useCardBlueprint, useCardLibrary, useInstantiateCardBlueprint } from "@/lib/hooks";
-import { Asset, CardBlueprintIndexEntry, InstantiateBlueprintRequest, PythonRuntime, RRuntime } from "@/lib/types";
+import { useCardLibrary, useCardBlueprint } from "@/lib/hooks";
+import { CardBlueprintIndexEntry } from "@/lib/types";
+import { BlueprintDetailPanel } from "./BlueprintDetailPanel";
 
 // ---------------------------------------------------------------------------
 // Deck Item (list row)
@@ -36,191 +37,10 @@ function DeckItem({
 }
 
 // ---------------------------------------------------------------------------
-// Instantiate Form
-// ---------------------------------------------------------------------------
-
-function InstantiateForm({
-  entry,
-  blueprintId,
-  projectId,
-  pythonRuntimes,
-  rRuntimes,
-  assets,
-  onClose,
-}: {
-  entry: CardBlueprintIndexEntry;
-  blueprintId: string;
-  projectId: string;
-  pythonRuntimes: PythonRuntime[];
-  rRuntimes: RRuntime[];
-  assets: Asset[];
-  onClose: () => void;
-}) {
-  const { data: detailData } = useCardBlueprint(blueprintId);
-  const blueprint = detailData?.blueprint ?? null;
-  const instantiateMutation = useInstantiateCardBlueprint(projectId);
-  const [pythonRuntime, setPythonRuntime] = useState("");
-  const [rRuntime, setRRuntime] = useState("");
-  const [inputBindings, setInputBindings] = useState<Record<string, string>>({});
-  const [paramValues, setParamValues] = useState<Record<string, string>>({});
-  const [toast, setToast] = useState<string | null>(null);
-
-  function handleInstantiate() {
-    const payload: InstantiateBlueprintRequest = {
-      input_bindings: inputBindings,
-      python_runtime: pythonRuntime || undefined,
-      r_runtime: rRuntime || undefined,
-      parameter_values: paramValues,
-    };
-    instantiateMutation.mutate(
-      { blueprintId, payload },
-      {
-        onSuccess: (result) => {
-          if (result.blockers.length > 0) {
-            setToast(`阻塞: ${result.blockers.join("; ")}`);
-            setTimeout(() => setToast(null), 5000);
-          } else {
-            setToast("已实例化到项目");
-            setTimeout(() => {
-              setToast(null);
-              onClose();
-            }, 1500);
-          }
-        },
-        onError: () => {
-          setToast("实例化失败");
-          setTimeout(() => setToast(null), 3000);
-        },
-      },
-    );
-  }
-
-  return (
-    <div className="deck-instantiate">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h4>实例化: {entry.title}</h4>
-        <button type="button" className="btn secondary" style={{ padding: "2px 6px" }} onClick={onClose}>
-          <X size={14} />
-        </button>
-      </div>
-
-      {/* Input slot bindings — project asset dropdown */}
-      {blueprint && blueprint.inputs_schema.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <label style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>输入绑定</label>
-          {blueprint.inputs_schema.map((inp) => {
-            const validAssets = assets.filter(
-              (a) => a.status === "valid" || a.status === "candidate",
-            );
-            return (
-              <div key={inp.slot} className="deck-field">
-                <label>{inp.label}{inp.required ? " *" : ""}</label>
-                {validAssets.length > 0 ? (
-                  <select
-                    value={inputBindings[inp.slot] ?? ""}
-                    onChange={(e) => setInputBindings((prev) => ({ ...prev, [inp.slot]: e.target.value }))}
-                  >
-                    <option value="">— 选择资产 —</option>
-                    {validAssets.map((a) => (
-                      <option key={a.asset_id} value={a.asset_id}>
-                        {a.title} ({a.asset_id})
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    type="text"
-                    placeholder="项目中暂无可用资产"
-                    value={inputBindings[inp.slot] ?? ""}
-                    onChange={(e) => setInputBindings((prev) => ({ ...prev, [inp.slot]: e.target.value }))}
-                    disabled
-                  />
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Parameter inputs */}
-      {blueprint && blueprint.parameters.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <label style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>参数</label>
-          {blueprint.parameters.map((p) => (
-            <div key={p.name} className="deck-field">
-              <label>{p.name}{p.required ? " *" : ""}</label>
-              <input
-                type="text"
-                placeholder={p.type}
-                value={paramValues[p.name] ?? (p.default != null ? String(p.default) : "")}
-                onChange={(e) => setParamValues((prev) => ({ ...prev, [p.name]: e.target.value }))}
-              />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Runtime selection */}
-      {pythonRuntimes.length > 0 && (
-        <div className="deck-field">
-          <label>Python Runtime</label>
-          <select value={pythonRuntime} onChange={(e) => setPythonRuntime(e.target.value)}>
-            <option value="">自动选择</option>
-            {pythonRuntimes.map((rt) => (
-              <option key={`${rt.manager}:${rt.name}`} value={rt.name}>{rt.label}</option>
-            ))}
-          </select>
-        </div>
-      )}
-
-      {rRuntimes.length > 0 && (
-        <div className="deck-field">
-          <label>R Runtime</label>
-          <select value={rRuntime} onChange={(e) => setRRuntime(e.target.value)}>
-            <option value="">自动选择</option>
-            {rRuntimes.map((rt) => (
-              <option key={`${rt.manager}:${rt.name}`} value={rt.name}>{rt.label}</option>
-            ))}
-          </select>
-        </div>
-      )}
-
-      {toast && (
-        <div style={{ fontSize: 12, color: toast.includes("失败") || toast.includes("阻塞") ? "var(--red)" : "var(--green)", fontWeight: 500 }}>
-          {toast.includes("失败") || toast.includes("阻塞") ? null : <Check size={12} style={{ display: "inline", verticalAlign: -1 }} />}
-          {" "}{toast}
-        </div>
-      )}
-
-      <button
-        type="button"
-        className="btn primary"
-        style={{ marginTop: 4 }}
-        onClick={handleInstantiate}
-        disabled={instantiateMutation.isPending}
-      >
-        {instantiateMutation.isPending ? <Loader2 size={14} className="spin" /> : <Layers size={14} />}
-        实例化到项目
-      </button>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // BlueprintDeckPanel
 // ---------------------------------------------------------------------------
 
-export function BlueprintDeckPanel({
-  projectId,
-  pythonRuntimes,
-  rRuntimes,
-  assets,
-}: {
-  projectId: string;
-  pythonRuntimes?: PythonRuntime[];
-  rRuntimes?: RRuntime[];
-  assets?: Asset[];
-}) {
+export function BlueprintDeckPanel() {
   const { data, isLoading, isError } = useCardLibrary();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -238,6 +58,8 @@ export function BlueprintDeckPanel({
       e.tags.some((t) => t.toLowerCase().includes(q))
     );
   }, [entries, searchQuery]);
+
+  const { data: detailData } = useCardBlueprint(selectedId);
 
   return (
     <div className="deck-panel">
@@ -274,14 +96,9 @@ export function BlueprintDeckPanel({
       ))}
 
       {selectedEntry && (
-        <InstantiateForm
+        <BlueprintDetailPanel
+          blueprint={detailData?.blueprint ?? null}
           entry={selectedEntry}
-          blueprintId={selectedEntry.blueprint_id}
-          projectId={projectId}
-          pythonRuntimes={pythonRuntimes ?? []}
-          rRuntimes={rRuntimes ?? []}
-          assets={assets ?? []}
-          onClose={() => setSelectedId(null)}
         />
       )}
     </div>

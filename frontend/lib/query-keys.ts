@@ -7,6 +7,9 @@ export const queryKeys = {
   projectMcpLibrary: (projectId: string) => ["project-mcp-library", projectId] as const,
   cardLibrary: ["card-library"] as const,
   cardBlueprint: (blueprintId: string) => ["card-blueprint", blueprintId] as const,
+  projectCardLibrary: (projectId: string) => ["project-card-library", projectId] as const,
+  projectCardDraft: (projectId: string, draftId: string) =>
+    ["project-card-draft", projectId, draftId] as const,
   project: (projectId: string) => ["project", projectId] as const,
   projectEnvironment: (projectId: string) => ["project-environment", projectId] as const,
   managerAuto: (projectId: string, sessionId?: string | null) => ["manager-auto", projectId, sessionId ?? "none"] as const,

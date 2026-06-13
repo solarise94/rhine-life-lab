@@ -15,10 +15,14 @@ from app.models.card_blueprint import (
     BlueprintRuntimeRequirement,
     BlueprintRuntimeRequirements,
     CardBlueprint,
+    CardBlueprintDraft,
+    CardBlueprintDraftIndexEntry,
     CardBlueprintIndex,
     CardBlueprintIndexEntry,
+    CreateProjectDraftResponse,
     InstantiateRequest,
     InstantiateResult,
+    PublishDraftResponse,
     SaveResult,
     UpdateBlueprintRequest,
 )
@@ -29,6 +33,7 @@ from app.models.output_contracts import CardOutputSpec, normalize_output_format
 from app.services.asset_materialization_service import AssetMaterializationService
 from app.services.project_service import ProjectService
 from app.services.runtime_dependency_resolver_service import RuntimeDependencyResolverService
+from app.services.blueprint_review_worker import BlueprintReviewWorker
 from app.services.utils import atomic_write_json, read_json, utc_now
 
 try:
@@ -56,11 +61,12 @@ _VALID_INPUT_STATUSES = {"valid", "candidate"}
 
 
 def _scrub_text(text: str) -> str:
-    """Remove absolute paths and asset IDs from a text string."""
+    """Remove absolute paths, asset IDs, and secret keywords from a text string."""
     result = text
     for pat in _PATH_PATTERNS:
         result = pat.sub("", result)
     result = _ASSET_ID_PATTERN.sub("", result)
+    result = _SECRET_PATTERN.sub("", result)
     return result.strip()
 
 
@@ -276,15 +282,8 @@ class CardLibraryService:
             raise ValueError(f"Blueprint not found: {blueprint_id}")
         return read_json(bp_path, {})
 
-    def save_from_card(self, project_id: str, card_id: str) -> SaveResult:
-        """Extract, desensitize, and save a card as a blueprint.
-
-        AI review (Step 2 in the design doc) is deferred to P1.
-        For P0, only rule-based desensitization is applied, and a
-        degradation warning is emitted to inform the user.
-        """
-        warnings: list[str] = ["未进行 AI 泛化检查（规则脱敏已完成）"]
-
+    def _build_blueprint_from_card(self, project_id: str, card_id: str) -> CardBlueprint:
+        """Extract, desensitize, and build a CardBlueprint from a project card."""
         # Read source card
         store = self.project_service.graph_store(project_id)
         cards = store.load_cards()
@@ -346,13 +345,11 @@ class CardLibraryService:
                 required=out.required,
             ))
 
-        # Generate ID and save
         with self._lock:
-            self._ensure_dirs()
             blueprint_id = self._generate_blueprint_id(title)
             now = utc_now()
 
-            bp = CardBlueprint(
+            return CardBlueprint(
                 blueprint_id=blueprint_id,
                 title=title,
                 summary=summary,
@@ -372,12 +369,263 @@ class CardLibraryService:
                 ),
             )
 
-            bp_dir = self._blueprint_dir(blueprint_id)
+    def save_from_card(self, project_id: str, card_id: str) -> SaveResult:
+        """Extract, desensitize, and save a card as a global blueprint.
+
+        AI review (Step 2 in the design doc) is deferred to P1.
+        For P0, only rule-based desensitization is applied, and a
+        degradation warning is emitted to inform the user.
+        """
+        warnings: list[str] = ["未进行 AI 泛化检查（规则脱敏已完成）"]
+
+        bp = self._build_blueprint_from_card(project_id, card_id)
+
+        with self._lock:
+            self._ensure_dirs()
+            bp_dir = self._blueprint_dir(bp.blueprint_id)
             bp_dir.mkdir(parents=True, exist_ok=True)
             atomic_write_json(bp_dir / "blueprint.json", bp.model_dump())
             self._add_to_index(bp)
 
-        return SaveResult(blueprint_id=blueprint_id, warnings=warnings)
+        return SaveResult(blueprint_id=bp.blueprint_id, warnings=warnings)
+
+    # ------------------------------------------------------------------
+    # Project draft storage helpers
+    # ------------------------------------------------------------------
+
+    def _project_draft_root(self, project_id: str) -> Path:
+        return self.project_service.project_path(project_id) / "card-library-drafts"
+
+    def _project_draft_index_path(self, project_id: str) -> Path:
+        return self._project_draft_root(project_id) / "index.json"
+
+    def _project_draft_dir(self, project_id: str, draft_id: str) -> Path:
+        return self._project_draft_root(project_id) / "drafts" / draft_id
+
+    def _read_project_draft_index(self, project_id: str) -> dict[str, Any]:
+        path = self._project_draft_index_path(project_id)
+        return read_json(path, {"entries": []})
+
+    def _write_project_draft_index(self, project_id: str, index_data: dict[str, Any]) -> None:
+        atomic_write_json(self._project_draft_index_path(project_id), index_data)
+
+    def _generate_draft_id(self, project_id: str, title: str) -> str:
+        slug = _slugify(title)
+        index_data = self._read_project_draft_index(project_id)
+        existing = {e.get("draft_id", "") for e in index_data.get("entries", [])}
+
+        for _attempt in range(10):
+            suffix = uuid4().hex[:4]
+            candidate = f"{slug}-{suffix}"
+            if candidate not in existing:
+                return candidate
+        return f"{slug}-{uuid4().hex[:8]}"
+
+    def _draft_index_entry_from_blueprint(
+        self,
+        draft_id: str,
+        status: str,
+        blueprint: CardBlueprint,
+        global_blueprint_id: str | None = None,
+        created_at: str | None = None,
+        updated_at: str | None = None,
+    ) -> dict[str, Any]:
+        runtime_hints: list[str] = []
+        rr = blueprint.runtime_requirements
+        if isinstance(rr.python, BlueprintRuntimeRequirement) and rr.python.env_hint:
+            runtime_hints.append(rr.python.env_hint)
+        if isinstance(rr.r, BlueprintRuntimeRequirement) and rr.r.env_hint:
+            runtime_hints.append(rr.r.env_hint)
+
+        return CardBlueprintDraftIndexEntry(
+            draft_id=draft_id,
+            status=status,  # type: ignore[arg-type]
+            global_blueprint_id=global_blueprint_id,
+            title=blueprint.title,
+            summary=blueprint.summary,
+            tags=blueprint.tags,
+            domain=blueprint.domain,
+            skills=blueprint.skills,
+            mcp_servers=blueprint.mcp_servers,
+            runtime_hints=runtime_hints,
+            created_at=created_at,
+            updated_at=updated_at,
+        ).model_dump()
+
+    # ------------------------------------------------------------------
+    # Project draft public API
+    # ------------------------------------------------------------------
+
+    def create_project_draft(self, project_id: str, card_id: str) -> CreateProjectDraftResponse:
+        """Create a project-scoped blueprint draft from a card."""
+        bp = self._build_blueprint_from_card(project_id, card_id)
+
+        lock = self.project_service.lock_for(project_id)
+        with lock:
+            now = utc_now()
+            draft_id = self._generate_draft_id(project_id, bp.title)
+            draft = CardBlueprintDraft(
+                draft_id=draft_id,
+                status="draft",
+                blueprint=bp,
+                created_at=now,
+                updated_at=now,
+            )
+
+            draft_dir = self._project_draft_dir(project_id, draft_id)
+            draft_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(draft_dir / "blueprint.json", draft.model_dump())
+
+            index_data = self._read_project_draft_index(project_id)
+            entries: list[dict[str, Any]] = index_data.get("entries", [])
+            entries.append(self._draft_index_entry_from_blueprint(
+                draft_id=draft_id,
+                status="draft",
+                blueprint=bp,
+                created_at=now,
+                updated_at=now,
+            ))
+            index_data["entries"] = entries
+            self._write_project_draft_index(project_id, index_data)
+
+        return CreateProjectDraftResponse(
+            draft_id=draft_id,
+            warnings=["未进行 AI 泛化检查（规则审查已执行）"],
+        )
+
+    def list_project_drafts(self, project_id: str) -> list[dict[str, Any]]:
+        """List all project draft entries, sorted by updated_at desc."""
+        index_data = self._read_project_draft_index(project_id)
+        entries = index_data.get("entries", [])
+        entries.sort(key=lambda e: e.get("updated_at") or "", reverse=True)
+        return entries
+
+    def get_project_draft(self, project_id: str, draft_id: str) -> dict[str, Any]:
+        """Read a single project draft."""
+        draft_path = self._project_draft_dir(project_id, draft_id) / "blueprint.json"
+        if not draft_path.exists():
+            raise ValueError(f"Draft not found: {draft_id} in project {project_id}")
+        return read_json(draft_path, {})
+
+    def delete_project_draft(self, project_id: str, draft_id: str) -> dict[str, Any]:
+        """Delete a project draft."""
+        lock = self.project_service.lock_for(project_id)
+        with lock:
+            draft_dir = self._project_draft_dir(project_id, draft_id)
+            if draft_dir.exists():
+                import shutil
+                shutil.rmtree(draft_dir)
+
+            index_data = self._read_project_draft_index(project_id)
+            entries = [e for e in index_data.get("entries", []) if e.get("draft_id") != draft_id]
+            index_data["entries"] = entries
+            self._write_project_draft_index(project_id, index_data)
+
+        return {"ok": True, "draft_id": draft_id}
+
+    def review_project_draft(self, project_id: str, draft_id: str) -> dict[str, Any]:
+        """Run rule-based review on a project draft and update its status."""
+        lock = self.project_service.lock_for(project_id)
+        with lock:
+            draft_data = self.get_project_draft(project_id, draft_id)
+            draft = CardBlueprintDraft.model_validate(draft_data)
+
+            store = self.project_service.graph_store(project_id)
+            project_state = store.load_project_state()
+            project_name = project_state.name
+
+            review = BlueprintReviewWorker().review(draft.blueprint, project_name=project_name)
+            status_map = {"pass": "approved", "warn": "needs_review", "fail": "rejected"}
+            draft.status = status_map[review.verdict]
+            draft.review = review
+            draft.updated_at = utc_now()
+
+            draft_dir = self._project_draft_dir(project_id, draft_id)
+            atomic_write_json(draft_dir / "blueprint.json", draft.model_dump())
+
+            index_data = self._read_project_draft_index(project_id)
+            entries = index_data.get("entries", [])
+            for i, entry in enumerate(entries):
+                if entry.get("draft_id") == draft_id:
+                    entries[i] = self._draft_index_entry_from_blueprint(
+                        draft_id=draft_id,
+                        status=draft.status,
+                        blueprint=draft.blueprint,
+                        global_blueprint_id=draft.global_blueprint_id,
+                        created_at=draft.created_at,
+                        updated_at=draft.updated_at,
+                    )
+                    break
+            index_data["entries"] = entries
+            self._write_project_draft_index(project_id, index_data)
+
+            return {
+                "draft_id": draft_id,
+                "status": draft.status,
+                "review": review.model_dump(),
+            }
+
+    def publish_project_draft(self, project_id: str, draft_id: str) -> PublishDraftResponse:
+        """Publish an approved project draft to the global card library."""
+        draft_data = self.get_project_draft(project_id, draft_id)
+        draft = CardBlueprintDraft.model_validate(draft_data)
+
+        if draft.status == "published":
+            return PublishDraftResponse(
+                draft_id=draft_id,
+                global_blueprint_id=draft.global_blueprint_id or "",
+            )
+
+        if draft.status != "approved":
+            raise ValueError("Draft must be approved before publishing")
+
+        with self._lock:
+            self._ensure_dirs()
+            global_blueprint_id = self._generate_blueprint_id(draft.blueprint.title)
+            now = utc_now()
+
+            bp = draft.blueprint.model_copy(update={
+                "blueprint_id": global_blueprint_id,
+                "provenance": BlueprintProvenance(
+                    source_card_id=None,
+                    source_project_id=None,
+                    created_at=now,
+                    created_by="user",
+                    use_count=0,
+                ),
+            })
+
+            bp_dir = self._blueprint_dir(global_blueprint_id)
+            bp_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(bp_dir / "blueprint.json", bp.model_dump())
+            self._add_to_index(bp)
+
+        lock = self.project_service.lock_for(project_id)
+        with lock:
+            draft.status = "published"
+            draft.global_blueprint_id = global_blueprint_id
+            draft.updated_at = now
+
+            draft_dir = self._project_draft_dir(project_id, draft_id)
+            atomic_write_json(draft_dir / "blueprint.json", draft.model_dump())
+
+            index_data = self._read_project_draft_index(project_id)
+            entries = index_data.get("entries", [])
+            for i, entry in enumerate(entries):
+                if entry.get("draft_id") == draft_id:
+                    entries[i] = self._draft_index_entry_from_blueprint(
+                        draft_id=draft_id,
+                        status="published",
+                        blueprint=draft.blueprint,
+                        global_blueprint_id=global_blueprint_id,
+                        created_at=draft.created_at,
+                        updated_at=draft.updated_at,
+                    )
+                    break
+            index_data["entries"] = entries
+            self._write_project_draft_index(project_id, index_data)
+
+        return PublishDraftResponse(draft_id=draft_id, global_blueprint_id=global_blueprint_id)
 
     def save_from_import(self, blueprint_data: dict[str, Any]) -> SaveResult:
         """Import a blueprint from raw JSON data."""

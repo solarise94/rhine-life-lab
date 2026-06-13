@@ -2,193 +2,11 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { Search, X, Trash2, Layers, Wrench, Radio, Tag, Clock, ArrowLeft, Filter } from "lucide-react";
+import { Search, X, Trash2, Layers, ArrowLeft, Filter } from "lucide-react";
 
 import { useCardLibrary, useDeleteCardBlueprint, useCardBlueprint } from "@/lib/hooks";
-import { CardBlueprintIndexEntry, CardBlueprint } from "@/lib/types";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function formatDate(value: string | null | undefined) {
-  if (!value) return "";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", year: "numeric" });
-}
-
-// ---------------------------------------------------------------------------
-// Blueprint Card (grid item)
-// ---------------------------------------------------------------------------
-
-function BlueprintCard({
-  entry,
-  isSelected,
-  onSelect,
-}: {
-  entry: CardBlueprintIndexEntry;
-  isSelected: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className={`card-library-item ${isSelected ? "selected" : ""}`}
-      onClick={onSelect}
-    >
-      <div className="card-library-cover">
-        <Layers size={28} style={{ color: "var(--muted)" }} />
-      </div>
-      <div className="card-library-body">
-        <strong className="card-library-title">{entry.title}</strong>
-        <p className="card-library-summary">{entry.summary || "暂无摘要"}</p>
-        {entry.tags.length > 0 && (
-          <div className="card-library-tags">
-            {entry.tags.slice(0, 3).map((tag) => (
-              <span key={tag} className="pill" style={{ fontSize: 11 }}>{tag}</span>
-            ))}
-            {entry.tags.length > 3 && <span className="pill" style={{ fontSize: 11 }}>+{entry.tags.length - 3}</span>}
-          </div>
-        )}
-        <div className="card-library-meta">
-          {entry.runtime_hints.length > 0 && (
-            <span style={{ background: "var(--blue-bg)", color: "var(--blue-dark)", padding: "1px 5px", borderRadius: 4, fontSize: 10 }}>
-              {entry.runtime_hints.join(", ")}
-            </span>
-          )}
-          {entry.skills.length > 0 && <span title="Skills"><Wrench size={12} /> {entry.skills.length}</span>}
-          {entry.mcp_servers.length > 0 && <span title="MCP Servers"><Radio size={12} /> {entry.mcp_servers.length}</span>}
-          {entry.use_count > 0 && <span><Tag size={12} /> {entry.use_count}次</span>}
-          {entry.last_used_at && <span><Clock size={12} /> {formatDate(entry.last_used_at)}</span>}
-        </div>
-      </div>
-    </button>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Detail Panel
-// ---------------------------------------------------------------------------
-
-function DetailPanel({
-  blueprint,
-  entry,
-  onDelete,
-  deleting,
-}: {
-  blueprint: CardBlueprint | null;
-  entry: CardBlueprintIndexEntry;
-  onDelete: () => void;
-  deleting: boolean;
-}) {
-  if (!blueprint) {
-    return <div className="card-library-detail empty"><p>选择一张牌查看详情</p></div>;
-  }
-
-  return (
-    <div className="card-library-detail">
-      <div className="card-library-detail-header">
-        <div>
-          <h3 style={{ margin: "0 0 4px" }}>{blueprint.title}</h3>
-          <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>{blueprint.summary}</p>
-        </div>
-        <button
-          type="button"
-          className="btn secondary"
-          style={{ color: "var(--red)", flexShrink: 0 }}
-          onClick={onDelete}
-          disabled={deleting}
-        >
-          <Trash2 size={14} /> {deleting ? "删除中…" : "删除"}
-        </button>
-      </div>
-
-      <div className="card-library-detail-section">
-        <h4>标签 & 领域</h4>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {blueprint.domain && <span className="pill" style={{ background: "var(--blue-bg)", color: "var(--blue-dark)" }}>{blueprint.domain}</span>}
-          {blueprint.tags.map((tag) => <span key={tag} className="pill">{tag}</span>)}
-        </div>
-      </div>
-
-      <div className="card-library-detail-section">
-        <h4>Skills & MCP</h4>
-        {blueprint.skills.length > 0 && (
-          <div className="settings-kv-list">
-            {blueprint.skills.map((s) => <div key={s}><span><Wrench size={12} /> Skill</span><strong>{s}</strong></div>)}
-          </div>
-        )}
-        {blueprint.mcp_servers.length > 0 && (
-          <div className="settings-kv-list">
-            {blueprint.mcp_servers.map((s) => <div key={s}><span><Radio size={12} /> MCP</span><strong>{s}</strong></div>)}
-          </div>
-        )}
-        {blueprint.skills.length === 0 && blueprint.mcp_servers.length === 0 && <p style={{ color: "var(--muted)" }}>无</p>}
-      </div>
-
-      {blueprint.inputs_schema.length > 0 && (
-        <div className="card-library-detail-section">
-          <h4>输入</h4>
-          <div className="settings-kv-list">
-            {blueprint.inputs_schema.map((inp) => (
-              <div key={inp.slot}>
-                <span>{inp.label} {inp.required ? "*" : ""}</span>
-                <span style={{ color: "var(--muted)", fontSize: 12 }}>{inp.accepted_formats.join(", ") || "任意"}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {blueprint.outputs_schema.length > 0 && (
-        <div className="card-library-detail-section">
-          <h4>输出</h4>
-          <div className="settings-kv-list">
-            {blueprint.outputs_schema.map((out) => (
-              <div key={out.role}>
-                <span>{out.label}</span>
-                <span style={{ color: "var(--muted)", fontSize: 12 }}>{out.artifact_class} · {out.accepted_formats.join(", ")}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {blueprint.parameters.length > 0 && (
-        <div className="card-library-detail-section">
-          <h4>参数</h4>
-          <div className="settings-kv-list">
-            {blueprint.parameters.map((p) => (
-              <div key={p.name}>
-                <span>{p.name} {p.required ? "*" : ""}</span>
-                <span style={{ color: "var(--muted)", fontSize: 12 }}>{p.type}{p.default != null ? ` · 默认: ${String(p.default)}` : ""}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {blueprint.instruction_blocks.length > 0 && (
-        <div className="card-library-detail-section">
-          <h4>指令</h4>
-          <ul style={{ margin: 0, paddingLeft: 18, color: "var(--text-secondary)", fontSize: 13 }}>
-            {blueprint.instruction_blocks.map((block, i) => <li key={i}>{block}</li>)}
-          </ul>
-        </div>
-      )}
-
-      <div className="card-library-detail-section">
-        <h4>来源</h4>
-        <div className="settings-kv-list">
-          <div><span>创建时间</span><span>{formatDate(blueprint.provenance.created_at) || "未知"}</span></div>
-          <div><span>使用次数</span><span>{blueprint.provenance.use_count}</span></div>
-          {blueprint.provenance.last_used_at && <div><span>最近使用</span><span>{formatDate(blueprint.provenance.last_used_at)}</span></div>}
-        </div>
-      </div>
-    </div>
-  );
-}
+import { BlueprintCard } from "./BlueprintCard";
+import { BlueprintDetailPanel } from "./BlueprintDetailPanel";
 
 // ---------------------------------------------------------------------------
 // Page
@@ -327,15 +145,24 @@ export function CardLibraryPage() {
       </div>
 
       {selectedEntry && (
-        <DetailPanel
+        <BlueprintDetailPanel
           blueprint={detailData?.blueprint ?? null}
           entry={selectedEntry}
-          onDelete={() => {
-            deleteMutation.mutate(selectedEntry.blueprint_id, {
-              onSuccess: () => setSelectedId(null),
-            });
-          }}
-          deleting={deleteMutation.isPending}
+          actions={
+            <button
+              type="button"
+              className="btn secondary"
+              style={{ color: "var(--red)" }}
+              onClick={() => {
+                deleteMutation.mutate(selectedEntry.blueprint_id, {
+                  onSuccess: () => setSelectedId(null),
+                });
+              }}
+              disabled={deleteMutation.isPending}
+            >
+              <Trash2 size={14} /> {deleteMutation.isPending ? "删除中…" : "删除"}
+            </button>
+          }
         />
       )}
     </div>

@@ -20,7 +20,8 @@ import { SpecialistAvatar } from "./SpecialistAvatar";
 import { FileBag } from "./FileBag";
 import { CardPage, EMPTY_CARD_PAGE_BY_ID, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 import { latestManagerReview } from "@/lib/card-review";
-import { useSaveCardToLibrary } from "@/lib/hooks";
+import { useAddCardToProjectLibrary } from "@/lib/hooks";
+import { useRouter } from "next/navigation";
 
 function preferredExecutorProfile(profiles: ExecutorProfile[], workerType?: string) {
   if (!workerType) return profiles[0];
@@ -86,7 +87,8 @@ export function ModuleCard({
   const fileCount = card.outputs.filter((o) => o.asset_id).length;
   const visibleManagerReview = latestManagerReview(card.manager_review);
 
-  const saveMutation = useSaveCardToLibrary();
+  const saveMutation = useAddCardToProjectLibrary();
+  const router = useRouter();
   const [saveToast, setSaveToast] = useState<string | null>(null);
 
   const isGhost = card.status === "proposed";
@@ -184,13 +186,14 @@ export function ModuleCard({
       {
         onSuccess: (result) => {
           const msg = result.warnings.length
-            ? `已存入牌库（${result.warnings.length} 条警告）`
-            : "已存入牌库";
+            ? `已加入项目牌库（${result.warnings.length} 条警告）`
+            : "已加入项目牌库";
           setSaveToast(msg);
-          setTimeout(() => setSaveToast(null), 3000);
+          setTimeout(() => setSaveToast(null), 2000);
+          router.push(`/projects/${projectId}/card-library?draft=${result.draft_id}`);
         },
         onError: () => {
-          setSaveToast("存入牌库失败");
+          setSaveToast("加入项目牌库失败");
           setTimeout(() => setSaveToast(null), 3000);
         },
       },
@@ -294,10 +297,10 @@ export function ModuleCard({
                     style={{ fontSize: 10, padding: "4px 8px", flex: 1 }}
                     onClick={handleSaveToLibrary}
                     disabled={saveMutation.isPending}
-                    title="存入牌库"
+                    title="加入项目牌库"
                   >
                     {saveMutation.isPending ? <Loader2 size={12} className="spin" /> : <Bookmark size={12} />}
-                    存入牌库
+                    加入项目牌库
                   </button>
                 </div>
 

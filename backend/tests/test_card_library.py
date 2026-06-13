@@ -30,10 +30,12 @@ from app.models.card_blueprint import (
     BlueprintRuntimeRequirement,
     BlueprintRuntimeRequirements,
     CardBlueprint,
+    CardBlueprintDraft,
     CardBlueprintIndexEntry,
     InstantiateRequest,
 )
 from app.models.cards import Card, CardAssetRef
+from app.models.executor import ExecutorContext, RuntimeBindings
 from app.models.graph import Asset
 from app.models.output_contracts import CardOutputSpec
 from app.services.card_library_service import CardLibraryService
@@ -618,6 +620,149 @@ class TestArtifactClassValidation(unittest.TestCase):
                 accepted_formats=["png"],
                 preferred_format="svg",
             )
+
+
+# ======================================================================
+# Project draft flow
+# ======================================================================
+
+class TestProjectDraftFlow(_Base):
+    def _create_card_with_runtime(self, project_id: str, card_id: str, title: str):
+        ps = self._project_service()
+        store = ps.graph_store(project_id)
+        card = Card(
+            card_id=card_id,
+            card_type="module",
+            title=title,
+            status="proposed",
+            summary="A reusable analysis card",
+            outputs=[
+                CardOutputSpec(role="result", label="Result", artifact_class="figure"),
+            ],
+            executor_context=ExecutorContext(
+                instruction_blocks=["Run analysis"],
+                runtime_bindings=RuntimeBindings(
+                    conda_env="scanpy",
+                    r_env="__system__",
+                ),
+            ),
+        )
+        store.save_cards([card])
+        return card
+
+    def test_create_project_draft(self):
+        ps = self._create_project("proj-draft")
+        svc = self._service(ps)
+        self._create_card_with_runtime("proj-draft", "card-001", "Clean Card")
+
+        result = svc.create_project_draft("proj-draft", "card-001")
+        self.assertTrue(result.draft_id)
+        self.assertIn("规则审查已执行", result.warnings[0])
+
+        draft_path = ps.project_path("proj-draft") / "card-library-drafts" / "drafts" / result.draft_id
+        self.assertTrue(draft_path.exists())
+        self.assertTrue((draft_path / "blueprint.json").exists())
+
+    def test_get_project_draft(self):
+        ps = self._create_project("proj-draft")
+        svc = self._service(ps)
+        self._create_card_with_runtime("proj-draft", "card-001", "Clean Card")
+
+        created = svc.create_project_draft("proj-draft", "card-001")
+        draft = svc.get_project_draft("proj-draft", created.draft_id)
+        self.assertEqual(draft["draft_id"], created.draft_id)
+        self.assertEqual(draft["status"], "draft")
+        self.assertEqual(draft["blueprint"]["title"], "Clean Card")
+
+    def test_list_project_drafts(self):
+        ps = self._create_project("proj-draft")
+        svc = self._service(ps)
+        self._create_card_with_runtime("proj-draft", "card-001", "Clean Card")
+
+        created = svc.create_project_draft("proj-draft", "card-001")
+        entries = svc.list_project_drafts("proj-draft")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["draft_id"], created.draft_id)
+        self.assertEqual(entries[0]["status"], "draft")
+        self.assertEqual(entries[0]["title"], "Clean Card")
+
+    def test_review_project_draft_clean(self):
+        ps = self._create_project("proj-draft")
+        svc = self._service(ps)
+        self._create_card_with_runtime("proj-draft", "card-001", "Clean Card")
+
+        created = svc.create_project_draft("proj-draft", "card-001")
+        result = svc.review_project_draft("proj-draft", created.draft_id)
+        self.assertEqual(result["status"], "approved")
+        self.assertEqual(result["review"]["verdict"], "pass")
+
+    def test_review_project_draft_project_name_in_title(self):
+        ps = self._create_project("proj-draft")
+        svc = self._service(ps)
+        self._create_card_with_runtime("proj-draft", "card-001", "Test Project Analysis")
+
+        created = svc.create_project_draft("proj-draft", "card-001")
+        result = svc.review_project_draft("proj-draft", created.draft_id)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["review"]["verdict"], "fail")
+
+    def test_review_project_draft_absolute_path_in_instructions(self):
+        ps = self._create_project("proj-draft")
+        svc = self._service(ps)
+        self._create_card_with_runtime("proj-draft", "card-001", "Clean Card")
+
+        created = svc.create_project_draft("proj-draft", "card-001")
+        # Inject an absolute path after extraction scrubbed it
+        draft = svc.get_project_draft("proj-draft", created.draft_id)
+        draft["blueprint"]["instruction_blocks"] = ["Load data from /home/user/data.csv"]
+        from app.services.utils import atomic_write_json
+        draft_dir = ps.project_path("proj-draft") / "card-library-drafts" / "drafts" / created.draft_id
+        atomic_write_json(draft_dir / "blueprint.json", draft)
+
+        result = svc.review_project_draft("proj-draft", created.draft_id)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["review"]["verdict"], "fail")
+
+    def test_publish_project_draft_approved(self):
+        ps = self._create_project("proj-draft")
+        svc = self._service(ps)
+        self._create_card_with_runtime("proj-draft", "card-001", "Clean Card")
+
+        created = svc.create_project_draft("proj-draft", "card-001")
+        svc.review_project_draft("proj-draft", created.draft_id)
+        result = svc.publish_project_draft("proj-draft", created.draft_id)
+
+        self.assertTrue(result.global_blueprint_id)
+        draft = svc.get_project_draft("proj-draft", created.draft_id)
+        self.assertEqual(draft["status"], "published")
+        self.assertEqual(draft["global_blueprint_id"], result.global_blueprint_id)
+
+        # Verify global blueprint exists
+        bp = svc.get_blueprint(result.global_blueprint_id)
+        self.assertEqual(bp["title"], "Clean Card")
+
+    def test_publish_project_draft_not_approved(self):
+        ps = self._create_project("proj-draft")
+        svc = self._service(ps)
+        self._create_card_with_runtime("proj-draft", "card-001", "Clean Card")
+
+        created = svc.create_project_draft("proj-draft", "card-001")
+        with self.assertRaises(ValueError) as ctx:
+            svc.publish_project_draft("proj-draft", created.draft_id)
+        self.assertIn("approved", str(ctx.exception).lower())
+
+    def test_delete_project_draft(self):
+        ps = self._create_project("proj-draft")
+        svc = self._service(ps)
+        self._create_card_with_runtime("proj-draft", "card-001", "Clean Card")
+
+        created = svc.create_project_draft("proj-draft", "card-001")
+        result = svc.delete_project_draft("proj-draft", created.draft_id)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["draft_id"], created.draft_id)
+
+        with self.assertRaises(ValueError):
+            svc.get_project_draft("proj-draft", created.draft_id)
 
 
 if __name__ == "__main__":

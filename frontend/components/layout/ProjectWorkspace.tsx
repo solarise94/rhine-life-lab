@@ -75,6 +75,10 @@ const BlueprintDeckPanel = dynamic(
   () => import("@/components/card-library/BlueprintDeckPanel").then((m) => m.BlueprintDeckPanel),
   { ssr: false },
 );
+const ProjectDeckPanel = dynamic(
+  () => import("@/components/card-library/ProjectDeckPanel").then((m) => m.ProjectDeckPanel),
+  { ssr: false },
+);
 
 type View = "tasks" | "results" | "files" | "report" | "advanced" | "capabilities" | "settings" | "card-library";
 const EMPTY_CARD_INTERACTION_ORDER: string[] = [];
@@ -86,7 +90,7 @@ const PAGE_INTRO: Record<Exclude<View, "tasks">, string> = {
   capabilities: "浏览项目已安装的 Skill 与 MCP 能力，或从本地路径安装新的能力。",
   settings: "配置项目运行时偏好、API 供应商、角色绑定和诊断选项。",
   advanced: "查看项目图结构、Git 历史、运行时诊断和卡片详情。",
-  "card-library": "浏览牌库并把可复用的分析牌实例化到当前项目。",
+  "card-library": "管理项目牌库，审查并把可复用的分析牌发布到全局牌库。",
 };
 
 function useMediaQuery(query: string) {
@@ -834,7 +838,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 : view === "settings"
                 ? "工作台设置"
                 : view === "card-library"
-                ? "牌库"
+                ? "项目牌库"
                 : "技术详情"
             }
           />
@@ -949,7 +953,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             </div>
           ) : null}
           {view === "capabilities" ? (
-            <CapabilitiesPanel projectId={projectId} pythonRuntimes={environmentQuery.data?.python_runtimes ?? []} rRuntimes={environmentQuery.data?.r_runtimes ?? []} assets={snapshot.graph.assets} />
+            <CapabilitiesPanel projectId={projectId} />
           ) : view === "settings" ? (
             <SettingsPanels
               projectId={projectId}
@@ -959,12 +963,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               readOnly={autoLocked}
             />
           ) : view === "card-library" ? (
-            <BlueprintDeckPanel
-              projectId={projectId}
-              pythonRuntimes={environmentQuery.data?.python_runtimes ?? []}
-              rRuntimes={environmentQuery.data?.r_runtimes ?? []}
-              assets={snapshot.graph.assets}
-            />
+            <ProjectDeckPanel projectId={projectId} />
           ) : null}
         </div>
         ) : null}
@@ -1098,7 +1097,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 </>
               ) : null}
               {view === "capabilities" ? (
-                <CapabilitiesPanel projectId={projectId} pythonRuntimes={environmentQuery.data?.python_runtimes ?? []} rRuntimes={environmentQuery.data?.r_runtimes ?? []} assets={snapshot.graph.assets} />
+                <CapabilitiesPanel projectId={projectId} />
               ) : view === "settings" ? (
                 <SettingsPanels
                   projectId={projectId}
@@ -1108,12 +1107,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   readOnly={autoLocked}
                 />
               ) : view === "card-library" ? (
-                <BlueprintDeckPanel
-                  projectId={projectId}
-                  pythonRuntimes={environmentQuery.data?.python_runtimes ?? []}
-                  rRuntimes={environmentQuery.data?.r_runtimes ?? []}
-                  assets={snapshot.graph.assets}
-                />
+                <ProjectDeckPanel projectId={projectId} />
               ) : null}
             </div>
           ) : null}

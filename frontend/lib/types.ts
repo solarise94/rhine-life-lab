@@ -918,3 +918,70 @@ export interface InstantiateBlueprintRequest {
   r_runtime?: string | null;
   parameter_values: Record<string, unknown>;
 }
+
+// ---------------------------------------------------------------------------
+// Project Card Library / Blueprint Drafts
+// ---------------------------------------------------------------------------
+
+export type DraftStatus =
+  | "draft"
+  | "needs_review"
+  | "approved"
+  | "rejected"
+  | "published";
+
+export interface BlueprintReviewIssue {
+  severity: "info" | "warning" | "error";
+  field: string;
+  message: string;
+  suggested_value?: string | null;
+}
+
+export interface BlueprintReviewResult {
+  verdict: "pass" | "warn" | "fail";
+  summary: string;
+  issues: BlueprintReviewIssue[];
+}
+
+export interface CardBlueprintDraft {
+  draft_id: string;
+  status: DraftStatus;
+  blueprint: CardBlueprint;
+  review: BlueprintReviewResult | null;
+  global_blueprint_id: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CardBlueprintDraftIndexEntry {
+  draft_id: string;
+  status: DraftStatus;
+  global_blueprint_id: string | null;
+  title: string;
+  summary: string;
+  tags: string[];
+  domain: string;
+  skills: string[];
+  mcp_servers: string[];
+  runtime_hints: string[];
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ProjectDraftListResponse {
+  entries: CardBlueprintDraftIndexEntry[];
+}
+
+export interface CreateProjectDraftResponse {
+  draft_id: string;
+  warnings: string[];
+}
+
+export interface ProjectDraftResponse {
+  draft: CardBlueprintDraft;
+}
+
+export interface PublishDraftResponse {
+  draft_id: string;
+  global_blueprint_id: string;
+}

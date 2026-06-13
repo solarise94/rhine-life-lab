@@ -4,7 +4,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { CreateProjectPayload, InstantiateBlueprintRequest } from "@/lib/types";
+import {
+  CreateProjectPayload,
+  InstantiateBlueprintRequest,
+  ProjectDraftListResponse,
+  ProjectDraftResponse,
+  BlueprintReviewResult,
+} from "@/lib/types";
 
 export function useProjects() {
   return useQuery({
@@ -343,6 +349,64 @@ export function useInstantiateCardBlueprint(projectId: string) {
       api.instantiateCardBlueprint(projectId, blueprintId, payload),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.project(projectId) });
+    },
+  });
+}
+
+export function useProjectCardLibrary(projectId: string) {
+  return useQuery<ProjectDraftListResponse>({
+    queryKey: queryKeys.projectCardLibrary(projectId),
+    queryFn: () => api.getProjectCardLibrary(projectId),
+  });
+}
+
+export function useAddCardToProjectLibrary() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ projectId, cardId }: { projectId: string; cardId: string }) =>
+      api.addCardToProjectLibrary(projectId, cardId),
+    onSuccess: async (_data, variables) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardLibrary(variables.projectId) });
+    },
+  });
+}
+
+export function useProjectCardDraft(projectId: string, draftId: string | null) {
+  return useQuery<ProjectDraftResponse>({
+    queryKey: queryKeys.projectCardDraft(projectId, draftId ?? ""),
+    queryFn: () => api.getProjectCardDraft(projectId, draftId!),
+    enabled: Boolean(draftId),
+  });
+}
+
+export function useReviewProjectCardDraft(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (draftId: string) => api.reviewProjectCardDraft(projectId, draftId),
+    onSuccess: async (_data, draftId) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardLibrary(projectId) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardDraft(projectId, draftId) });
+    },
+  });
+}
+
+export function usePublishProjectCardDraft(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (draftId: string) => api.publishProjectCardDraft(projectId, draftId),
+    onSuccess: async (_data, draftId) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardLibrary(projectId) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardDraft(projectId, draftId) });
+    },
+  });
+}
+
+export function useDeleteProjectCardDraft(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (draftId: string) => api.deleteProjectCardDraft(projectId, draftId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardLibrary(projectId) });
     },
   });
 }

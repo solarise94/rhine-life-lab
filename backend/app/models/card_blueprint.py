@@ -223,3 +223,72 @@ class InstantiateResult(BaseModel):
     card_id: str
     warnings: list[str] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Project draft flow models
+# ---------------------------------------------------------------------------
+
+
+DraftStatus = Literal["draft", "needs_review", "approved", "rejected", "published"]
+
+
+class BlueprintReviewIssue(BaseModel):
+    severity: Literal["info", "warning", "error"]
+    field: str
+    message: str
+    suggested_value: str | None = None
+
+
+class BlueprintReviewResult(BaseModel):
+    verdict: Literal["pass", "warn", "fail"]
+    summary: str
+    issues: list[BlueprintReviewIssue] = Field(default_factory=list)
+
+
+class CardBlueprintDraft(BaseModel):
+    draft_id: str
+    status: DraftStatus
+    blueprint: CardBlueprint
+    review: BlueprintReviewResult | None = None
+    global_blueprint_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class CardBlueprintDraftIndexEntry(BaseModel):
+    draft_id: str
+    status: DraftStatus
+    global_blueprint_id: str | None = None
+    title: str
+    summary: str = ""
+    tags: list[str] = Field(default_factory=list)
+    domain: str = ""
+    skills: list[str] = Field(default_factory=list)
+    mcp_servers: list[str] = Field(default_factory=list)
+    runtime_hints: list[str] = Field(default_factory=list)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class CreateProjectDraftRequest(BaseModel):
+    project_id: str
+    card_id: str
+
+
+class CreateProjectDraftResponse(BaseModel):
+    draft_id: str
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ProjectDraftListResponse(BaseModel):
+    entries: list[CardBlueprintDraftIndexEntry]
+
+
+class ProjectDraftResponse(BaseModel):
+    draft: CardBlueprintDraft
+
+
+class PublishDraftResponse(BaseModel):
+    draft_id: str
+    global_blueprint_id: str

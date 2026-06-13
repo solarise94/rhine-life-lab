@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse
 
 from app.models.card_blueprint import (
     CardBlueprint,
+    CreateProjectDraftRequest,
     InstantiateRequest,
     SaveFromCardRequest,
     UpdateBlueprintRequest,
@@ -159,6 +160,73 @@ async def upload_cover(
 # ---------------------------------------------------------------------------
 
 project_router = APIRouter(prefix="/projects/{project_id}/card-library", tags=["card-library"])
+
+
+@project_router.get("")
+def list_project_drafts(
+    project_id: str,
+    service: CardLibraryService = Depends(_get_service),
+) -> dict:
+    return {"entries": service.list_project_drafts(project_id)}
+
+
+@project_router.post("")
+def create_project_draft(
+    project_id: str,
+    body: CreateProjectDraftRequest,
+    service: CardLibraryService = Depends(_get_service),
+) -> dict:
+    try:
+        result = service.create_project_draft(project_id, body.card_id)
+        return {"draft_id": result.draft_id, "warnings": result.warnings}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@project_router.get("/{draft_id}")
+def get_project_draft(
+    project_id: str,
+    draft_id: str,
+    service: CardLibraryService = Depends(_get_service),
+) -> dict:
+    try:
+        return {"draft": service.get_project_draft(project_id, draft_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@project_router.delete("/{draft_id}")
+def delete_project_draft(
+    project_id: str,
+    draft_id: str,
+    service: CardLibraryService = Depends(_get_service),
+) -> dict:
+    return service.delete_project_draft(project_id, draft_id)
+
+
+@project_router.post("/{draft_id}/review")
+def review_project_draft(
+    project_id: str,
+    draft_id: str,
+    service: CardLibraryService = Depends(_get_service),
+) -> dict:
+    try:
+        return service.review_project_draft(project_id, draft_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@project_router.post("/{draft_id}/publish")
+def publish_project_draft(
+    project_id: str,
+    draft_id: str,
+    service: CardLibraryService = Depends(_get_service),
+) -> dict:
+    try:
+        result = service.publish_project_draft(project_id, draft_id)
+        return {"draft_id": result.draft_id, "global_blueprint_id": result.global_blueprint_id}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @project_router.post("/{blueprint_id}/instantiate")
